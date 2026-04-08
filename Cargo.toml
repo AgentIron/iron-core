@@ -1,0 +1,55 @@
+[package]
+name = "iron-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Paul Mooring"]
+license = "Apache-2.0"
+rust-version = "1.91"
+description = "Core AgentIron loop, session state, and tool registry"
+readme = "README.md"
+repository = "https://github.com/AgentIron/iron-core"
+
+[dependencies]
+iron-providers = "0.1.0"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+futures = "0.3"
+pin-project = "1"
+
+# ACP SDK
+agent-client-protocol = { version = "0.10", features = ["unstable_session_close"] }
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+# Schema validation
+jsonschema = "0.29"
+
+# Built-in tool dependencies
+regex = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+url = "2"
+
+# Embedded Python runtime (Monty)
+#
+# Position B adoption: pinned to upstream git main branch.
+# crates.io only has a 0.0.0 placeholder, so a git dep is the only viable path.
+# Re-evaluate once Monty publishes a usable semver release.
+# Do NOT fork unless upstream cannot resolve a real Level 3 portability blocker.
+#
+# Publication of iron-core to crates.io is deferred until monty is available
+# there, because crates.io rejects manifests containing git dependencies.
+monty = { git = "https://github.com/pydantic/monty", branch = "main", optional = true }
+num-bigint = { version = "0.4", optional = true }
+num-traits = { version = "0.2", optional = true }
+
+[features]
+default = []
+embedded-python = ["monty", "num-bigint", "num-traits"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"

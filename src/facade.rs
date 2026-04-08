@@ -1,0 +1,1471 @@
+use crate::{
+    capability::{CapabilityBackend, CapabilityDescriptor, CapabilityId},
+    config::Config,
+    connection::{ClientChannel, IronConnection},
+    context::compaction::{CompactionCheckpoint, CompactionEngine, CompactionReason},
+    context::handoff::{HandoffExporter, HandoffImporter},
+    durable::{
+        ContentBlock, DurableSession, DurableToolRecord, SessionId, StructuredMessage,
+        TimelineEntry,
+    },
+    error::RuntimeError,
+    runtime::{ConnectionId, IronRuntime},
+    tool::Tool,
+};
+use agent_client_protocol::Agent;
+use futures::Stream;
+use iron_providers::Provider;
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    pin::Pin,
+    rc::Rc,
+    sync::{Arc, Mutex},
+    task::{Context, Poll},
+};
+
+// Permission option ID constants to avoid magic strings
+const PERMISSION_ALLOW_ONCE: &str = "allow_once";
+const PERMISSION_REJECT_ONCE: &str = "reject_once";
+
+// ---------------------------------------------------------------------------
+// Legacy event types (preserved for backward compatibility)
+// ---------------------------------------------------------------------------
+
+/// Events emitted during a prompt/turn using the legacy blocking API.
+///
+/// These events are collected by [`AgentSession::drain_events`] after
+/// a call to [`AgentSession::prompt`] completes. For streaming access
+/// to events, use [`AgentSession::prompt_stream`] instead.
+///
+/// # Example
+///
+/// ```ignore
+/// let outcome = session.prompt("Hello").await;
+/// for event in session.drain_events() {
+///     match event {
+///         AgentEvent::TextChunk { text } => println!("{}", text),
+///         AgentEvent::ToolCallStarted { call_id, tool_name } => {
+///             println!("Tool {} started", tool_name);
+///         }
+///         _ => {}
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub enum AgentEvent {
+    /// A chunk of text output from the model.
+    TextChunk {
+        /// The text content.
+        text: String,
+    },
+    /// A tool call has started executing.
+    ToolCallStarted {
+        /// Unique identifier for this tool call.
+        call_id: String,
+        /// Name of the tool being called.
+        tool_name: String,
+    },
+    /// An update on the status of a tool call.
+    ToolCallUpdate {
+        /// Unique identifier for this tool call.
+        call_id: String,
+        /// Current status of the tool call.
+        status: FacadeToolStatus,
+        /// Optional output from the tool (if available).
+        output: Option<serde_json::Value>,
+    },
+}
+
+/// Status of a tool call in the legacy event API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FacadeToolStatus {
+    /// The tool call is currently in progress.
+    InProgress,
+    /// The tool call completed successfully.
+    Completed,
+    /// The tool call failed.
+    Failed,
+}
+
+/// Outcome of a prompt/turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptOutcome {
+    /// The turn completed normally.
+    EndTurn,
+    /// The turn was cancelled by the user.
+    Cancelled,
+    /// The maximum number of turn requests was reached.
+    MaxTurnRequests,
+}
+
+impl From<agent_client_protocol::StopReason> for PromptOutcome {
+    fn from(reason: agent_client_protocol::StopReason) -> Self {
+        match reason {
+            agent_client_protocol::StopReason::EndTurn => PromptOutcome::EndTurn,
+            agent_client_protocol::StopReason::Cancelled => PromptOutcome::Cancelled,
+            agent_client_protocol::StopReason::MaxTurnRequests => PromptOutcome::MaxTurnRequests,
+            _ => PromptOutcome::EndTurn,
+        }
+    }
+}
+
+/// Verdict for a permission request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionVerdict {
+    /// Allow this tool call to proceed.
+    AllowOnce,
+    /// Deny this tool call.
+    Deny,
+    /// Cancel the entire prompt.
+    Cancel,
+}
+
+/// A request for user approval of a tool call.
+#[derive(Debug, Clone)]
+pub struct PermissionRequest {
+    /// Unique identifier for this tool call.
+    pub call_id: String,
+    /// Name of the tool being called.
+    pub tool_name: String,
+    /// Arguments passed to the tool.
+    pub arguments: serde_json::Value,
+}
+
+// ---------------------------------------------------------------------------
+// Stream-first prompt event types
+// ---------------------------------------------------------------------------
+
+/// Events emitted during a streaming prompt session.
+///
+/// These events are produced by the [`PromptEvents`] stream returned from
+/// [`AgentSession::prompt_stream`]. They provide real-time visibility into
+/// the agent's progress, including model output, tool calls, and user
+/// approval requests.
+///
+/// # Event Ordering
+///
+/// Events are emitted in the order they occur:
+/// 1. Zero or more [`Status`](PromptEvent::Status) events
+/// 2. Zero or more [`Output`](PromptEvent::Output) events (text from the model)
+/// 3. Zero or more [`ToolCall`](PromptEvent::ToolCall) events
+/// 4. For each tool requiring approval: an [`ApprovalRequest`](PromptEvent::ApprovalRequest)
+/// 5. For each tool call: a [`ToolResult`](PromptEvent::ToolResult)
+/// 6. Finally, a [`Complete`](PromptEvent::Complete) event
+///
+/// # Example
+///
+/// ```ignore
+/// let (handle, mut events) = session.prompt_stream("Hello");
+/// while let Some(event) = events.next().await {
+///     match event {
+///         PromptEvent::Output { text } => print!("{}", text),
+///         PromptEvent::ApprovalRequest { call_id, tool_name, .. } => {
+///             println!("\nTool {} requires approval", tool_name);
+///             handle.approve(&call_id).unwrap();
+///         }
+///         PromptEvent::Complete { outcome } => break,
+///         _ => {}
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub enum PromptEvent {
+    /// A status update from the agent.
+    Status {
+        /// The status message.
+        message: String,
+    },
+    /// Text output from the language model.
+    Output {
+        /// The text content.
+        text: String,
+    },
+    /// A tool call has been initiated.
+    ToolCall {
+        /// Unique identifier for this tool call.
+        call_id: String,
+        /// Name of the tool being called.
+        tool_name: String,
+        /// Arguments passed to the tool.
+        arguments: serde_json::Value,
+    },
+    /// A tool call requires user approval.
+    ApprovalRequest {
+        /// Unique identifier for this tool call.
+        call_id: String,
+        /// Name of the tool being called.
+        tool_name: String,
+        /// Arguments passed to the tool.
+        arguments: serde_json::Value,
+    },
+    /// A tool call has completed.
+    ToolResult {
+        /// Unique identifier for this tool call.
+        call_id: String,
+        /// Name of the tool that was called.
+        tool_name: String,
+        /// Status of the tool execution.
+        status: ToolResultStatus,
+        /// The result value (if successful).
+        result: Option<serde_json::Value>,
+    },
+    /// Activity from an embedded Python script.
+    ScriptActivity {
+        /// Unique identifier for the script.
+        script_id: String,
+        /// The parent tool call that started the script.
+        parent_call_id: String,
+        /// Type of activity.
+        activity_type: ScriptActivityType,
+        /// Current status of the activity.
+        status: ScriptActivityStatus,
+        /// Additional details about the activity.
+        detail: Option<serde_json::Value>,
+    },
+    /// The prompt has completed.
+    Complete {
+        /// The final outcome of the prompt.
+        outcome: PromptOutcome,
+    },
+}
+
+/// Types of activities that can occur during embedded Python script execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptActivityType {
+    /// The script has started.
+    ScriptStarted,
+    /// A phase update during script execution.
+    ScriptPhase,
+    /// The script has completed.
+    ScriptCompleted,
+    /// A child tool call started within the script.
+    ChildToolCallStarted,
+    /// A child tool call completed within the script.
+    ChildToolCallCompleted,
+    /// A child tool call failed within the script.
+    ChildToolCallFailed,
+}
+
+/// Status of a script activity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptActivityStatus {
+    /// The activity is currently running.
+    Running,
+    /// The activity completed successfully.
+    Completed,
+    /// The activity completed but with some failures.
+    CompletedWithFailures,
+    /// The activity failed.
+    Failed,
+    /// The activity was cancelled.
+    Cancelled,
+}
+
+/// Status of a tool call result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolResultStatus {
+    /// The tool call completed successfully.
+    Completed,
+    /// The tool call failed.
+    Failed,
+    /// The tool call was denied by the user.
+    Denied,
+    /// The tool call was cancelled.
+    Cancelled,
+}
+
+/// Status of an active prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptStatus {
+    /// The prompt is pending (not yet started).
+    Pending,
+    /// The prompt is currently running.
+    Running,
+    /// The prompt has completed.
+    Completed,
+    /// The prompt was cancelled.
+    Cancelled,
+}
+
+/// Handle to control an active streaming prompt.
+///
+/// Returned by [`AgentSession::prompt_stream`], this handle allows you to
+/// approve or deny tool calls that require permission, or cancel the entire
+/// prompt.
+///
+/// # Example
+///
+/// ```ignore
+/// let (handle, mut events) = session.prompt_stream("Hello");
+///
+/// // Later, when an approval request is received...
+/// handle.approve("call-123").unwrap();
+///
+/// // Or cancel the entire prompt
+/// handle.cancel().await;
+/// ```
+pub struct PromptHandle {
+    approval_resolvers:
+        Rc<RefCell<HashMap<String, tokio::sync::oneshot::Sender<PermissionVerdict>>>>,
+    session: AgentSession,
+    status: Rc<RefCell<PromptStatus>>,
+}
+
+impl PromptHandle {
+    /// Approve a tool call that is waiting for permission.
+    ///
+    /// # Arguments
+    ///
+    /// * `call_id` - The unique identifier of the tool call to approve.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no pending approval exists for the given `call_id`.
+    pub fn approve(&self, call_id: &str) -> Result<(), String> {
+        let mut resolvers = self.approval_resolvers.borrow_mut();
+        match resolvers.remove(call_id) {
+            Some(tx) => {
+                let _ = tx.send(PermissionVerdict::AllowOnce);
+                Ok(())
+            }
+            None => Err(format!("no pending approval for call_id: {}", call_id)),
+        }
+    }
+
+    /// Deny a tool call that is waiting for permission.
+    ///
+    /// # Arguments
+    ///
+    /// * `call_id` - The unique identifier of the tool call to deny.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no pending approval exists for the given `call_id`.
+    pub fn deny(&self, call_id: &str) -> Result<(), String> {
+        let mut resolvers = self.approval_resolvers.borrow_mut();
+        match resolvers.remove(call_id) {
+            Some(tx) => {
+                let _ = tx.send(PermissionVerdict::Deny);
+                Ok(())
+            }
+            None => Err(format!("no pending approval for call_id: {}", call_id)),
+        }
+    }
+
+    /// Cancel the active prompt.
+    ///
+    /// This will stop any in-progress model inference and tool execution.
+    /// All pending approvals will be resolved with a cancel verdict.
+    pub async fn cancel(&self) {
+        {
+            let mut resolvers = self.approval_resolvers.borrow_mut();
+            for (_, tx) in resolvers.drain() {
+                let _ = tx.send(PermissionVerdict::Cancel);
+            }
+        }
+        *self.status.borrow_mut() = PromptStatus::Cancelled;
+        self.session.cancel().await;
+    }
+
+    /// Get the current status of the prompt.
+    pub fn status(&self) -> PromptStatus {
+        *self.status.borrow()
+    }
+}
+
+impl std::fmt::Debug for PromptHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PromptHandle")
+            .field("status", &*self.status.borrow())
+            .finish()
+    }
+}
+
+/// A stream of prompt events.
+///
+/// Returned by [`AgentSession::prompt_stream`], this struct provides
+/// asynchronous access to events emitted during a prompt session.
+/// It implements [`Stream`] and can be polled for events.
+///
+/// # Example
+///
+/// ```ignore
+/// let (handle, mut events) = session.prompt_stream("Hello");
+///
+/// while let Some(event) = events.next().await {
+///     match event {
+///         PromptEvent::Output { text } => print!("{}", text),
+///         PromptEvent::Complete { .. } => break,
+///         _ => {}
+///     }
+/// }
+/// ```
+pub struct PromptEvents {
+    rx: tokio::sync::mpsc::UnboundedReceiver<PromptEvent>,
+}
+
+impl PromptEvents {
+    /// Wait for the next event from the stream.
+    ///
+    /// Returns `None` if the stream has ended.
+    pub async fn next(&mut self) -> Option<PromptEvent> {
+        self.rx.recv().await
+    }
+
+    /// Try to get the next event without blocking.
+    ///
+    /// Returns `None` if no event is available or if the stream has ended.
+    pub fn try_next(&mut self) -> Option<PromptEvent> {
+        self.rx.try_recv().ok()
+    }
+
+    /// Convert this into a [`Stream`] for use with stream combinators.
+    pub fn into_stream(self) -> Pin<Box<dyn Stream<Item = PromptEvent>>> {
+        Box::pin(self)
+    }
+}
+
+impl Stream for PromptEvents {
+    type Item = PromptEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
+    }
+}
+
+impl std::fmt::Debug for PromptEvents {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PromptEvents").finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stream prompt state (internal)
+// ---------------------------------------------------------------------------
+
+struct StreamPromptState {
+    event_tx: tokio::sync::mpsc::UnboundedSender<PromptEvent>,
+    approval_resolvers:
+        Rc<RefCell<HashMap<String, tokio::sync::oneshot::Sender<PermissionVerdict>>>>,
+    tool_name_index: Rc<RefCell<HashMap<String, String>>>,
+}
+
+// ---------------------------------------------------------------------------
+// IronAgent
+// ---------------------------------------------------------------------------
+
+/// The main entry point for interacting with an Iron agent.
+///
+/// `IronAgent` is the top-level type for creating and managing agent connections.
+/// It owns the runtime, provider, and tool registry. Use [`IronAgent::connect`]
+/// to establish a connection and begin interacting with the agent.
+///
+/// # Example
+///
+/// ```ignore
+/// use iron_core::{IronAgent, Config};
+/// use iron_providers::{OpenAiProvider, OpenAiConfig};
+///
+/// let config = Config::default();
+/// let provider = OpenAiProvider::new(OpenAiConfig::new("sk-...".into()));
+/// let agent = IronAgent::new(config, provider);
+///
+/// // Register custom tools
+/// agent.register_tool(my_custom_tool);
+///
+/// // Connect and create a session
+/// let conn = agent.connect();
+/// let session = conn.create_session().unwrap();
+/// ```
+pub struct IronAgent {
+    runtime: IronRuntime,
+}
+
+impl IronAgent {
+    /// Create a new agent with the given configuration and provider.
+    ///
+    /// This creates an agent with its own private Tokio runtime. For integration
+    /// with an existing Tokio runtime, use [`IronAgent::with_tokio_handle`].
+    pub fn new<P: Provider + 'static>(config: Config, provider: P) -> Self {
+        Self {
+            runtime: IronRuntime::new(config, provider),
+        }
+    }
+
+    /// Create a new agent using an existing Tokio runtime handle.
+    ///
+    /// This is useful when integrating Iron into an existing async application
+    /// that already manages its own Tokio runtime.
+    pub fn with_tokio_handle<P: Provider + 'static>(
+        config: Config,
+        provider: P,
+        handle: tokio::runtime::Handle,
+    ) -> Self {
+        Self {
+            runtime: IronRuntime::from_handle(config, provider, handle),
+        }
+    }
+
+    /// Get a reference to the underlying runtime.
+    pub fn runtime(&self) -> &IronRuntime {
+        &self.runtime
+    }
+
+    /// Register a custom tool with the agent.
+    ///
+    /// Tools must implement the [`Tool`] trait. Once registered,
+    /// the tool becomes available for the model to call during prompts.
+    pub fn register_tool<T: Tool + 'static>(&self, tool: T) {
+        self.runtime.register_tool(tool);
+    }
+
+    /// Register all built-in tools with the agent.
+    ///
+    /// Built-in tools include file operations (read, write, edit), shell commands,
+    /// web fetching, and search capabilities. Use the config to control which
+    /// tools are enabled.
+    pub fn register_builtin_tools(&self, config: &crate::builtin::BuiltinToolConfig) {
+        self.runtime.register_builtin_tools(config);
+    }
+
+    /// Register the Python execution tool (requires `embedded-python` feature).
+    #[cfg(feature = "embedded-python")]
+    pub fn register_python_exec_tool(&self) {
+        self.runtime
+            .register_tool(crate::embedded_python::PythonExecTool::new());
+    }
+
+    /// Get a reference to the Tokio runtime handle.
+    pub fn tokio_handle(&self) -> &tokio::runtime::Handle {
+        self.runtime.tokio_handle()
+    }
+
+    /// Register a capability with the agent.
+    ///
+    /// Capabilities extend the agent with additional functionality beyond tools.
+    pub fn register_capability(&self, descriptor: CapabilityDescriptor) {
+        self.runtime.register_capability(descriptor);
+    }
+
+    /// Set the backend implementation for a capability.
+    pub fn set_capability_backend(&self, id: CapabilityId, backend: CapabilityBackend) {
+        self.runtime.set_capability_backend(id, backend);
+    }
+
+    /// Establish a new connection to the agent.
+    ///
+    /// Returns an [`AgentConnection`] which can be used to create sessions
+    /// and interact with the agent. Multiple connections can exist simultaneously.
+    pub fn connect(&self) -> AgentConnection {
+        AgentConnection::new(self.runtime.clone())
+    }
+
+    /// Shut down the agent runtime.
+    ///
+    /// This will cancel all active prompts and close all connections.
+    /// After shutdown, no new connections can be established.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
+    }
+}
+
+impl Clone for IronAgent {
+    fn clone(&self) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AgentConnection
+// ---------------------------------------------------------------------------
+
+type AsyncPermissionHandler =
+    Box<dyn Fn(PermissionRequest) -> Pin<Box<dyn std::future::Future<Output = PermissionVerdict>>>>;
+
+type SyncPermissionHandler = Rc<RefCell<Option<Box<dyn Fn(&str) -> PermissionVerdict>>>>;
+
+/// A connection to an Iron agent.
+///
+/// Connections are the primary interface for creating and managing sessions.
+/// Each connection has its own event queue and can set up permission handlers
+/// for tool approval. Multiple connections can coexist, each with their own
+/// set of sessions.
+///
+/// # Session Ownership
+///
+/// Sessions created through a connection are owned by that connection. Only
+/// the owning connection can prompt, cancel, or close its sessions. This is
+/// enforced at the runtime level.
+///
+/// # Example
+///
+/// ```ignore
+/// let conn = agent.connect();
+///
+/// // Set up a permission handler
+/// conn.on_permission(|call_id| {
+///     println!("Tool call {} requires approval", call_id);
+///     PermissionVerdict::AllowOnce
+/// });
+///
+/// // Create a session
+/// let session = conn.create_session().unwrap();
+/// ```
+pub struct AgentConnection {
+    inner: Rc<IronConnection>,
+    events: Rc<RefCell<Vec<AgentEvent>>>,
+    permission_handler: SyncPermissionHandler,
+    async_permission_handler: Rc<RefCell<Option<AsyncPermissionHandler>>>,
+    active_streams: Rc<RefCell<HashMap<String, StreamPromptState>>>,
+}
+
+impl AgentConnection {
+    fn new(runtime: IronRuntime) -> Self {
+        let inner = Rc::new(IronConnection::new(runtime));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let permission_handler = Rc::new(RefCell::new(None));
+        let async_permission_handler = Rc::new(RefCell::new(None));
+        let active_streams = Rc::new(RefCell::new(HashMap::new()));
+
+        let client: Rc<dyn ClientChannel> = Rc::new(FacadeClientChannel {
+            events: events.clone(),
+            permission_handler: permission_handler.clone(),
+            async_permission_handler: async_permission_handler.clone(),
+            active_streams: active_streams.clone(),
+        });
+        inner.set_client(client);
+
+        Self {
+            inner,
+            events,
+            permission_handler,
+            async_permission_handler,
+            active_streams,
+        }
+    }
+
+    /// Get the unique identifier for this connection.
+    pub fn id(&self) -> ConnectionId {
+        self.inner.id()
+    }
+
+    /// Set a synchronous permission handler for tool approval.
+    ///
+    /// The handler receives the call ID and should return a [`PermissionVerdict`].
+    /// This is called when a tool requiring approval is invoked.
+    pub fn on_permission(&self, handler: impl Fn(&str) -> PermissionVerdict + 'static) {
+        *self.permission_handler.borrow_mut() = Some(Box::new(handler));
+    }
+
+    /// Set an asynchronous permission handler for tool approval.
+    ///
+    /// The handler receives a [`PermissionRequest`] and returns a future that
+    /// resolves to a [`PermissionVerdict`]. This is useful when approval
+    /// requires user interaction or external confirmation.
+    pub fn on_permission_async(
+        &self,
+        handler: impl Fn(PermissionRequest) -> Pin<Box<dyn std::future::Future<Output = PermissionVerdict>>>
+            + 'static,
+    ) {
+        *self.async_permission_handler.borrow_mut() = Some(Box::new(handler));
+    }
+
+    /// Create a new session on this connection.
+    ///
+    /// Returns an [`AgentSession`] which can be used to send prompts and
+    /// receive responses. Each session maintains its own conversation history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the runtime has been shut down.
+    pub fn create_session(&self) -> Result<AgentSession, RuntimeError> {
+        let connection_id = self.inner.id();
+        let (session_id, durable) = self.inner.runtime().create_session(connection_id)?;
+        Ok(AgentSession {
+            id: session_id,
+            durable,
+            connection: self.inner.clone(),
+            events: self.events.clone(),
+            active_streams: self.active_streams.clone(),
+        })
+    }
+
+    /// Close a session, releasing its resources.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is not owned by this connection.
+    pub fn close_session(&self, session: &AgentSession) -> Result<(), RuntimeError> {
+        let owner = self.inner.runtime().get_session_connection(session.id);
+        if owner != Some(self.inner.id()) {
+            return Err(RuntimeError::Connection(
+                "session not owned by this connection".into(),
+            ));
+        }
+        self.inner.runtime().close_session(session.id);
+        Ok(())
+    }
+
+    /// Get the list of active session IDs on this connection.
+    pub fn active_sessions(&self) -> Vec<SessionId> {
+        self.inner
+            .runtime()
+            .sessions_for_connection(self.inner.id())
+    }
+
+    /// Create a new session from a handoff bundle.
+    ///
+    /// This restores a session that was previously exported via
+    /// [`AgentSession::export_handoff`]. The session will have the
+    /// conversation history and context from the bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the runtime has been shut down or if the
+    /// session ID conflicts with an existing session.
+    pub fn create_session_from_handoff(
+        &self,
+        bundle: crate::context::HandoffBundle,
+    ) -> Result<AgentSession, RuntimeError> {
+        let connection_id = self.inner.id();
+        let durable = crate::context::HandoffImporter::hydrate_into_new(bundle);
+        let session_id = durable.id;
+
+        self.inner
+            .runtime()
+            .insert_session(session_id, durable, connection_id)?;
+
+        let durable = self
+            .inner
+            .runtime()
+            .get_session(session_id)
+            .ok_or_else(|| RuntimeError::Connection("Failed to retrieve created session".into()))?;
+
+        Ok(AgentSession {
+            id: session_id,
+            durable,
+            connection: self.inner.clone(),
+            events: self.events.clone(),
+            active_streams: self.active_streams.clone(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FacadeClientChannel (routes ACP notifications and permission requests)
+// ---------------------------------------------------------------------------
+
+struct FacadeClientChannel {
+    events: Rc<RefCell<Vec<AgentEvent>>>,
+    permission_handler: SyncPermissionHandler,
+    async_permission_handler: Rc<RefCell<Option<AsyncPermissionHandler>>>,
+    active_streams: Rc<RefCell<HashMap<String, StreamPromptState>>>,
+}
+
+impl FacadeClientChannel {
+    fn emit_stream_event(&self, event: PromptEvent) {
+        let streams = self.active_streams.borrow();
+        for (_, state) in streams.iter() {
+            let _ = state.event_tx.send(event.clone());
+        }
+    }
+}
+
+impl ClientChannel for FacadeClientChannel {
+    fn send_notification(
+        &self,
+        notification: agent_client_protocol::SessionNotification,
+    ) -> Pin<Box<dyn std::future::Future<Output = agent_client_protocol::Result<()>>>> {
+        if let Some(event) = convert_notification(&notification) {
+            self.events.borrow_mut().push(event.clone());
+        }
+        let session_key = notification.session_id.to_string();
+        let streams = self.active_streams.borrow();
+        if let Some(state) = streams.get(&session_key) {
+            if let Some(prompt_event) = convert_notification_to_prompt_event_with_index(
+                &notification,
+                &state.tool_name_index,
+            ) {
+                let _ = state.event_tx.send(prompt_event);
+            }
+        }
+        drop(streams);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn emit_script_activity(
+        &self,
+        script_id: &str,
+        parent_call_id: &str,
+        activity_type: &str,
+        status: &str,
+        detail: Option<serde_json::Value>,
+    ) -> Pin<Box<dyn std::future::Future<Output = ()>>> {
+        let activity = match activity_type {
+            "script_started" => ScriptActivityType::ScriptStarted,
+            "script_phase" => ScriptActivityType::ScriptPhase,
+            "script_completed" => ScriptActivityType::ScriptCompleted,
+            "child_tool_call_started" => ScriptActivityType::ChildToolCallStarted,
+            "child_tool_call_completed" => ScriptActivityType::ChildToolCallCompleted,
+            "child_tool_call_failed" => ScriptActivityType::ChildToolCallFailed,
+            _ => return Box::pin(async {}),
+        };
+        let act_status = match status {
+            "running" => ScriptActivityStatus::Running,
+            "completed" => ScriptActivityStatus::Completed,
+            "completed_with_failures" => ScriptActivityStatus::CompletedWithFailures,
+            "failed" => ScriptActivityStatus::Failed,
+            "cancelled" => ScriptActivityStatus::Cancelled,
+            _ => return Box::pin(async {}),
+        };
+        self.emit_stream_event(PromptEvent::ScriptActivity {
+            script_id: script_id.to_string(),
+            parent_call_id: parent_call_id.to_string(),
+            activity_type: activity,
+            status: act_status,
+            detail,
+        });
+        Box::pin(async {})
+    }
+
+    fn request_permission(
+        &self,
+        request: agent_client_protocol::RequestPermissionRequest,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<
+                Output = agent_client_protocol::Result<
+                    agent_client_protocol::RequestPermissionResponse,
+                >,
+            >,
+        >,
+    > {
+        let call_id = request.tool_call.tool_call_id.to_string();
+        let tool_name = request.tool_call.fields.title.clone().unwrap_or_default();
+        let arguments = request
+            .tool_call
+            .fields
+            .raw_input
+            .clone()
+            .unwrap_or_default();
+
+        let session_key = request.session_id.to_string();
+        let stream_state = self.active_streams.borrow();
+        if let Some(state) = stream_state.get(&session_key) {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            state
+                .approval_resolvers
+                .borrow_mut()
+                .insert(call_id.clone(), tx);
+
+            let event_tx = state.event_tx.clone();
+            drop(stream_state);
+
+            return Box::pin(async move {
+                let _ = event_tx.send(PromptEvent::ApprovalRequest {
+                    call_id,
+                    tool_name,
+                    arguments,
+                });
+                match rx.await {
+                    Ok(verdict) => Ok(agent_client_protocol::RequestPermissionResponse::new(
+                        verdict_to_outcome(verdict),
+                    )),
+                    Err(_) => Ok(agent_client_protocol::RequestPermissionResponse::new(
+                        verdict_to_outcome(PermissionVerdict::Deny),
+                    )),
+                }
+            });
+        }
+        drop(stream_state);
+
+        let async_handler = self.async_permission_handler.borrow();
+        if let Some(ref handler) = *async_handler {
+            let perm_req = PermissionRequest {
+                call_id,
+                tool_name,
+                arguments,
+            };
+            let future = handler(perm_req);
+            drop(async_handler);
+            return Box::pin(async move {
+                let verdict = future.await;
+                Ok(agent_client_protocol::RequestPermissionResponse::new(
+                    verdict_to_outcome(verdict),
+                ))
+            });
+        }
+        drop(async_handler);
+
+        let handler = self.permission_handler.borrow();
+        let verdict = handler
+            .as_ref()
+            .map(|h| h(&call_id))
+            .unwrap_or(PermissionVerdict::AllowOnce);
+        drop(handler);
+
+        Box::pin(async move {
+            Ok(agent_client_protocol::RequestPermissionResponse::new(
+                verdict_to_outcome(verdict),
+            ))
+        })
+    }
+}
+
+fn verdict_to_outcome(
+    verdict: PermissionVerdict,
+) -> agent_client_protocol::RequestPermissionOutcome {
+    match verdict {
+        PermissionVerdict::AllowOnce => agent_client_protocol::RequestPermissionOutcome::Selected(
+            agent_client_protocol::SelectedPermissionOutcome::new(
+                agent_client_protocol::PermissionOptionId::new(PERMISSION_ALLOW_ONCE),
+            ),
+        ),
+        PermissionVerdict::Deny => agent_client_protocol::RequestPermissionOutcome::Selected(
+            agent_client_protocol::SelectedPermissionOutcome::new(
+                agent_client_protocol::PermissionOptionId::new(PERMISSION_REJECT_ONCE),
+            ),
+        ),
+        PermissionVerdict::Cancel => agent_client_protocol::RequestPermissionOutcome::Cancelled,
+    }
+}
+
+fn convert_notification(
+    notification: &agent_client_protocol::SessionNotification,
+) -> Option<AgentEvent> {
+    match &notification.update {
+        agent_client_protocol::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+            agent_client_protocol::ContentBlock::Text(tc) => Some(AgentEvent::TextChunk {
+                text: tc.text.clone(),
+            }),
+            _ => None,
+        },
+        agent_client_protocol::SessionUpdate::ToolCall(tc) => Some(AgentEvent::ToolCallStarted {
+            call_id: tc.tool_call_id.to_string(),
+            tool_name: tc.title.clone(),
+        }),
+        agent_client_protocol::SessionUpdate::ToolCallUpdate(update) => {
+            let status = match update.fields.status {
+                Some(agent_client_protocol::ToolCallStatus::InProgress) => {
+                    FacadeToolStatus::InProgress
+                }
+                Some(agent_client_protocol::ToolCallStatus::Completed) => {
+                    FacadeToolStatus::Completed
+                }
+                Some(agent_client_protocol::ToolCallStatus::Failed) => FacadeToolStatus::Failed,
+                _ => return None,
+            };
+            Some(AgentEvent::ToolCallUpdate {
+                call_id: update.tool_call_id.to_string(),
+                status,
+                output: update.fields.raw_output.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn convert_notification_to_prompt_event_with_index(
+    notification: &agent_client_protocol::SessionNotification,
+    tool_name_index: &Rc<RefCell<HashMap<String, String>>>,
+) -> Option<PromptEvent> {
+    match &notification.update {
+        agent_client_protocol::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+            agent_client_protocol::ContentBlock::Text(tc) => Some(PromptEvent::Output {
+                text: tc.text.clone(),
+            }),
+            _ => None,
+        },
+        agent_client_protocol::SessionUpdate::ToolCall(tc) => {
+            let call_id = tc.tool_call_id.to_string();
+            let tool_name = tc.title.clone();
+            let arguments = tc.raw_input.clone().unwrap_or_default();
+            tool_name_index
+                .borrow_mut()
+                .insert(call_id.clone(), tool_name.clone());
+            Some(PromptEvent::ToolCall {
+                call_id,
+                tool_name,
+                arguments,
+            })
+        }
+        agent_client_protocol::SessionUpdate::ToolCallUpdate(update) => {
+            let call_id = update.tool_call_id.to_string();
+            let tool_name = update
+                .fields
+                .title
+                .clone()
+                .or_else(|| tool_name_index.borrow().get(&call_id).cloned())
+                .unwrap_or_default();
+            let result = update.fields.raw_output.clone();
+            let status = match update.fields.status {
+                Some(agent_client_protocol::ToolCallStatus::Completed) => {
+                    ToolResultStatus::Completed
+                }
+                Some(agent_client_protocol::ToolCallStatus::Failed) => {
+                    let is_denied = result.as_ref().is_some_and(|r| {
+                        r.get("error")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| s.contains("denied"))
+                    });
+                    if is_denied {
+                        ToolResultStatus::Denied
+                    } else {
+                        ToolResultStatus::Failed
+                    }
+                }
+                Some(agent_client_protocol::ToolCallStatus::Pending) => {
+                    return None;
+                }
+                Some(agent_client_protocol::ToolCallStatus::InProgress) => {
+                    return None;
+                }
+                _ => return None,
+            };
+            Some(PromptEvent::ToolResult {
+                call_id,
+                tool_name,
+                status,
+                result,
+            })
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AgentSession
+// ---------------------------------------------------------------------------
+
+/// A session for interacting with the agent.
+///
+/// Sessions maintain conversation history and context. Each session is owned
+/// by the connection that created it. Use the session to send prompts and
+/// receive responses from the agent.
+///
+/// # Prompt Methods
+///
+/// Two methods are available for sending prompts:
+///
+/// - [`prompt`](AgentSession::prompt) - Blocking method that waits for completion
+///   and returns the outcome. Events are collected and can be retrieved with
+///   [`drain_events`](AgentSession::drain_events).
+///
+/// - [`prompt_stream`](AgentSession::prompt_stream) - Returns a stream of events
+///   and a handle for real-time interaction. This is the preferred method for
+///   interactive applications.
+///
+/// # Example
+///
+/// ```ignore
+/// let session = conn.create_session().unwrap();
+///
+/// // Using the blocking API
+/// let outcome = session.prompt("Hello, world!").await;
+/// for event in session.drain_events() {
+///     println!("{:?}", event);
+/// }
+///
+/// // Using the streaming API
+/// let (handle, mut events) = session.prompt_stream("Hello again");
+/// while let Some(event) = events.next().await {
+///     match event {
+///         PromptEvent::Output { text } => print!("{}", text),
+///         PromptEvent::Complete { outcome } => break,
+///         _ => {}
+///     }
+/// }
+/// ```
+pub struct AgentSession {
+    id: SessionId,
+    durable: Arc<Mutex<DurableSession>>,
+    connection: Rc<IronConnection>,
+    events: Rc<RefCell<Vec<AgentEvent>>>,
+    active_streams: Rc<RefCell<HashMap<String, StreamPromptState>>>,
+}
+
+impl AgentSession {
+    /// Get the unique identifier for this session.
+    pub fn id(&self) -> SessionId {
+        self.id
+    }
+
+    /// Send a prompt to the agent and wait for completion.
+    ///
+    /// This is the blocking API. The method returns when the turn completes
+    /// or fails. Use [`drain_events`](AgentSession::drain_events) to retrieve
+    /// events that occurred during the prompt.
+    ///
+    /// For streaming access to events, use [`prompt_stream`](AgentSession::prompt_stream).
+    pub async fn prompt(&self, text: &str) -> PromptOutcome {
+        self.events.borrow_mut().clear();
+        let acp_session_id = agent_client_protocol::SessionId::new(self.id.to_string());
+        let request = agent_client_protocol::PromptRequest::new(
+            acp_session_id,
+            vec![agent_client_protocol::ContentBlock::Text(
+                agent_client_protocol::TextContent::new(text),
+            )],
+        );
+        match self.connection.prompt(request).await {
+            Ok(response) => response.stop_reason.into(),
+            Err(_) => PromptOutcome::EndTurn,
+        }
+    }
+
+    /// Send a prompt with content blocks and wait for completion.
+    ///
+    /// This is similar to [`prompt`](AgentSession::prompt) but accepts
+    /// structured content blocks instead of plain text. Use this for
+    /// multimodal prompts (text + images).
+    pub async fn prompt_with_blocks(&self, blocks: &[ContentBlock]) -> PromptOutcome {
+        self.events.borrow_mut().clear();
+        let acp_session_id = agent_client_protocol::SessionId::new(self.id.to_string());
+        let acp_blocks: Vec<_> = blocks.iter().map(to_acp_content_block).collect();
+        let request = agent_client_protocol::PromptRequest::new(acp_session_id, acp_blocks);
+        match self.connection.prompt(request).await {
+            Ok(response) => response.stop_reason.into(),
+            Err(_) => PromptOutcome::EndTurn,
+        }
+    }
+
+    /// Send a prompt and return a stream of events.
+    ///
+    /// This is the streaming API. It returns immediately with a [`PromptHandle`]
+    /// for controlling the prompt and a [`PromptEvents`] stream for receiving
+    /// events as they occur.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let (handle, mut events) = session.prompt_stream("Hello");
+    ///
+    /// while let Some(event) = events.next().await {
+    ///     match event {
+    ///         PromptEvent::Output { text } => print!("{}", text),
+    ///         PromptEvent::ApprovalRequest { call_id, .. } => {
+    ///             handle.approve(&call_id).unwrap();
+    ///         }
+    ///         PromptEvent::Complete { outcome } => break,
+    ///         _ => {}
+    ///     }
+    /// }
+    /// ```
+    pub fn prompt_stream(&self, text: &str) -> (PromptHandle, PromptEvents) {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let approval_resolvers: Rc<
+            RefCell<HashMap<String, tokio::sync::oneshot::Sender<PermissionVerdict>>>,
+        > = Rc::new(RefCell::new(HashMap::new()));
+
+        let prompt_key = self.id.to_string();
+        self.active_streams.borrow_mut().insert(
+            prompt_key.clone(),
+            StreamPromptState {
+                event_tx: event_tx.clone(),
+                approval_resolvers: approval_resolvers.clone(),
+                tool_name_index: Rc::new(RefCell::new(HashMap::new())),
+            },
+        );
+
+        let status = Rc::new(RefCell::new(PromptStatus::Running));
+        let handle = PromptHandle {
+            approval_resolvers,
+            session: self.clone(),
+            status: status.clone(),
+        };
+        let events = PromptEvents { rx: event_rx };
+
+        let acp_session_id = agent_client_protocol::SessionId::new(self.id.to_string());
+        let request = agent_client_protocol::PromptRequest::new(
+            acp_session_id,
+            vec![agent_client_protocol::ContentBlock::Text(
+                agent_client_protocol::TextContent::new(text),
+            )],
+        );
+
+        let connection = self.connection.clone();
+        let active_streams = self.active_streams.clone();
+        let status_cell = status.clone();
+
+        tokio::task::spawn_local(async move {
+            let outcome = match connection.prompt(request).await {
+                Ok(response) => response.stop_reason.into(),
+                Err(_) => PromptOutcome::EndTurn,
+            };
+
+            {
+                let mut streams = active_streams.borrow_mut();
+                if let Some(state) = streams.remove(&prompt_key) {
+                    let _ = state.event_tx.send(PromptEvent::Complete { outcome });
+                }
+            }
+
+            *status_cell.borrow_mut() = match outcome {
+                PromptOutcome::Cancelled => PromptStatus::Cancelled,
+                _ => PromptStatus::Completed,
+            };
+        });
+
+        (handle, events)
+    }
+
+    /// Cancel any active prompt on this session.
+    pub async fn cancel(&self) {
+        let acp_session_id = agent_client_protocol::SessionId::new(self.id.to_string());
+        let notification = agent_client_protocol::CancelNotification::new(acp_session_id);
+        let _ = self.connection.cancel(notification).await;
+    }
+
+    /// Drain and return all collected legacy events.
+    ///
+    /// This retrieves events collected by the blocking [`prompt`](AgentSession::prompt)
+    /// method. The event buffer is cleared after draining.
+    pub fn drain_events(&self) -> Vec<AgentEvent> {
+        std::mem::take(&mut *self.events.borrow_mut())
+    }
+
+    /// Get the conversation timeline.
+    ///
+    /// Returns a list of timeline entries representing the conversation history.
+    pub fn timeline(&self) -> Vec<TimelineEntry> {
+        self.durable
+            .lock()
+            .map(|session| session.timeline.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get the conversation messages.
+    ///
+    /// Returns the structured messages in the conversation.
+    pub fn messages(&self) -> Vec<StructuredMessage> {
+        self.durable
+            .lock()
+            .map(|session| session.messages.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get the tool call records.
+    ///
+    /// Returns a list of all tool calls made during this session.
+    pub fn tool_records(&self) -> Vec<DurableToolRecord> {
+        self.durable
+            .lock()
+            .map(|session| session.tool_records.clone())
+            .unwrap_or_default()
+    }
+
+    /// Check if the session is empty (has no messages).
+    pub fn is_empty(&self) -> bool {
+        self.durable
+            .lock()
+            .map(|session| session.is_empty())
+            .unwrap_or(true)
+    }
+
+    /// Set the system instructions for this session.
+    pub fn set_instructions(&self, instructions: impl Into<String>) {
+        if let Ok(mut session) = self.durable.lock() {
+            session.set_instructions(instructions);
+        }
+    }
+
+    /// Get a snapshot of the active context.
+    ///
+    /// This provides telemetry about the current context window usage.
+    pub fn active_context(
+        &self,
+        tool_registry: &crate::tool::ToolRegistry,
+        current_prompt: Option<&str>,
+        context_window_hint: Option<usize>,
+    ) -> crate::context::ActiveContextSnapshot {
+        if let Ok(session) = self.durable.lock() {
+            let tail = session.to_transcript();
+            crate::context::ContextTelemetry::for_session(
+                session.instructions.as_deref(),
+                session.compacted_context.as_ref(),
+                &tail.messages,
+                tool_registry,
+                current_prompt,
+                context_window_hint,
+            )
+        } else {
+            crate::context::ActiveContextSnapshot {
+                total_tokens: 0,
+                context_window_limit: context_window_hint,
+                quality: crate::context::ContextQuality::Unknown,
+                categories: vec![],
+            }
+        }
+    }
+
+    /// Check if the session is idle (no active prompts or tool calls).
+    pub fn is_idle(&self) -> bool {
+        let durable_idle = self.durable.lock().map(|s| s.is_idle()).unwrap_or(true);
+        let has_active_prompt = self.connection.runtime().has_active_prompt(self.id);
+        durable_idle && !has_active_prompt
+    }
+
+    /// Get the number of uncompacted tokens in the session.
+    pub fn uncompacted_tokens(&self) -> usize {
+        self.durable
+            .lock()
+            .map(|s| s.uncompacted_tokens)
+            .unwrap_or(0)
+    }
+
+    /// Get the compacted context, if any.
+    pub fn compacted_context(&self) -> Option<crate::context::models::CompactedContext> {
+        self.durable
+            .lock()
+            .ok()
+            .and_then(|s| s.compacted_context.clone())
+    }
+
+    /// Create a checkpoint by compacting the session context.
+    ///
+    /// This uses the provider to generate a summary of older messages,
+    /// reducing the token count while preserving conversation context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is not idle or if context management
+    /// is not enabled.
+    pub async fn checkpoint(&self, _checkpoint: CompactionCheckpoint) -> Result<(), String> {
+        if !self.is_idle() {
+            return Err("Cannot checkpoint: session is not idle".into());
+        }
+
+        let config = self.connection.runtime().config().clone();
+        if !config.context_management.enabled {
+            return Err("Context management is not enabled".into());
+        }
+
+        let input = {
+            let session = self.durable.lock().map_err(|e| e.to_string())?;
+            CompactionEngine::prepare(
+                &session,
+                &config.context_management.tail_retention,
+                CompactionReason::Checkpoint,
+            )
+        };
+
+        let provider = self.connection.runtime().provider();
+        let (compacted, tail) = CompactionEngine::execute(input, provider, &config.model).await?;
+
+        {
+            let mut session = self.durable.lock().map_err(|e| e.to_string())?;
+            session.apply_compaction(compacted, tail);
+        }
+
+        Ok(())
+    }
+
+    /// Export a handoff bundle for transferring this session to another agent.
+    ///
+    /// The bundle contains the session's conversation history and context,
+    /// allowing it to be resumed elsewhere via
+    /// [`AgentConnection::create_session_from_handoff`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is not idle.
+    pub async fn export_handoff(
+        &self,
+        model: &str,
+        provider_name: Option<&str>,
+    ) -> Result<crate::context::HandoffBundle, String> {
+        if !self.is_idle() {
+            return Err("Cannot export handoff: session is not idle".into());
+        }
+
+        let config = self.connection.runtime().config().clone();
+
+        let (compacted, tail) = {
+            let session = self.durable.lock().map_err(|e| e.to_string())?;
+            let (_older, tail) = CompactionEngine::split_session(
+                &session,
+                &config.context_management.tail_retention,
+            );
+            (session.compacted_context.clone(), tail)
+        };
+
+        let session = self.durable.lock().map_err(|e| e.to_string())?;
+        HandoffExporter::export(
+            &session,
+            model,
+            compacted.as_ref(),
+            tail,
+            &config.context_management,
+            provider_name,
+        )
+    }
+
+    /// Import a handoff bundle into this session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is not idle or is not empty.
+    /// To import into a new session, use [`AgentConnection::create_session_from_handoff`].
+    pub fn import_handoff(&self, bundle: crate::context::HandoffBundle) -> Result<(), String> {
+        if !self.is_idle() {
+            return Err("Cannot import handoff: session is not idle".into());
+        }
+        if !self.is_empty() {
+            return Err(
+                "Cannot import handoff: session must be empty. Use create_session_from_handoff instead.".into(),
+            );
+        }
+        let mut session = self.durable.lock().map_err(|e| e.to_string())?;
+        HandoffImporter::hydrate(&mut session, bundle)
+    }
+}
+
+fn to_acp_content_block(block: &ContentBlock) -> agent_client_protocol::ContentBlock {
+    match block {
+        ContentBlock::Text { text } => {
+            agent_client_protocol::ContentBlock::Text(agent_client_protocol::TextContent::new(text))
+        }
+        ContentBlock::Image { data, mime_type } => agent_client_protocol::ContentBlock::Image(
+            agent_client_protocol::ImageContent::new(data, mime_type),
+        ),
+        ContentBlock::Resource { uri, name } => agent_client_protocol::ContentBlock::ResourceLink(
+            agent_client_protocol::ResourceLink::new(name.as_deref().unwrap_or("resource"), uri),
+        ),
+    }
+}
+
+impl Clone for AgentSession {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            durable: self.durable.clone(),
+            connection: self.connection.clone(),
+            events: self.events.clone(),
+            active_streams: self.active_streams.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for IronAgent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IronAgent").finish()
+    }
+}
+
+impl std::fmt::Debug for AgentConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentConnection")
+            .field("id", &self.inner.id())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for AgentSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentSession")
+            .field("id", &self.id)
+            .finish()
+    }
+}
