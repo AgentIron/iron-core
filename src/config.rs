@@ -203,8 +203,10 @@ pub enum ContextWindowPolicy {
     KeepRecent(usize),
     /// Summarize older messages once more than `N` are retained.
     ///
-    /// This variant is reserved for future summarization support. At present,
-    /// older messages are dropped when the policy is applied directly.
+    /// This variant is reserved for future direct summarization support. The
+    /// currently supported summarization path is provider-backed
+    /// `context_management` compaction; when this policy is applied directly,
+    /// older messages are dropped.
     SummarizeAfter(usize),
 }
 
@@ -237,8 +239,8 @@ impl ContextWindowPolicy {
 /// Configuration for the embedded Python runtime.
 ///
 /// `iron-core` keeps the Monty-backed `python_exec` runtime in-tree.
-/// Publishing this crate to crates.io is deferred until `monty` is
-/// available on crates.io.
+/// Publishing this crate to crates.io is deferred until `monty` has
+/// a usable library release on crates.io.
 ///
 /// These limits control source size, result size, timeout, and child tool fan-out.
 #[derive(Debug, Clone, PartialEq)]

@@ -61,7 +61,8 @@
 //!
 //! `Config.context_window_policy` is applied consistently in both ACP-native and
 //! legacy request paths via a shared request builder (`request_builder` module).
-//! `SummarizeAfter` is rejected until summarization is implemented.
+//! `SummarizeAfter` is still rejected in direct request pruning; provider-backed
+//! summarization currently lives under `context_management`.
 //!
 //! # Context Management
 //!
@@ -72,8 +73,9 @@
 //!   tool definitions/schema overhead. Query via [`AgentSession::active_context`].
 //!
 //! - **`compacted_context`**: a structured semantic summary maintained by
-//!   compaction. Contains fields like objective, next step, decisions, unresolved
-//!   questions, and facts. See [`CompactedContext`].
+//!   compaction. Future prompts are assembled from this summary plus the retained
+//!   recent tail, rather than replaying the full pre-compaction transcript. See
+//!   [`CompactedContext`].
 //!
 //! - **`handoff_bundle`**: a portable continuity payload for cross-session transfer
 //!   that excludes source tool capabilities and runtime state. Export via
@@ -121,7 +123,9 @@
 //!   `fs.writeTextFile`, `fs.readTextFile`, `terminal/create`,
 //!   `terminal/output`, `terminal/release`, `terminal/waitForExit`,
 //!   `terminal/kill`. These are optional global backend overrides; built-in
-//!   iron-core implementations are used by default.
+//!   iron-core implementations are used by default. If an override is meant to
+//!   be callable as a tool (including from embedded Python), it must materialize
+//!   as the corresponding runtime tool registration or substitution.
 //!
 //! - **Transport support:**
 //!   In-process (primary, for embeddings), stdio (subprocess), TCP (cross-process).

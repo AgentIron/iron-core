@@ -3,11 +3,13 @@ use crate::embedded_python::convert::{json_to_monty, make_iron_exception, monty_
 use crate::embedded_python::types::{
     ChildCallOutcome, ChildCallStatus, ScriptError, ScriptExecStatus, ScriptInput, ScriptOutput,
 };
+use crate::embedded_python::ToolCatalog;
+use crate::tool::ToolRegistry;
 use monty::{
-    ExcType, ExtFunctionResult, LimitedTracker, MontyException, MontyObject, MontyRun,
-    NameLookupResult, PrintWriter, ResourceLimits, RunProgress,
+    ExcType, ExtFunctionResult, FunctionCall, LimitedTracker, MontyException, MontyObject,
+    MontyRun, NameLookupResult, PrintWriter, ResourceLimits, RunProgress,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,6 +23,7 @@ pub struct ScriptRun {
     cancel_token: Arc<AtomicBool>,
     child_outcomes: Arc<Mutex<Vec<ChildCallOutcome>>>,
     tool_executor: Option<Arc<ToolExecutorFn>>,
+    tool_catalog: ToolCatalog,
 }
 
 impl ScriptRun {
@@ -35,11 +38,22 @@ impl ScriptRun {
             cancel_token,
             child_outcomes: Arc::new(Mutex::new(Vec::new())),
             tool_executor: None,
+            tool_catalog: ToolCatalog::default(),
         }
     }
 
     pub fn with_tool_executor(mut self, executor: Arc<ToolExecutorFn>) -> Self {
         self.tool_executor = Some(executor);
+        self
+    }
+
+    pub(crate) fn with_tool_catalog(mut self, catalog: ToolCatalog) -> Self {
+        self.tool_catalog = catalog;
+        self
+    }
+
+    pub fn with_tool_catalog_from_registry(mut self, registry: &ToolRegistry) -> Self {
+        self.tool_catalog = ToolCatalog::from_registry(registry);
         self
     }
 
@@ -57,7 +71,7 @@ impl ScriptRun {
         let runner = match MontyRun::new(
             self.input.script.clone(),
             "script",
-            vec!["input".to_string()],
+            vec!["input".to_string(), "tools".to_string()],
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -72,7 +86,11 @@ impl ScriptRun {
             .max_duration(Duration::from_secs(self.config.max_script_timeout_secs));
         let tracker = LimitedTracker::new(limits);
 
-        let progress = match runner.start(vec![monty_input], tracker, PrintWriter::Disabled) {
+        let progress = match runner.start(
+            vec![monty_input, self.tool_catalog.namespace_object()],
+            tracker,
+            PrintWriter::Disabled,
+        ) {
             Ok(p) => p,
             Err(e) => {
                 let msg = format!("{}", e);
@@ -142,21 +160,11 @@ impl ScriptRun {
                     }
                 }
 
-                RunProgress::FunctionCall(call) => {
-                    if call.function_name == "iron_call" {
+                RunProgress::FunctionCall(call) => match self.resolve_function_call(&call) {
+                    Ok(ResolvedFunctionCall::Tool { tool_name, args }) => {
                         call_count += 1;
-                        let tool_name = call
-                            .args
-                            .first()
-                            .and_then(|a| match a {
-                                MontyObject::String(s) => Some(s.clone()),
-                                _ => None,
-                            })
-                            .unwrap_or_default();
-                        let tool_args = call.args.get(1).map(monty_to_json).unwrap_or(Value::Null);
                         let iron_call_id = uuid::Uuid::new_v4().to_string();
-
-                        pending_tool_calls.push((tool_name, tool_args, iron_call_id));
+                        pending_tool_calls.push((tool_name, args, iron_call_id));
 
                         match call.resume_pending(PrintWriter::Disabled) {
                             Ok(next) => next,
@@ -167,11 +175,20 @@ impl ScriptRun {
                                 )));
                             }
                         }
-                    } else {
-                        let exc = MontyException::new(
-                            ExcType::NameError,
-                            Some(format!("name '{}' is not defined", call.function_name)),
-                        );
+                    }
+                    Ok(ResolvedFunctionCall::Return(result)) => {
+                        match call.resume(ExtFunctionResult::Return(result), PrintWriter::Disabled)
+                        {
+                            Ok(next) => next,
+                            Err(e) => {
+                                return ScriptOutput::failed(ScriptError::runtime(format!(
+                                    "{}",
+                                    e
+                                )));
+                            }
+                        }
+                    }
+                    Ok(ResolvedFunctionCall::Error(exc)) => {
                         match call.resume(ExtFunctionResult::Error(exc), PrintWriter::Disabled) {
                             Ok(next) => next,
                             Err(e) => {
@@ -182,7 +199,15 @@ impl ScriptRun {
                             }
                         }
                     }
-                }
+                    Err(exc) => match call
+                        .resume(ExtFunctionResult::Error(exc), PrintWriter::Disabled)
+                    {
+                        Ok(next) => next,
+                        Err(e) => {
+                            return ScriptOutput::failed(ScriptError::runtime(format!("{}", e)));
+                        }
+                    },
+                },
 
                 RunProgress::ResolveFutures(state) => {
                     let pending_ids = state.pending_call_ids();
@@ -290,6 +315,206 @@ impl ScriptRun {
     fn take_child_outcomes(&self) -> Vec<ChildCallOutcome> {
         std::mem::take(&mut *self.child_outcomes.lock().unwrap())
     }
+
+    fn resolve_function_call<T: monty::ResourceTracker>(
+        &self,
+        call: &FunctionCall<T>,
+    ) -> Result<ResolvedFunctionCall, MontyException> {
+        if call.function_name == "iron_call" {
+            let tool_name = call
+                .args
+                .first()
+                .and_then(|arg| match arg {
+                    MontyObject::String(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    MontyException::new(
+                        ExcType::TypeError,
+                        Some("iron_call expected a tool name string".to_string()),
+                    )
+                })?;
+            let tool_args = self.payload_from_call(&call.args, &call.kwargs, 1)?;
+            return Ok(ResolvedFunctionCall::Tool {
+                tool_name,
+                args: tool_args,
+            });
+        }
+
+        if call.method_call
+            && call
+                .args
+                .first()
+                .is_some_and(crate::embedded_python::is_tools_namespace)
+        {
+            return self.resolve_tools_namespace_call(call);
+        }
+
+        Ok(ResolvedFunctionCall::Error(MontyException::new(
+            ExcType::NameError,
+            Some(format!("name '{}' is not defined", call.function_name)),
+        )))
+    }
+
+    fn resolve_tools_namespace_call<T: monty::ResourceTracker>(
+        &self,
+        call: &FunctionCall<T>,
+    ) -> Result<ResolvedFunctionCall, MontyException> {
+        match call.function_name.as_str() {
+            "available" => {
+                self.ensure_no_extra_args(&call.args, &call.kwargs, 1, "tools.available")?;
+                Ok(ResolvedFunctionCall::Return(json_to_monty(
+                    &self.tool_catalog.available_json(),
+                )))
+            }
+            "describe" => {
+                self.ensure_no_kwargs(&call.kwargs, "tools.describe")?;
+                let name = self.string_arg(&call.args, 1, "tools.describe")?;
+                let description = self.tool_catalog.describe_json(&name).ok_or_else(|| {
+                    MontyException::new(
+                        ExcType::RuntimeError,
+                        Some(format!(
+                            "tool '{}' is not present in the script tool catalog",
+                            name
+                        )),
+                    )
+                })?;
+                Ok(ResolvedFunctionCall::Return(json_to_monty(&description)))
+            }
+            "call" => {
+                let tool_name = self.string_arg(&call.args, 1, "tools.call")?;
+                let entry = self.tool_catalog.entry_by_name(&tool_name).ok_or_else(|| {
+                    MontyException::new(
+                        ExcType::RuntimeError,
+                        Some(format!(
+                            "tool '{}' is not present in the script tool catalog",
+                            tool_name
+                        )),
+                    )
+                })?;
+                let args = self.payload_from_call(&call.args, &call.kwargs, 2)?;
+                Ok(ResolvedFunctionCall::Tool {
+                    tool_name: entry.name().to_string(),
+                    args,
+                })
+            }
+            method_name => {
+                let entry = self
+                    .tool_catalog
+                    .entry_by_alias(method_name)
+                    .ok_or_else(|| {
+                        MontyException::new(
+                            ExcType::AttributeError,
+                            Some(format!("IronTools has no method '{}'", method_name)),
+                        )
+                    })?;
+                let args = self.payload_from_call(&call.args, &call.kwargs, 1)?;
+                Ok(ResolvedFunctionCall::Tool {
+                    tool_name: entry.name().to_string(),
+                    args,
+                })
+            }
+        }
+    }
+
+    fn ensure_no_extra_args(
+        &self,
+        args: &[MontyObject],
+        kwargs: &[(MontyObject, MontyObject)],
+        skip: usize,
+        method: &str,
+    ) -> Result<(), MontyException> {
+        if args.len() != skip || !kwargs.is_empty() {
+            return Err(MontyException::new(
+                ExcType::TypeError,
+                Some(format!("{} does not accept arguments", method)),
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_no_kwargs(
+        &self,
+        kwargs: &[(MontyObject, MontyObject)],
+        method: &str,
+    ) -> Result<(), MontyException> {
+        if !kwargs.is_empty() {
+            return Err(MontyException::new(
+                ExcType::TypeError,
+                Some(format!("{} does not accept keyword arguments", method)),
+            ));
+        }
+        Ok(())
+    }
+
+    fn string_arg(
+        &self,
+        args: &[MontyObject],
+        index: usize,
+        method: &str,
+    ) -> Result<String, MontyException> {
+        args.get(index)
+            .and_then(|arg| match arg {
+                MontyObject::String(value) => Some(value.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MontyException::new(
+                    ExcType::TypeError,
+                    Some(format!("{} expected a string argument", method)),
+                )
+            })
+    }
+
+    fn payload_from_call(
+        &self,
+        args: &[MontyObject],
+        kwargs: &[(MontyObject, MontyObject)],
+        skip: usize,
+    ) -> Result<Value, MontyException> {
+        let positional = args.get(skip..).unwrap_or(&[]);
+        if positional.len() > 1 {
+            return Err(MontyException::new(
+                ExcType::TypeError,
+                Some("tool calls accept at most one positional payload object".to_string()),
+            ));
+        }
+
+        let mut payload = if let Some(first) = positional.first() {
+            match monty_to_json(first) {
+                Value::Object(map) => map,
+                _ => {
+                    return Err(MontyException::new(
+                        ExcType::TypeError,
+                        Some("tool payload must be a JSON object".to_string()),
+                    ));
+                }
+            }
+        } else {
+            Map::new()
+        };
+
+        for (key, value) in kwargs {
+            let key = match key {
+                MontyObject::String(name) => name.clone(),
+                _ => {
+                    return Err(MontyException::new(
+                        ExcType::TypeError,
+                        Some("tool keyword argument names must be strings".to_string()),
+                    ));
+                }
+            };
+            payload.insert(key, monty_to_json(value));
+        }
+
+        Ok(Value::Object(payload))
+    }
+}
+
+enum ResolvedFunctionCall {
+    Tool { tool_name: String, args: Value },
+    Return(MontyObject),
+    Error(MontyException),
 }
 
 pub struct ScriptEngine {

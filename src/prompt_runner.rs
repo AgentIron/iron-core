@@ -68,12 +68,14 @@ impl PromptRunner {
             let request = {
                 let session = durable.lock().unwrap();
                 let instructions = session.instructions.clone();
+                let compacted_context = session.compacted_context.clone();
                 let repo_payload = session.repo_instruction_payload.clone();
                 let messages = session.to_transcript().messages;
                 let tool_registry = self.runtime.tool_registry();
-                crate::request_builder::build_inference_request_with_repo(
+                crate::request_builder::build_inference_request_with_context_and_repo(
                     config,
                     &messages,
+                    compacted_context.as_ref(),
                     instructions.as_deref(),
                     repo_payload.as_ref(),
                     &tool_registry,
@@ -150,10 +152,16 @@ impl PromptRunner {
                     Err(reason) => return reason,
                 };
 
-                self.execute_tool_calls(durable, sink, approved_tool_calls, cancel_token)
-                    .await;
+                self.execute_tool_calls(
+                    durable,
+                    ephemeral,
+                    sink,
+                    approved_tool_calls,
+                    cancel_token,
+                )
+                .await;
             } else {
-                self.execute_tool_calls(durable, sink, step.tool_calls, cancel_token)
+                self.execute_tool_calls(durable, ephemeral, sink, step.tool_calls, cancel_token)
                     .await;
             }
         }
@@ -256,27 +264,15 @@ impl PromptRunner {
                 continue;
             }
 
-            {
-                let mut turn = ephemeral.lock().unwrap();
-                turn.request_permission(
-                    call.call_id.clone(),
-                    call.tool_name.clone(),
-                    call.arguments.clone(),
-                );
-            }
-
-            let verdict = sink
-                .request_approval(ApprovalRequest {
-                    call_id: call.call_id.clone(),
-                    tool_name: call.tool_name.clone(),
-                    arguments: call.arguments.clone(),
-                })
+            let verdict = self
+                .request_tool_permission(
+                    ephemeral,
+                    sink,
+                    &call.call_id,
+                    &call.tool_name,
+                    &call.arguments,
+                )
                 .await;
-
-            {
-                let mut turn = ephemeral.lock().unwrap();
-                turn.resolve_permission(&call.call_id);
-            }
 
             match verdict {
                 ApprovalVerdict::Cancelled => {
@@ -333,9 +329,43 @@ impl PromptRunner {
         Ok(approved)
     }
 
+    async fn request_tool_permission(
+        &self,
+        ephemeral: &Arc<std::sync::Mutex<EphemeralTurn>>,
+        sink: &dyn PromptSink,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> ApprovalVerdict {
+        {
+            let mut turn = ephemeral.lock().unwrap();
+            turn.request_permission(
+                call_id.to_string(),
+                tool_name.to_string(),
+                arguments.clone(),
+            );
+        }
+
+        let verdict = sink
+            .request_approval(ApprovalRequest {
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                arguments: arguments.clone(),
+            })
+            .await;
+
+        {
+            let mut turn = ephemeral.lock().unwrap();
+            turn.resolve_permission(call_id);
+        }
+
+        verdict
+    }
+
     async fn execute_tool_calls(
         &self,
         durable: &Arc<std::sync::Mutex<DurableSession>>,
+        ephemeral: &Arc<std::sync::Mutex<EphemeralTurn>>,
         sink: &dyn PromptSink,
         tool_calls: Vec<iron_providers::ToolCall>,
         cancel_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -351,7 +381,7 @@ impl PromptRunner {
                 return;
             }
 
-            self.execute_single_tool(durable, sink, call, cancel_token.clone())
+            self.execute_single_tool(durable, ephemeral, sink, call, cancel_token.clone())
                 .await;
         }
     }
@@ -446,6 +476,7 @@ impl PromptRunner {
     async fn execute_single_tool(
         &self,
         durable: &Arc<std::sync::Mutex<DurableSession>>,
+        _ephemeral: &Arc<std::sync::Mutex<EphemeralTurn>>,
         sink: &dyn PromptSink,
         call: iron_providers::ToolCall,
         cancel_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -459,7 +490,7 @@ impl PromptRunner {
 
         #[cfg(feature = "embedded-python")]
         if call.tool_name == "python_exec" && self.runtime.config().embedded_python.enabled {
-            self.execute_python_script(durable, sink, &call, cancel_token)
+            self.execute_python_script(durable, _ephemeral, sink, &call, cancel_token)
                 .await;
             return;
         }
@@ -549,6 +580,7 @@ impl PromptRunner {
     async fn execute_python_script(
         &self,
         durable: &Arc<std::sync::Mutex<DurableSession>>,
+        ephemeral: &Arc<std::sync::Mutex<EphemeralTurn>>,
         sink: &dyn PromptSink,
         call: &iron_providers::ToolCall,
         cancel_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -608,6 +640,10 @@ impl PromptRunner {
 
         let (req_tx, req_rx) = std::sync::mpsc::channel::<ChildReq>();
         let timeout_secs = config.max_script_timeout_secs;
+        let tool_catalog = {
+            let tool_registry = self.runtime.tool_registry();
+            crate::embedded_python::ToolCatalog::from_registry(&tool_registry)
+        };
 
         let executor: std::sync::Arc<ToolExecutorFn> = std::sync::Arc::new({
             let req_tx = req_tx.clone();
@@ -640,6 +676,7 @@ impl PromptRunner {
         let script_input = ScriptInput { script, input };
         let run =
             crate::embedded_python::ScriptRun::new(script_input, &config, cancel_token.clone())
+                .with_tool_catalog(tool_catalog)
                 .with_tool_executor(executor);
 
         let handle = std::thread::spawn(move || run.execute());
@@ -731,6 +768,82 @@ impl PromptRunner {
                                 .response_tx
                                 .send((ChildCallStatus::Failed, Some(error_result)));
                             continue;
+                        }
+                    }
+
+                    let requires_permission = {
+                        let tool_registry = self.runtime.tool_registry();
+                        tool_registry
+                            .get(&req.tool_name)
+                            .map(|tool| {
+                                self.runtime
+                                    .config()
+                                    .default_approval_strategy
+                                    .is_approval_required(tool.requires_approval())
+                            })
+                            .unwrap_or(false)
+                    };
+                    if requires_permission {
+                        {
+                            let mut session = durable.lock().unwrap();
+                            session.propose_tool_call(
+                                &req.call_id,
+                                &req.tool_name,
+                                req.args.clone(),
+                            );
+                            session.link_child_to_script(&script_id, &req.call_id);
+                        }
+
+                        match self
+                            .request_tool_permission(
+                                ephemeral,
+                                sink,
+                                &req.call_id,
+                                &req.tool_name,
+                                &req.args,
+                            )
+                            .await
+                        {
+                            ApprovalVerdict::AllowOnce => {}
+                            ApprovalVerdict::Denied => {
+                                {
+                                    let mut session = durable.lock().unwrap();
+                                    session.deny_tool_call(&req.call_id);
+                                }
+                                sink.emit(PromptLifecycleEvent::ScriptActivity {
+                                    script_id: script_id.clone(),
+                                    parent_call_id: call.call_id.clone(),
+                                    activity_type: "child_tool_call_failed".to_string(),
+                                    status: "denied".to_string(),
+                                    detail: Some(serde_json::json!({
+                                        "call_id": req.call_id,
+                                        "tool_name": req.tool_name,
+                                    })),
+                                })
+                                .await;
+                                let _ = req.response_tx.send((ChildCallStatus::Denied, None));
+                                continue;
+                            }
+                            ApprovalVerdict::Cancelled => {
+                                {
+                                    let mut session = durable.lock().unwrap();
+                                    session.cancel_tool_call(&req.call_id);
+                                }
+                                cancel_token.store(true, Ordering::SeqCst);
+                                sink.emit(PromptLifecycleEvent::ScriptActivity {
+                                    script_id: script_id.clone(),
+                                    parent_call_id: call.call_id.clone(),
+                                    activity_type: "child_tool_call_failed".to_string(),
+                                    status: "cancelled".to_string(),
+                                    detail: Some(serde_json::json!({
+                                        "call_id": req.call_id,
+                                        "tool_name": req.tool_name,
+                                    })),
+                                })
+                                .await;
+                                let _ = req.response_tx.send((ChildCallStatus::Cancelled, None));
+                                continue;
+                            }
                         }
                     }
 

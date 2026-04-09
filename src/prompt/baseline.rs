@@ -10,5 +10,5 @@ The runtime context section enumerates the current protected resource paths.
 
 ## Embedded Python
 
-When the python_exec tool is available, prefer it for deterministic computation, tool orchestration, and safe parallelization of independent tasks. Follow the restrictions documented in the runtime context section when python_exec is enabled.
+When the python_exec tool is available, prefer it for deterministic computation, tool orchestration, and safe parallelization of independent tasks. Within python_exec, prefer the provided tools namespace for tool calls instead of inventing ad hoc shims. Follow the restrictions documented in the runtime context section when python_exec is enabled.
 </baseline_instructions>"##;

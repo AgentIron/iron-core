@@ -314,7 +314,7 @@ fn compaction_build_input_includes_previous_context() {
 
     let input = CompactionEngine::build_compaction_input(
         Some(&previous),
-        &[StructuredMessage::user_text("New message")],
+        &[Message::user("New message")],
         CompactionReason::Maintenance,
     );
 
@@ -402,6 +402,41 @@ fn durable_session_apply_compaction_resets_uncompacted_tokens() {
 
     assert_eq!(session.uncompacted_tokens, 0);
     assert!(session.compacted_context.is_some());
+}
+
+#[test]
+fn durable_session_tracks_tool_tokens_for_compaction() {
+    let mut session = DurableSession::new(SessionId::new());
+
+    session.propose_tool_call("call-1", "lookup", serde_json::json!({"id": 1}));
+    assert!(session.uncompacted_tokens > 0);
+
+    let after_call = session.uncompacted_tokens;
+    session.complete_tool_call("call-1", serde_json::json!({"value": 42}));
+    assert!(session.uncompacted_tokens > after_call);
+}
+
+#[test]
+fn durable_session_apply_compaction_prunes_historical_tool_records() {
+    let mut session = DurableSession::new(SessionId::new());
+    session.add_user_text("first question");
+    session.propose_tool_call("call-1", "lookup", serde_json::json!({"id": 1}));
+    session.complete_tool_call("call-1", serde_json::json!({"value": 42}));
+    session.add_agent_text("first answer");
+    session.add_user_text("latest question");
+
+    let compacted = CompactedContext::new().with_objective("Preserve the result semantically");
+    let tail = vec![session.messages.last().unwrap().clone()];
+    session.apply_compaction(compacted, tail);
+
+    assert_eq!(session.messages.len(), 1);
+    assert_eq!(session.messages[0].text_content(), "latest question");
+    assert!(session.tool_records.is_empty());
+    assert_eq!(session.timeline.len(), 1);
+    assert!(matches!(
+        session.timeline[0],
+        iron_core::TimelineEntry::UserMessage { .. }
+    ));
 }
 
 #[test]
@@ -648,6 +683,36 @@ fn config_integration_validates_context_management() {
     assert!(config.validate().is_err());
 }
 
+#[test]
+fn request_builder_keeps_compacted_context_when_recent_tail_is_pruned() {
+    let config = iron_core::Config::new()
+        .with_context_window_policy(iron_core::ContextWindowPolicy::KeepRecent(1));
+    let compacted = CompactedContext::new().with_objective("Carry this forward");
+    let registry = ToolRegistry::new();
+    let messages = vec![Message::user("older"), Message::user("latest")];
+
+    let request = iron_core::request_builder::build_inference_request_with_context(
+        &config,
+        &messages,
+        Some(&compacted),
+        None,
+        &registry,
+    )
+    .unwrap();
+
+    assert_eq!(request.transcript.messages.len(), 2);
+    assert!(matches!(
+        &request.transcript.messages[0],
+        Message::Assistant { content }
+            if content.contains("[Compacted session context]")
+                && content.contains("Carry this forward")
+    ));
+    assert!(matches!(
+        &request.transcript.messages[1],
+        Message::User { content } if content == "latest"
+    ));
+}
+
 // =========================================================================
 // Runtime integration tests: prepare/execute, facade methods
 // =========================================================================
@@ -687,6 +752,28 @@ fn compaction_prepare_with_existing_context_includes_previous() {
     assert!(input.prompt_text.contains("Build something"));
 }
 
+#[test]
+fn compaction_prepare_includes_historical_tool_transcript() {
+    let mut session = DurableSession::new(SessionId::new());
+    session.add_user_text("Need a lookup");
+    session.propose_tool_call("call-1", "lookup", serde_json::json!({"id": 7}));
+    session.complete_tool_call("call-1", serde_json::json!({"value": "seven"}));
+    session.add_agent_text("Lookup complete");
+    session.add_user_text("What next?");
+
+    let config = ContextManagementConfig::new().with_tail_retention(TailRetentionRule::Messages(1));
+
+    let input = CompactionEngine::prepare(
+        &session,
+        &config.tail_retention,
+        CompactionReason::Maintenance,
+    );
+
+    assert!(input.prompt_text.contains("assistant_tool_call lookup"));
+    assert!(input.prompt_text.contains("tool_result lookup"));
+    assert!(input.prompt_text.contains("seven"));
+}
+
 // ---------------------------------------------------------------------------
 // Mock provider for async integration tests
 // ---------------------------------------------------------------------------
@@ -698,21 +785,28 @@ use std::sync::Mutex as StdMutex;
 #[derive(Clone, Default)]
 struct MockProvider {
     infer_responses: StdArc<StdMutex<VecDeque<Vec<iron_providers::ProviderEvent>>>>,
+    requests: StdArc<StdMutex<Vec<iron_providers::InferenceRequest>>>,
 }
 
 impl MockProvider {
     fn with_infer_responses(responses: Vec<Vec<iron_providers::ProviderEvent>>) -> Self {
         Self {
             infer_responses: StdArc::new(StdMutex::new(responses.into())),
+            ..Self::default()
         }
+    }
+
+    fn requests(&self) -> Vec<iron_providers::InferenceRequest> {
+        self.requests.lock().unwrap().clone()
     }
 }
 
 impl iron_providers::Provider for MockProvider {
     fn infer(
         &self,
-        _request: iron_providers::InferenceRequest,
+        request: iron_providers::InferenceRequest,
     ) -> iron_providers::ProviderFuture<'_, Vec<iron_providers::ProviderEvent>> {
+        self.requests.lock().unwrap().push(request);
         let response = self
             .infer_responses
             .lock()
@@ -724,7 +818,7 @@ impl iron_providers::Provider for MockProvider {
 
     fn infer_stream(
         &self,
-        _request: iron_providers::InferenceRequest,
+        request: iron_providers::InferenceRequest,
     ) -> iron_providers::ProviderFuture<
         '_,
         futures::stream::BoxStream<
@@ -732,6 +826,7 @@ impl iron_providers::Provider for MockProvider {
             iron_providers::ProviderResult<iron_providers::ProviderEvent>,
         >,
     > {
+        self.requests.lock().unwrap().push(request);
         let response = self
             .infer_responses
             .lock()
@@ -1102,5 +1197,167 @@ fn post_turn_compaction_skipped_when_under_threshold() {
 
         assert!(session.compacted_context().is_none());
         assert!(session.uncompacted_tokens() > 0);
+    });
+}
+
+#[test]
+fn tool_heavy_post_turn_compaction_shapes_future_requests() {
+    use iron_core::{Config, ContextManagementConfig, IronAgent, PromptOutcome, TailRetentionRule};
+    use iron_providers::{Message as ProviderMessage, ProviderEvent, ToolCall};
+
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new("tc1", "lookup", serde_json::json!({"id": 1})),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![
+                ProviderEvent::Output {
+                    content: "done".into(),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![
+                ProviderEvent::Output {
+                    content:
+                        r#"{"objective":"Lookup complete","recent_results":["lookup returned 42"]}"#
+                            .into(),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![
+                ProviderEvent::Output {
+                    content: "next answer".into(),
+                },
+                ProviderEvent::Complete,
+            ],
+        ]);
+
+        let config = Config::new().with_context_management(
+            ContextManagementConfig::new()
+                .enabled()
+                .with_maintenance_threshold(5)
+                .with_tail_retention(TailRetentionRule::Messages(1)),
+        );
+
+        let agent = IronAgent::new(config, provider.clone());
+        agent.register_tool(FunctionTool::simple("lookup", "lookup", |_| {
+            Ok(serde_json::json!({"value": 42}))
+        }));
+
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        let first = session.prompt("go").await;
+        assert_eq!(first, PromptOutcome::EndTurn);
+        assert!(session.compacted_context().is_some());
+        assert_eq!(session.uncompacted_tokens(), 0);
+
+        let second = session.prompt("what now?").await;
+        assert_eq!(second, PromptOutcome::EndTurn);
+
+        let requests = provider.requests();
+        let second_prompt_request = &requests[3];
+        let transcript = &second_prompt_request.transcript.messages;
+
+        assert!(matches!(
+            &transcript[0],
+            ProviderMessage::Assistant { content }
+                if content.contains("[Compacted session context]")
+                    && content.contains("Lookup complete")
+        ));
+        assert!(transcript.iter().any(|msg| {
+            matches!(msg, ProviderMessage::Assistant { content } if content == "done")
+        }));
+        assert!(transcript.iter().any(|msg| {
+            matches!(msg, ProviderMessage::User { content } if content == "what now?")
+        }));
+        assert!(!transcript.iter().any(|msg| {
+            matches!(
+                msg,
+                ProviderMessage::AssistantToolCall { .. } | ProviderMessage::Tool { .. }
+            )
+        }));
+    });
+}
+
+#[test]
+fn tool_heavy_hard_fit_compaction_shapes_future_request() {
+    use iron_core::{Config, ContextManagementConfig, IronAgent, PromptOutcome, TailRetentionRule};
+    use iron_providers::{Message as ProviderMessage, ProviderEvent, ToolCall};
+
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new("tc1", "lookup", serde_json::json!({"id": 1})),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![
+                ProviderEvent::Output {
+                    content: "done".into(),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![
+                ProviderEvent::Output {
+                    content: r#"{"objective":"Hard fit summary","recent_results":["lookup returned 42"]}"#.into(),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![
+                ProviderEvent::Output {
+                    content: "after compaction".into(),
+                },
+                ProviderEvent::Complete,
+            ],
+        ]);
+
+        let config = Config::new().with_context_management(
+            ContextManagementConfig::new()
+                .enabled()
+                .with_maintenance_threshold(999_999)
+                .with_context_window_hint(5)
+                .with_tail_retention(TailRetentionRule::Messages(1)),
+        );
+
+        let agent = IronAgent::new(config, provider.clone());
+        agent.register_tool(FunctionTool::simple("lookup", "lookup", |_| {
+            Ok(serde_json::json!({"value": 42}))
+        }));
+
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        let first = session.prompt("go").await;
+        assert_eq!(first, PromptOutcome::EndTurn);
+        assert!(session.compacted_context().is_none());
+
+        let second = session.prompt("what now?").await;
+        assert_eq!(second, PromptOutcome::EndTurn);
+        assert!(session.compacted_context().is_some());
+
+        let requests = provider.requests();
+        let second_prompt_request = &requests[3];
+        let transcript = &second_prompt_request.transcript.messages;
+
+        assert!(matches!(
+            &transcript[0],
+            ProviderMessage::Assistant { content }
+                if content.contains("[Compacted session context]")
+                    && content.contains("Hard fit summary")
+        ));
+        assert!(!transcript.iter().any(|msg| {
+            matches!(
+                msg,
+                ProviderMessage::AssistantToolCall { .. } | ProviderMessage::Tool { .. }
+            )
+        }));
+        assert!(transcript.iter().any(|msg| {
+            matches!(msg, ProviderMessage::User { content } if content == "what now?")
+        }));
     });
 }

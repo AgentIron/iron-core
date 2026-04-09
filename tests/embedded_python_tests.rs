@@ -5,8 +5,8 @@ use iron_core::embedded_python::PythonExecTool;
 use iron_core::embedded_python::{
     ChildCallStatus, ScriptEngine, ScriptErrorKind, ScriptExecStatus, ScriptInput, ScriptRun,
 };
-use iron_core::tool::Tool;
-use iron_core::EmbeddedPythonConfig;
+use iron_core::tool::{FunctionTool, Tool, ToolRegistry};
+use iron_core::{register_builtin_tools, BuiltinToolConfig, EmbeddedPythonConfig, ToolDefinition};
 use monty::MontyObject;
 use serde_json::json;
 use std::sync::Arc;
@@ -17,6 +17,36 @@ fn default_config() -> EmbeddedPythonConfig {
 
 fn make_engine() -> ScriptEngine {
     ScriptEngine::new(&default_config())
+}
+
+fn tool_registry_executor(
+    registry: Arc<ToolRegistry>,
+) -> Arc<
+    dyn Fn(&str, &str, serde_json::Value) -> (ChildCallStatus, Option<serde_json::Value>)
+        + Send
+        + Sync,
+> {
+    Arc::new(move |call_id: &str, name: &str, args: serde_json::Value| {
+        let Some(tool) = registry.get(name) else {
+            return (
+                ChildCallStatus::Failed,
+                Some(json!({"error": format!("Tool '{}' not found", name)})),
+            );
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        match runtime.block_on(tool.execute(call_id, args)) {
+            Ok(result) => (ChildCallStatus::Completed, Some(result)),
+            Err(error) => (
+                ChildCallStatus::Failed,
+                Some(json!({"error": error.to_string()})),
+            ),
+        }
+    })
 }
 
 #[test]
@@ -364,6 +394,177 @@ fn test_tool_call_with_input_dependent_args() {
 
     assert_eq!(output.status, ScriptExecStatus::Completed);
     assert_eq!(output.result, Some(json!({"found": true})));
+}
+
+#[test]
+fn test_tools_namespace_invokes_builtin_tool() {
+    let engine = make_engine();
+    let temp_dir =
+        std::env::temp_dir().join(format!("iron-core-python-tools-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let file_path = temp_dir.join("note.txt");
+    std::fs::write(&file_path, "hello from builtin\n").unwrap();
+
+    let mut registry = ToolRegistry::new();
+    let builtin_config = BuiltinToolConfig::new(vec![temp_dir.clone()]);
+    register_builtin_tools(&mut registry, &builtin_config);
+    let registry = Arc::new(registry);
+
+    let input = ScriptInput {
+        script: "result = await tools.read({'path': input['path']})\nresult['content']".into(),
+        input: json!({"path": file_path.to_string_lossy()}),
+    };
+
+    let run = engine
+        .create_run(input)
+        .with_tool_catalog_from_registry(registry.as_ref())
+        .with_tool_executor(tool_registry_executor(registry));
+    let output = run.execute();
+
+    assert_eq!(output.status, ScriptExecStatus::Completed);
+    assert!(output
+        .result
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .contains("hello from builtin"));
+
+    let _ = std::fs::remove_dir_all(temp_dir);
+}
+
+#[test]
+fn test_tools_namespace_invokes_custom_registered_tool() {
+    let engine = make_engine();
+    let mut registry = ToolRegistry::new();
+    registry.register(FunctionTool::simple("lookup", "lookup", |_| {
+        Ok(json!({"value": 7}))
+    }));
+    let registry = Arc::new(registry);
+
+    let input = ScriptInput {
+        script: "result = await tools.lookup({})\nresult['value']".into(),
+        input: json!({}),
+    };
+
+    let output = engine
+        .create_run(input)
+        .with_tool_catalog_from_registry(registry.as_ref())
+        .with_tool_executor(tool_registry_executor(registry))
+        .execute();
+
+    assert_eq!(output.status, ScriptExecStatus::Completed);
+    assert_eq!(output.result, Some(json!(7)));
+}
+
+#[test]
+fn test_tools_namespace_supports_alias_and_raw_fallback() {
+    let engine = make_engine();
+    let mut registry = ToolRegistry::new();
+    registry.register(FunctionTool::simple("search-files", "search files", |_| {
+        Ok(json!("ok"))
+    }));
+    let registry = Arc::new(registry);
+
+    let input = ScriptInput {
+        script:
+            "a = await tools.search_files({})\nb = await tools.call('search-files', {})\n[a, b]"
+                .into(),
+        input: json!({}),
+    };
+
+    let output = engine
+        .create_run(input)
+        .with_tool_catalog_from_registry(registry.as_ref())
+        .with_tool_executor(tool_registry_executor(registry))
+        .execute();
+
+    assert_eq!(output.status, ScriptExecStatus::Completed);
+    assert_eq!(output.result, Some(json!(["ok", "ok"])));
+    assert_eq!(output.child_outcomes.len(), 2);
+    assert!(output
+        .child_outcomes
+        .iter()
+        .all(|outcome| outcome.tool_name == "search-files"));
+}
+
+#[test]
+fn test_tools_namespace_provides_discovery_helpers() {
+    let engine = make_engine();
+    let mut registry = ToolRegistry::new();
+    registry.register(FunctionTool::new(
+        ToolDefinition::new(
+            "safe_tool",
+            "A safe tool",
+            json!({
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer"}
+                }
+            }),
+        )
+        .with_approval(true),
+        |_| Ok(json!({"ok": true})),
+    ));
+    let registry = Arc::new(registry);
+
+    let input = ScriptInput {
+        script: "[tools.available(), tools.describe('safe_tool')]".into(),
+        input: json!({}),
+    };
+
+    let output = engine
+        .create_run(input)
+        .with_tool_catalog_from_registry(registry.as_ref())
+        .with_tool_executor(tool_registry_executor(registry))
+        .execute();
+
+    let result = output.result.unwrap();
+    let available = result[0].as_array().unwrap();
+    assert_eq!(available.len(), 1);
+    assert_eq!(available[0]["name"], "safe_tool");
+    assert_eq!(available[0]["alias"], "safe_tool");
+    assert_eq!(available[0]["requires_approval"], true);
+    assert_eq!(result[1]["description"], "A safe tool");
+    assert_eq!(
+        result[1]["input_schema"]["properties"]["x"]["type"],
+        "integer"
+    );
+}
+
+#[test]
+fn test_tools_namespace_snapshot_is_per_run() {
+    let engine = make_engine();
+    let mut registry = ToolRegistry::new();
+    registry.register(FunctionTool::simple("old_tool", "old", |_| {
+        Ok(json!("old"))
+    }));
+
+    let input = ScriptInput {
+        script: "tools.available()".into(),
+        input: json!({}),
+    };
+
+    let run = engine
+        .create_run(input)
+        .with_tool_catalog_from_registry(&registry);
+
+    registry.register(FunctionTool::simple("new_tool", "new", |_| {
+        Ok(json!("new"))
+    }));
+    let registry = Arc::new(registry);
+
+    let output = run
+        .with_tool_executor(tool_registry_executor(registry))
+        .execute();
+    let result = output.result.unwrap();
+    let names: Vec<&str> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(names, vec!["old_tool"]);
 }
 
 #[test]

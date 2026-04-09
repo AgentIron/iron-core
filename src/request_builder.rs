@@ -1,5 +1,6 @@
 use crate::{
     config::{Config, ContextWindowPolicy},
+    context::models::CompactedContext,
     error::LoopError,
     tool::ToolRegistry,
 };
@@ -11,7 +12,31 @@ pub fn build_inference_request(
     instructions: Option<&str>,
     tool_registry: &ToolRegistry,
 ) -> Result<InferenceRequest, LoopError> {
-    build_inference_request_with_repo(config, messages, instructions, None, tool_registry)
+    build_inference_request_with_context_and_repo(
+        config,
+        messages,
+        None,
+        instructions,
+        None,
+        tool_registry,
+    )
+}
+
+pub fn build_inference_request_with_context(
+    config: &Config,
+    messages: &[Message],
+    compacted_context: Option<&CompactedContext>,
+    instructions: Option<&str>,
+    tool_registry: &ToolRegistry,
+) -> Result<InferenceRequest, LoopError> {
+    build_inference_request_with_context_and_repo(
+        config,
+        messages,
+        compacted_context,
+        instructions,
+        None,
+        tool_registry,
+    )
 }
 
 pub fn build_inference_request_with_repo(
@@ -21,10 +46,34 @@ pub fn build_inference_request_with_repo(
     repo_instruction_payload: Option<&crate::prompt::config::RepoInstructionPayload>,
     tool_registry: &ToolRegistry,
 ) -> Result<InferenceRequest, LoopError> {
+    build_inference_request_with_context_and_repo(
+        config,
+        messages,
+        None,
+        instructions,
+        repo_instruction_payload,
+        tool_registry,
+    )
+}
+
+pub fn build_inference_request_with_context_and_repo(
+    config: &Config,
+    messages: &[Message],
+    compacted_context: Option<&CompactedContext>,
+    instructions: Option<&str>,
+    repo_instruction_payload: Option<&crate::prompt::config::RepoInstructionPayload>,
+    tool_registry: &ToolRegistry,
+) -> Result<InferenceRequest, LoopError> {
     let mut pruned = messages.to_vec();
     apply_context_window_policy(config, &mut pruned)?;
 
-    let transcript = iron_providers::Transcript::with_messages(pruned);
+    let mut provider_messages = Vec::new();
+    if let Some(summary) = compacted_context_message(compacted_context) {
+        provider_messages.push(summary);
+    }
+    provider_messages.extend(pruned);
+
+    let transcript = iron_providers::Transcript::with_messages(provider_messages);
 
     let tool_policy = if tool_registry.is_empty() {
         ToolPolicy::None
@@ -50,6 +99,17 @@ pub fn build_inference_request_with_repo(
     }
 
     Ok(request)
+}
+
+fn compacted_context_message(compacted_context: Option<&CompactedContext>) -> Option<Message> {
+    let rendered = compacted_context?.render_to_text();
+    if rendered.is_empty() {
+        return None;
+    }
+
+    Some(Message::Assistant {
+        content: format!("[Compacted session context]\n{}", rendered),
+    })
 }
 
 fn build_composed_instructions(
@@ -97,7 +157,7 @@ fn apply_context_window_policy(
             Ok(())
         }
         ContextWindowPolicy::SummarizeAfter(_) => Err(LoopError::invalid_config(
-            "ContextWindowPolicy::SummarizeAfter is not implemented",
+            "ContextWindowPolicy::SummarizeAfter is not implemented; use context_management compaction instead",
         )),
     }
 }

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub u64);
@@ -112,8 +113,20 @@ impl StructuredMessage {
     }
 
     pub fn estimated_tokens(&self) -> usize {
-        (self.text_content().len() as f64 * 0.25).ceil() as usize
+        estimate_text_tokens(&self.text_content())
     }
+}
+
+fn estimate_text_tokens(text: &str) -> usize {
+    (text.len() as f64 * 0.25).ceil() as usize
+}
+
+fn estimate_tool_call_tokens(tool_name: &str, arguments: &Value) -> usize {
+    estimate_text_tokens(&format!("{}: {}", tool_name, arguments))
+}
+
+fn estimate_tool_result_tokens(tool_name: &str, result: &Value) -> usize {
+    estimate_text_tokens(&format!("{}: {}", tool_name, result))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,6 +409,11 @@ impl DurableSession {
             tool_record_index: record_index,
         });
 
+        self.uncompacted_tokens += estimate_tool_call_tokens(
+            &self.tool_records[record_index].tool_name,
+            &self.tool_records[record_index].arguments,
+        );
+
         record_index
     }
 
@@ -436,6 +454,11 @@ impl DurableSession {
             tool_record_index: record_index,
         });
 
+        self.uncompacted_tokens += estimate_tool_call_tokens(
+            &self.tool_records[record_index].tool_name,
+            &self.tool_records[record_index].arguments,
+        );
+
         record_index
     }
 
@@ -457,6 +480,9 @@ impl DurableSession {
                 outcome: ToolTerminalOutcome::Completed,
                 tool_record_index: i,
             });
+
+            self.uncompacted_tokens +=
+                estimate_tool_result_tokens(&record.tool_name, record.result.as_ref().unwrap());
         }
     }
 
@@ -478,6 +504,9 @@ impl DurableSession {
                 outcome: ToolTerminalOutcome::Failed,
                 tool_record_index: i,
             });
+
+            self.uncompacted_tokens +=
+                estimate_tool_result_tokens(&record.tool_name, record.result.as_ref().unwrap());
         }
     }
 
@@ -499,6 +528,9 @@ impl DurableSession {
                 outcome: ToolTerminalOutcome::Denied,
                 tool_record_index: i,
             });
+
+            self.uncompacted_tokens +=
+                estimate_tool_result_tokens(&record.tool_name, record.result.as_ref().unwrap());
         }
     }
 
@@ -520,6 +552,9 @@ impl DurableSession {
                 outcome: ToolTerminalOutcome::Cancelled,
                 tool_record_index: i,
             });
+
+            self.uncompacted_tokens +=
+                estimate_tool_result_tokens(&record.tool_name, record.result.as_ref().unwrap());
         }
     }
 
@@ -528,51 +563,123 @@ impl DurableSession {
         compacted: crate::context::models::CompactedContext,
         retained_tail: Vec<StructuredMessage>,
     ) {
+        let retained_message_count = retained_tail.len();
+        let split_point = self.messages.len().saturating_sub(retained_message_count);
+        let first_retained_timeline_index = self.timeline.iter().find_map(|entry| match entry {
+            TimelineEntry::UserMessage {
+                index,
+                message_index,
+            }
+            | TimelineEntry::AgentMessage {
+                index,
+                message_index,
+            } if *message_index >= split_point => Some(*index),
+            _ => None,
+        });
+
+        let mut retained_entries = Vec::new();
+        let mut retained_tool_indices = BTreeSet::new();
+        if let Some(cutoff) = first_retained_timeline_index {
+            for entry in &self.timeline {
+                if entry.index() < cutoff {
+                    continue;
+                }
+                match entry {
+                    TimelineEntry::ToolCallStarted {
+                        tool_record_index, ..
+                    }
+                    | TimelineEntry::ToolCallTerminal {
+                        tool_record_index, ..
+                    } => {
+                        retained_tool_indices.insert(*tool_record_index);
+                    }
+                    _ => {}
+                }
+                retained_entries.push(entry.clone());
+            }
+        }
+
+        let mut tool_index_map = HashMap::new();
+        let mut retained_tool_records = Vec::new();
+        for old_index in retained_tool_indices {
+            if let Some(record) = self.tool_records.get(old_index).cloned() {
+                let new_index = retained_tool_records.len();
+                tool_index_map.insert(old_index, new_index);
+                retained_tool_records.push(DurableToolRecord {
+                    timeline_started_index: None,
+                    timeline_terminal_index: None,
+                    ..record
+                });
+            }
+        }
+
         self.compacted_context = Some(compacted);
         self.messages = retained_tail;
+        self.tool_records = retained_tool_records;
         self.uncompacted_tokens = 0;
 
         self.timeline.clear();
-        for (i, msg) in self.messages.iter().enumerate() {
-            let timeline_index = self.timeline.len() as u64;
-            let entry = match msg {
-                StructuredMessage::User { .. } => TimelineEntry::UserMessage {
-                    index: timeline_index,
-                    message_index: i,
-                },
-                StructuredMessage::Agent { .. } => TimelineEntry::AgentMessage {
-                    index: timeline_index,
-                    message_index: i,
-                },
-            };
-            self.timeline.push(entry);
-        }
-
-        for (i, record) in self.tool_records.iter_mut().enumerate() {
-            if record.status.is_terminal() {
-                if let Some(_start_idx) = record.timeline_started_index {
+        for entry in retained_entries {
+            match entry {
+                TimelineEntry::UserMessage { message_index, .. } => {
+                    if message_index < split_point {
+                        continue;
+                    }
+                    let timeline_index = self.timeline.len() as u64;
+                    self.timeline.push(TimelineEntry::UserMessage {
+                        index: timeline_index,
+                        message_index: message_index - split_point,
+                    });
+                }
+                TimelineEntry::AgentMessage { message_index, .. } => {
+                    if message_index < split_point {
+                        continue;
+                    }
+                    let timeline_index = self.timeline.len() as u64;
+                    self.timeline.push(TimelineEntry::AgentMessage {
+                        index: timeline_index,
+                        message_index: message_index - split_point,
+                    });
+                }
+                TimelineEntry::ToolCallStarted {
+                    call_id,
+                    tool_name,
+                    tool_record_index,
+                    ..
+                } => {
+                    let Some(&new_tool_index) = tool_index_map.get(&tool_record_index) else {
+                        continue;
+                    };
                     let timeline_index = self.timeline.len() as u64;
                     self.timeline.push(TimelineEntry::ToolCallStarted {
                         index: timeline_index,
-                        call_id: record.call_id.clone(),
-                        tool_name: record.tool_name.clone(),
-                        tool_record_index: i,
+                        call_id,
+                        tool_name,
+                        tool_record_index: new_tool_index,
                     });
-                    record.timeline_started_index = Some(timeline_index);
+                    self.tool_records[new_tool_index].timeline_started_index = Some(timeline_index);
                 }
-                let outcome = record
-                    .status
-                    .terminal_outcome()
-                    .unwrap_or(ToolTerminalOutcome::Completed);
-                let timeline_index = self.timeline.len() as u64;
-                self.timeline.push(TimelineEntry::ToolCallTerminal {
-                    index: timeline_index,
-                    call_id: record.call_id.clone(),
-                    tool_name: record.tool_name.clone(),
+                TimelineEntry::ToolCallTerminal {
+                    call_id,
+                    tool_name,
                     outcome,
-                    tool_record_index: i,
-                });
-                record.timeline_terminal_index = Some(timeline_index);
+                    tool_record_index,
+                    ..
+                } => {
+                    let Some(&new_tool_index) = tool_index_map.get(&tool_record_index) else {
+                        continue;
+                    };
+                    let timeline_index = self.timeline.len() as u64;
+                    self.timeline.push(TimelineEntry::ToolCallTerminal {
+                        index: timeline_index,
+                        call_id,
+                        tool_name,
+                        outcome,
+                        tool_record_index: new_tool_index,
+                    });
+                    self.tool_records[new_tool_index].timeline_terminal_index =
+                        Some(timeline_index);
+                }
             }
         }
     }

@@ -27,19 +27,19 @@ Use the git dependency for now:
 ```toml
 [dependencies]
 iron-core = { git = "https://github.com/AgentIron/iron-core", branch = "main" }
-iron-providers = "0.1.0"
+iron-providers = "0.1.1"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
-`iron-core` is not ready for crates.io publication yet because the optional `embedded-python` feature depends on `monty` from git.
+`iron-core` is not ready for crates.io publication yet because the optional `embedded-python` feature depends on `monty` from git until a usable crates.io release exists.
 
 If you need the built-in `python_exec` tool, enable the feature explicitly:
 
 ```toml
 [dependencies]
 iron-core = { git = "https://github.com/AgentIron/iron-core", branch = "main", features = ["embedded-python"] }
-iron-providers = "0.1.0"
+iron-providers = "0.1.1"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```

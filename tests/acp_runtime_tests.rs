@@ -216,7 +216,7 @@ fn simple_prompt_returns_end_turn() {
             },
             ProviderEvent::Complete,
         ]]);
-        let agent = IronAgent::new(Config::default(), provider);
+        let agent = IronAgent::new(Config::default().with_embedded_python_enabled(), provider);
         let conn = agent.connect();
         let session = conn.create_session().unwrap();
 
@@ -237,7 +237,7 @@ fn prompt_captures_text_events_in_order() {
             },
             ProviderEvent::Complete,
         ]]);
-        let agent = IronAgent::new(Config::default(), provider);
+        let agent = IronAgent::new(Config::default().with_embedded_python_enabled(), provider);
         let conn = agent.connect();
         let session = conn.create_session().unwrap();
 
@@ -265,7 +265,7 @@ fn drain_events_clears_buffer() {
             },
             ProviderEvent::Complete,
         ]]);
-        let agent = IronAgent::new(Config::default(), provider);
+        let agent = IronAgent::new(Config::default().with_embedded_python_enabled(), provider);
         let conn = agent.connect();
         let session = conn.create_session().unwrap();
 
@@ -1026,6 +1026,132 @@ fn async_permission_cancel_verdict_cancels_turn() {
         let session = conn.create_session().unwrap();
         let outcome = session.prompt("do risky thing").await;
         assert_eq!(outcome, PromptOutcome::Cancelled);
+    });
+}
+
+#[cfg(feature = "embedded-python")]
+#[test]
+fn python_tools_namespace_child_calls_request_permission_and_record_durable_history() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new(
+                        "py1",
+                        "python_exec",
+                        json!({
+                            "script": "await tools.secure_tool({'value': input['value']})",
+                            "input": {"value": 7}
+                        }),
+                    ),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![ProviderEvent::Complete],
+        ]);
+        let agent = IronAgent::new(Config::default().with_embedded_python_enabled(), provider);
+        agent.register_python_exec_tool();
+        agent.register_tool(FunctionTool::new(
+            ToolDefinition::new(
+                "secure_tool",
+                "secure_tool",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "integer"}
+                    },
+                    "required": ["value"]
+                }),
+            )
+            .with_approval(true),
+            |args| Ok(json!({"seen": args["value"]})),
+        ));
+
+        let conn = agent.connect();
+        let seen_tools = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen_tools_handle = seen_tools.clone();
+        conn.on_permission_async(move |req| {
+            seen_tools_handle
+                .lock()
+                .unwrap()
+                .push(req.tool_name.clone());
+            Box::pin(async { PermissionVerdict::AllowOnce })
+        });
+
+        let session = conn.create_session().unwrap();
+        let outcome = session.prompt("run python").await;
+        assert_eq!(outcome, PromptOutcome::EndTurn);
+
+        assert_eq!(
+            *seen_tools.lock().unwrap(),
+            vec!["python_exec".to_string(), "secure_tool".to_string()]
+        );
+
+        let records = session.tool_records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].tool_name, "python_exec");
+        assert_eq!(records[1].tool_name, "secure_tool");
+        assert_eq!(records[1].status, ToolRecordStatus::Completed);
+        assert_eq!(records[1].result.clone().unwrap(), json!({"seen": 7}));
+        assert!(records[1].parent_script_id.is_some());
+    });
+}
+
+#[cfg(feature = "embedded-python")]
+#[test]
+fn python_tools_namespace_child_calls_apply_schema_validation() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new(
+                        "py1",
+                        "python_exec",
+                        json!({
+                            "script": "await tools.typed_tool({'wrong': 1})",
+                            "input": {}
+                        }),
+                    ),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![ProviderEvent::Complete],
+        ]);
+        let config = Config::default()
+            .with_embedded_python_enabled()
+            .with_approval_strategy(ApprovalStrategy::Never);
+        let agent = IronAgent::new(config, provider);
+        agent.register_python_exec_tool();
+        agent.register_tool(FunctionTool::new(
+            ToolDefinition::new(
+                "typed_tool",
+                "typed_tool",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "integer"}
+                    },
+                    "required": ["value"]
+                }),
+            ),
+            |_| Ok(json!({"ok": true})),
+        ));
+
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+        let outcome = session.prompt("run python").await;
+        assert_eq!(outcome, PromptOutcome::EndTurn);
+
+        let records = session.tool_records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].tool_name, "typed_tool");
+        assert_eq!(records[1].status, ToolRecordStatus::Failed);
+        let error = records[1].result.clone().unwrap();
+        assert!(error["error"]
+            .as_str()
+            .unwrap()
+            .contains("schema validation failed"));
+        assert!(error["validation_errors"].is_array());
     });
 }
 

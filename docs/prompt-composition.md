@@ -19,7 +19,7 @@ Absent layers are omitted without affecting the relative order of remaining laye
 
 ## Baseline Prompt
 
-The `iron-core` baseline prompt provides generic agent behavior rules: tool use guidelines, protected-resource rules, and (when enabled) `python_exec` guidance. It is always present as the first layer and cannot be suppressed or reordered.
+The `iron-core` baseline prompt provides generic agent behavior rules: tool use guidelines, protected-resource rules, and (when enabled) `python_exec` guidance, including how the embedded Python `tools` namespace relates to the visible runtime tool catalog. It is always present as the first layer and cannot be suppressed or reordered.
 
 ## Repository Instruction Loading
 

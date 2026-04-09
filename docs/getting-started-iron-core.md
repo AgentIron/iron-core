@@ -7,16 +7,18 @@ This guide covers the shortest path to embedding `iron-core` in an application.
 ```toml
 [dependencies]
 iron-core = { git = "https://github.com/AgentIron/iron-core", branch = "main" }
-iron-providers = "0.1.0"
+iron-providers = "0.1.1"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
 Enable the `embedded-python` feature on `iron-core` if you need the built-in
-`python_exec` runtime.
+`python_exec` runtime and its Monty `tools` namespace for orchestrating visible
+runtime tools from Python.
 
 `iron-core` is currently consumed from git rather than crates.io because the
-optional `embedded-python` feature depends on `monty` from git.
+optional `embedded-python` feature depends on `monty` from git until a usable
+crates.io release exists.
 
 ## 2. Configure a Provider
 
@@ -98,10 +100,10 @@ The event contract is strict:
 
 Useful session APIs:
 
-- `messages()` and `timeline()` to inspect durable history.
-- `tool_records()` to inspect the durable tool-call lifecycle.
+- `messages()` and `timeline()` to inspect the currently retained session history.
+- `tool_records()` to inspect currently retained tool-call lifecycle state.
 - `active_context(...)` to inspect the next request's context footprint.
-- `checkpoint(...)` to compact context when context management is enabled.
+- `checkpoint(...)` to compact context into `compacted_context + retained tail` when context management is enabled.
 - `export_handoff(...)` and `create_session_from_handoff(...)` to transfer continuity between sessions.
 
 ## 6. Build API Docs

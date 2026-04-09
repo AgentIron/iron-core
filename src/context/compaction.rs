@@ -77,7 +77,7 @@ impl CompactionEngine {
 
     pub fn build_compaction_input(
         previous: Option<&CompactedContext>,
-        older_messages: &[StructuredMessage],
+        older_messages: &[Message],
         reason: CompactionReason,
     ) -> String {
         let mut parts = Vec::new();
@@ -98,7 +98,7 @@ impl CompactionEngine {
             let text: Vec<String> = older_messages
                 .iter()
                 .enumerate()
-                .map(|(i, msg)| format!("[{}] {}", i, msg.text_content()))
+                .map(|(i, msg)| format!("[{}] {}", i, render_provider_message(msg)))
                 .collect();
             parts.push(format!("Raw material to summarize:\n{}", text.join("\n")));
         }
@@ -124,9 +124,14 @@ impl CompactionEngine {
         retention: &TailRetentionRule,
         reason: CompactionReason,
     ) -> CompactionInput {
-        let (older, tail) = Self::split_session(session, retention);
-        let prompt_text =
-            Self::build_compaction_input(session.compacted_context.as_ref(), &older, reason);
+        let (_older, tail) = Self::split_session(session, retention);
+        let split_point = session.messages.len().saturating_sub(tail.len());
+        let older_transcript = older_provider_messages(session, split_point);
+        let prompt_text = Self::build_compaction_input(
+            session.compacted_context.as_ref(),
+            &older_transcript,
+            reason,
+        );
         CompactionInput { prompt_text, tail }
     }
 
@@ -184,6 +189,101 @@ impl CompactionEngine {
 
 fn estimate_structured_tokens(msg: &StructuredMessage) -> usize {
     (msg.text_content().len() as f64 * 0.25).ceil() as usize
+}
+
+fn older_provider_messages(session: &DurableSession, split_point: usize) -> Vec<Message> {
+    let first_retained_timeline_index = session.timeline.iter().find_map(|entry| match entry {
+        crate::durable::TimelineEntry::UserMessage {
+            index,
+            message_index,
+        }
+        | crate::durable::TimelineEntry::AgentMessage {
+            index,
+            message_index,
+        } if *message_index >= split_point => Some(*index),
+        _ => None,
+    });
+
+    let mut messages = Vec::new();
+    for entry in &session.timeline {
+        if let Some(cutoff) = first_retained_timeline_index {
+            if entry.index() >= cutoff {
+                break;
+            }
+        }
+
+        match entry {
+            crate::durable::TimelineEntry::UserMessage { message_index, .. } => {
+                if let Some(StructuredMessage::User { content }) =
+                    session.messages.get(*message_index)
+                {
+                    let text = content
+                        .iter()
+                        .filter_map(|b| b.to_text())
+                        .collect::<Vec<_>>()
+                        .join("");
+                    messages.push(Message::User { content: text });
+                }
+            }
+            crate::durable::TimelineEntry::AgentMessage { message_index, .. } => {
+                if let Some(StructuredMessage::Agent { content }) =
+                    session.messages.get(*message_index)
+                {
+                    let text = content
+                        .iter()
+                        .filter_map(|b| b.to_text())
+                        .collect::<Vec<_>>()
+                        .join("");
+                    messages.push(Message::Assistant { content: text });
+                }
+            }
+            crate::durable::TimelineEntry::ToolCallStarted {
+                tool_record_index, ..
+            } => {
+                if let Some(record) = session.tool_records.get(*tool_record_index) {
+                    messages.push(Message::AssistantToolCall {
+                        call_id: record.call_id.clone(),
+                        tool_name: record.tool_name.clone(),
+                        arguments: record.arguments.clone(),
+                    });
+                }
+            }
+            crate::durable::TimelineEntry::ToolCallTerminal {
+                tool_record_index, ..
+            } => {
+                if let Some(record) = session.tool_records.get(*tool_record_index) {
+                    if record.status.is_terminal() {
+                        let result = record
+                            .result
+                            .clone()
+                            .unwrap_or(serde_json::json!({"error": "no result"}));
+                        messages.push(Message::Tool {
+                            call_id: record.call_id.clone(),
+                            tool_name: record.tool_name.clone(),
+                            result,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    messages
+}
+
+fn render_provider_message(msg: &Message) -> String {
+    match msg {
+        Message::User { content } => format!("user: {}", content),
+        Message::Assistant { content } => format!("assistant: {}", content),
+        Message::AssistantToolCall {
+            tool_name,
+            arguments,
+            ..
+        } => format!("assistant_tool_call {}: {}", tool_name, arguments),
+        Message::Tool {
+            tool_name, result, ..
+        } => format!("tool_result {}: {}", tool_name, result),
+    }
 }
 
 fn extract_json_object(raw: &str) -> String {

@@ -10,7 +10,7 @@ readme = "README.md"
 repository = "https://github.com/AgentIron/iron-core"
 
 [dependencies]
-iron-providers = "0.1.0"
+iron-providers = "0.1.1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 serde = { version = "1", features = ["derive"] }
