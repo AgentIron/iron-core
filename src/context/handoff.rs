@@ -1,3 +1,16 @@
+//! Handoff export/import for session continuity.
+//!
+//! The handoff bundle transfers conversation state (messages, instructions,
+//! compacted context) but explicitly EXCLUDES:
+//! - Runtime-local tool capabilities (including MCP server inventory)
+//! - Runtime-local capability configurations
+//! - Session MCP enablement state
+//! - Session plugin enablement state and plugin auth bindings
+//! - Other runtime-local state that may differ between environments
+//!
+//! This preserves portability: the destination runtime determines its own
+//! available integrations and tools.
+
 use crate::context::config::ContextManagementConfig;
 use crate::context::models::{CompactedContext, PortabilityNote};
 use crate::durable::{DurableSession, SessionId, StructuredMessage};
@@ -143,6 +156,9 @@ impl HandoffImporter {
             target.messages.push(msg);
         }
 
+        // Note: MCP server and plugin enablement are NOT imported as part of handoff.
+        // The destination runtime determines its own tool availability.
+
         Ok(())
     }
 
@@ -167,6 +183,9 @@ impl HandoffImporter {
         for msg in bundle.recent_tail {
             session.messages.push(msg);
         }
+
+        // Note: MCP server and plugin enablement are NOT imported as part of handoff.
+        // The destination runtime determines its own tool availability.
 
         session
     }

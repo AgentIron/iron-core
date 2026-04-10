@@ -217,11 +217,65 @@ fn runtime_context_python_enabled() {
 }
 
 #[test]
+fn runtime_context_python_sandbox_boundary() {
+    let config = Config::default().with_embedded_python_enabled();
+    let ctx = RuntimeContextRenderer::render(
+        &config,
+        None,
+        std::path::Path::new("/tmp"),
+        &[],
+        false,
+        true,
+    );
+    assert!(
+        ctx.contains("Sandbox boundary"),
+        "runtime context should have sandbox boundary section"
+    );
+    assert!(
+        ctx.contains("direct OS, filesystem, and network access from Python is unavailable"),
+        "runtime context should state direct access is unavailable"
+    );
+    assert!(
+        ctx.contains("tools.<alias>(payload)"),
+        "runtime context should mention tools alias"
+    );
+    assert!(
+        ctx.contains("tools.call(name, payload)"),
+        "runtime context should mention tools.call"
+    );
+    assert!(
+        ctx.contains("pathlib"),
+        "runtime context should mention pathlib as unsupported"
+    );
+}
+
+#[test]
 fn baseline_prompt_mentions_protected_resources() {
     let prompt = iron_core::prompt::BASELINE_PROMPT;
     assert!(prompt.contains("Protected Resources"));
     assert!(prompt.contains("protected resource"));
     assert!(prompt.contains("python_exec"));
+}
+
+#[test]
+fn baseline_prompt_describes_sandbox_boundary() {
+    let prompt = iron_core::prompt::BASELINE_PROMPT;
+    assert!(
+        prompt.contains("sandboxed"),
+        "baseline should describe python_exec as sandboxed"
+    );
+    assert!(
+        prompt.contains("tools.<tool>(payload)"),
+        "baseline should mention tools namespace"
+    );
+    assert!(
+        prompt.contains("pathlib"),
+        "baseline should mention pathlib as unsupported"
+    );
+    assert!(
+        prompt.contains("os"),
+        "baseline should mention os as unsupported"
+    );
 }
 
 #[test]

@@ -10,5 +10,5 @@ The runtime context section enumerates the current protected resource paths.
 
 ## Embedded Python
 
-When the python_exec tool is available, prefer it for deterministic computation, tool orchestration, and safe parallelization of independent tasks. Within python_exec, prefer the provided tools namespace for tool calls instead of inventing ad hoc shims. Follow the restrictions documented in the runtime context section when python_exec is enabled.
+When the python_exec tool is available, prefer it for deterministic computation, tool orchestration, and safe parallelization of independent tasks. Note that python_exec is a sandboxed orchestration environment; it does not have direct filesystem, OS, or network access. For host interactions from within python_exec, use the provided tools namespace (await tools.<tool>(payload) or await tools.call(name, payload)) rather than direct Python APIs such as pathlib, open, or os.
 </baseline_instructions>"##;

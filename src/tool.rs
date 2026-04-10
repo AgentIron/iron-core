@@ -110,6 +110,16 @@ impl std::fmt::Debug for ToolRegistry {
     }
 }
 
+impl Clone for ToolRegistry {
+    fn clone(&self) -> Self {
+        // ToolRegistry contains Box<dyn Tool> which can't be easily cloned
+        // We create a new empty registry - tools need to be re-registered
+        Self {
+            tools: HashMap::new(),
+        }
+    }
+}
+
 impl ToolRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {

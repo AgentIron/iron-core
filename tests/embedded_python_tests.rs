@@ -222,7 +222,7 @@ fn test_python_exec_tool_definition() {
 
     assert_eq!(def.name, "python_exec");
     assert!(tool.requires_approval());
-    assert!(def.description.contains("Monty"));
+    assert!(def.description.contains("sandboxed"));
 }
 
 #[test]
@@ -638,4 +638,72 @@ fn test_python_exec_tool_returns_error_on_bad_script() {
 fn test_portability_no_native_deps_in_embedded_path() {
     let has_rustpython = option_env!("CARGO_DEPENDENCY_RUSTPYTHON").is_some();
     assert!(!has_rustpython, "RustPython should not be present");
+}
+
+#[test]
+fn test_os_access_fails_with_sandbox_violation() {
+    let engine = make_engine();
+    // Test using pathlib which triggers OsCall in Monty
+    let input = ScriptInput {
+        script: "import pathlib\nlist(pathlib.Path('/tmp').iterdir())".into(),
+        input: json!({}),
+    };
+    let run = engine.create_run(input);
+    let output = run.execute();
+
+    assert_eq!(output.status, ScriptExecStatus::Failed);
+    let err = output.error.expect("should have error");
+    assert_eq!(err.kind, ScriptErrorKind::SandboxViolation);
+    assert!(
+        err.message.contains("OS access not available in sandbox"),
+        "error should explain sandbox restriction"
+    );
+    assert!(
+        err.message.contains("tools.<alias>(payload)"),
+        "error should suggest tools namespace with alias"
+    );
+    assert!(
+        err.message.contains("tools.call(name, payload)"),
+        "error should suggest tools.call"
+    );
+}
+
+#[test]
+fn test_pathlib_access_fails_with_sandbox_violation() {
+    let engine = make_engine();
+    let input = ScriptInput {
+        script: "import pathlib\npathlib.Path('/tmp').exists()".into(),
+        input: json!({}),
+    };
+    let run = engine.create_run(input);
+    let output = run.execute();
+
+    assert_eq!(output.status, ScriptExecStatus::Failed);
+    let err = output.error.expect("should have error");
+    assert_eq!(err.kind, ScriptErrorKind::SandboxViolation);
+    assert!(err.message.contains("OS access not available in sandbox"));
+}
+
+#[test]
+fn test_python_exec_tool_description_mentions_sandbox() {
+    let tool = PythonExecTool::new();
+    let def = tool.definition();
+
+    assert_eq!(def.name, "python_exec");
+    assert!(
+        def.description.contains("sandboxed"),
+        "tool description should mention sandboxed"
+    );
+    assert!(
+        def.description.contains("pathlib"),
+        "tool description should mention pathlib as unsupported"
+    );
+    assert!(
+        def.description.contains("os"),
+        "tool description should mention os as unsupported"
+    );
+    assert!(
+        def.description.contains("tools"),
+        "tool description should mention tools namespace"
+    );
 }

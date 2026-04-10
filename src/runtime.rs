@@ -6,6 +6,8 @@ use crate::{
     durable::{DurableSession, SessionId},
     ephemeral::EphemeralTurn,
     error::RuntimeError,
+    mcp::{McpConnectionManager, McpServerRegistry},
+    plugin::registry::PluginRegistry,
     tool::ToolRegistry,
 };
 use iron_providers::Provider;
@@ -22,6 +24,8 @@ struct RuntimeInner {
     provider: Arc<dyn Provider>,
     capabilities: RwLock<CapabilityRegistry>,
     tool_registry: RwLock<ToolRegistry>,
+    mcp_registry: RwLock<McpServerRegistry>,
+    plugin_registry: RwLock<PluginRegistry>,
     sessions: RwLock<HashMap<SessionId, Arc<RuntimeSession>>>,
     connections: RwLock<HashMap<ConnectionId, Arc<RuntimeConnection>>>,
     tokio_handle: tokio::runtime::Handle,
@@ -82,6 +86,8 @@ impl IronRuntime {
             provider: Arc::new(provider),
             capabilities: RwLock::new(CapabilityRegistry::new()),
             tool_registry: RwLock::new(ToolRegistry::new()),
+            mcp_registry: RwLock::new(McpServerRegistry::new()),
+            plugin_registry: RwLock::new(PluginRegistry::new()),
             sessions: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
             tokio_handle: handle,
@@ -108,6 +114,8 @@ impl IronRuntime {
             provider: Arc::new(provider),
             capabilities: RwLock::new(CapabilityRegistry::new()),
             tool_registry: RwLock::new(ToolRegistry::new()),
+            mcp_registry: RwLock::new(McpServerRegistry::new()),
+            plugin_registry: RwLock::new(PluginRegistry::new()),
             sessions: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
             tokio_handle: handle,
@@ -180,6 +188,30 @@ impl IronRuntime {
         }
     }
 
+    /// Borrow the MCP server registry.
+    pub fn mcp_registry(&self) -> std::sync::RwLockReadGuard<'_, McpServerRegistry> {
+        self.inner.mcp_registry.read().unwrap()
+    }
+
+    /// Register an MCP server configuration.
+    pub fn register_mcp_server(&self, config: crate::mcp::McpServerConfig) {
+        self.inner
+            .mcp_registry
+            .write()
+            .unwrap()
+            .register_server(config);
+    }
+
+    /// Borrow the plugin registry.
+    pub fn plugin_registry(&self) -> std::sync::RwLockReadGuard<'_, PluginRegistry> {
+        self.inner.plugin_registry.read().unwrap()
+    }
+
+    /// Register a plugin configuration.
+    pub fn register_plugin(&self, config: crate::plugin::config::PluginConfig) {
+        self.inner.plugin_registry.write().unwrap().register(config);
+    }
+
     /// Borrow the Tokio runtime handle used for orchestration.
     pub fn tokio_handle(&self) -> &tokio::runtime::Handle {
         &self.inner.tokio_handle
@@ -250,6 +282,32 @@ impl IronRuntime {
                 &self.inner.config.prompt_composition.additional_files,
             );
             durable.repo_instruction_payload = Some(payload);
+        }
+
+        // Initialize MCP server enablement state for new session
+        if self.inner.config.mcp.enabled {
+            let mcp_registry = self.mcp_registry();
+            for server in mcp_registry.list_servers() {
+                let enabled = if self.inner.config.mcp.enabled_by_default {
+                    server.config.enabled_by_default
+                } else {
+                    false
+                };
+                durable.set_mcp_server_enabled(&server.config.id, enabled);
+            }
+        }
+
+        // Initialize plugin enablement state for new session
+        if self.inner.config.plugins.enabled {
+            let plugin_registry = self.plugin_registry();
+            for plugin in plugin_registry.list() {
+                let enabled = if self.inner.config.plugins.enabled_by_default {
+                    plugin.config.enabled_by_default
+                } else {
+                    false
+                };
+                durable.set_plugin_enabled(&plugin.config.id, enabled);
+            }
         }
 
         let session = Arc::new(Mutex::new(durable));
@@ -409,6 +467,36 @@ impl IronRuntime {
 
         self.inner.sessions.write().unwrap().clear();
         self.inner.connections.write().unwrap().clear();
+    }
+
+    /// Get effective tool definitions for a session.
+    /// Combines local tools with MCP-backed tools and plugin-backed tools based on session state.
+    pub fn get_effective_tool_definitions(
+        &self,
+        session_id: SessionId,
+    ) -> Vec<crate::tool::ToolDefinition> {
+        if let Some(session) = self.get_session(session_id) {
+            if let Ok(session_guard) = session.lock() {
+                let local_registry = Arc::new((*self.tool_registry()).clone());
+                let mcp_registry = Arc::new((*self.mcp_registry()).clone());
+                let plugin_registry = Arc::new((*self.plugin_registry()).clone());
+
+                // Get MCP tools
+                let effective_mcp_view =
+                    crate::mcp::EffectiveToolView::new(local_registry.clone(), mcp_registry);
+                let mut definitions = effective_mcp_view.get_tool_definitions(&session_guard);
+
+                // Get plugin tools
+                let effective_plugin_view =
+                    crate::plugin::effective_tools::EffectivePluginToolView::new(plugin_registry);
+                let plugin_definitions = effective_plugin_view
+                    .get_tool_definitions(&session_guard, &session_guard.plugin_enablement);
+                definitions.extend(plugin_definitions);
+
+                return definitions;
+            }
+        }
+        self.tool_registry().definitions()
     }
 }
 

@@ -136,7 +136,7 @@ let prompt_config = PromptCompositionConfig::new()
 When a session is exported as a handoff bundle:
 
 - **Included**: session instructions (layer 5) and the conversation transcript.
-- **Excluded**: repository instruction files, additional instruction files, additional inline blocks, and runtime context. These are runtime-owned and will be re-resolved in the receiving environment.
+- **Excluded**: repository instruction files, additional instruction files, additional inline blocks, runtime context, session-scoped MCP/plugin enablement state, and plugin runtime/auth inventory. These are runtime-owned and will be re-resolved in the receiving environment.
 
 This ensures handoff bundles remain portable across machines and do not carry stale or environment-specific instruction content.
 

@@ -12,6 +12,7 @@ It provides:
 - context compaction, active-context accounting, and handoff export/import
 - layered prompt composition with repository instruction loading and runtime context injection
 - optional embedded Python execution via the `embedded-python` feature
+- experimental WASM integration-plugin scaffolding with runtime-local inventory, auth metadata, and session-scoped enablement
 
 The facade API is the recommended integration surface for new code. Older `SessionHandle`-style APIs are still exported for compatibility, but are deprecated.
 
@@ -108,9 +109,18 @@ For non-streaming compatibility code, `session.prompt().await` and `session.drai
 
 Use `BuiltinToolConfig` to scope filesystem access, disable specific tools, and tune limits such as command timeouts and output caps.
 
+## Integration Plugins
+
+`iron-core` now includes an experimental WASM integration-plugin surface alongside built-in tools and MCP servers.
+
+The current implementation includes runtime configuration, plugin inventory/registry types, session-default enablement, manifest/auth/status models, checksum utilities for remote artifacts, and namespaced plugin tool definitions.
+
+The end-to-end execution path is still incomplete: remote downloading, manifest extraction from WASM binaries, OAuth exchange/refresh, and WASM tool execution are not implemented yet.
+
 ## Documentation
 
 - [Getting Started](docs/getting-started-iron-core.md)
+- [Integration Plugins](docs/integration-plugins.md)
 - [Prompt Composition](docs/prompt-composition.md)
 
 Build the API docs locally with:

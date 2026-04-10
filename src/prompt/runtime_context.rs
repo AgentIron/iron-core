@@ -75,6 +75,7 @@ fn render_python_context(config: &EmbeddedPythonConfig) -> String {
     s.push_str("Status: enabled\n");
     s.push_str("Preferred uses: deterministic computation, tool orchestration, safe parallelization of independent tasks.\n");
     s.push_str("Tool access: the script receives `tools`, a namespace derived from the visible runtime tool catalog. Prefer `await tools.<tool>(payload)` for Python-safe aliases, use `await tools.call(name, payload)` for raw-name fallback, and keep `iron_call(name, args)` only as a low-level escape hatch.\n");
+    s.push_str("Sandbox boundary: direct OS, filesystem, and network access from Python is unavailable. For host interactions (read/write files, execute commands, network requests), use the tools namespace: `await tools.<alias>(payload)` or `await tools.call(name, payload)`. Direct use of pathlib, open, os, and similar APIs for host access is not supported.\n");
     s.push_str("Restrictions:\n");
     s.push_str("- No package installation (pip is unavailable)\n");
     s.push_str("- Do not assume arbitrary third-party libraries are available\n");

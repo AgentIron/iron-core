@@ -266,17 +266,10 @@ impl ScriptRun {
                     }
                 }
 
-                RunProgress::OsCall(call) => {
-                    let exc = MontyException::new(
-                        ExcType::RuntimeError,
-                        Some("OS access not available in sandbox".to_string()),
-                    );
-                    match call.resume(ExtFunctionResult::Error(exc), PrintWriter::Disabled) {
-                        Ok(next) => next,
-                        Err(e) => {
-                            return ScriptOutput::failed(ScriptError::runtime(format!("{}", e)));
-                        }
-                    }
+                RunProgress::OsCall(_call) => {
+                    return ScriptOutput::failed(ScriptError::sandbox_violation(
+                        "OS access not available in sandbox. Use tools.<alias>(payload) or tools.call(name, payload) for host access instead."
+                    ));
                 }
             };
         }

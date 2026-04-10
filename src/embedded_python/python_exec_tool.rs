@@ -27,7 +27,7 @@ impl PythonExecTool {
     pub fn new() -> Self {
         let definition = ToolDefinition::new(
             "python_exec",
-            "Execute a Python script in the embedded Monty runtime. The script receives `input` and a `tools` namespace derived from the visible runtime tool catalog. Prefer `await tools.<tool_name>(payload)` or `await tools.call(name, payload)` for orchestration, and use `asyncio.gather(...)` for parallel calls. `iron_call(name, args)` remains available as a low-level fallback. The last expression is the result.",
+            "Execute a Python script in a sandboxed embedded runtime. The script receives `input` and a `tools` namespace derived from the visible runtime tool catalog. Use `await tools.<tool_name>(payload)` or `await tools.call(name, payload)` for tool orchestration, and `asyncio.gather(...)` for parallel calls. The runtime is sandboxed: direct filesystem, OS, and network APIs (e.g., pathlib, open, os) are not available. Access the host through the tools namespace only. `iron_call(name, args)` remains available as a low-level fallback. The last expression is the result.",
             json!({
                 "type": "object",
                 "properties": {

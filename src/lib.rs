@@ -173,6 +173,8 @@ pub mod facade;
     note = "Use `AgentLoop` from the new facade instead. This module will be removed in a future release."
 )]
 pub mod loop_state;
+pub mod mcp;
+pub mod plugin;
 pub mod prompt;
 pub mod prompt_lifecycle;
 pub mod prompt_runner;
@@ -208,7 +210,7 @@ pub use crate::prompt::{
 };
 pub use config::{
     ApprovalStrategy, Config, ConfigSource, ContextManagementConfig, ContextWindowPolicy,
-    EmbeddedPythonConfig, PromptCompositionConfig,
+    EmbeddedPythonConfig, McpConfig, PluginConfig as RuntimePluginConfig, PromptCompositionConfig,
 };
 pub use connection::IronConnection;
 pub use context::{
@@ -250,6 +252,25 @@ pub use builtin::{
 pub use transport::{
     connect_tcp_client, create_in_process_transport, create_stdio_agent, serve_tcp_agent,
     AcpSupport, InProcessTransport, TransportKind, TransportMetadata,
+};
+
+pub use mcp::{
+    EffectiveToolView, McpConnectionManager, McpServerRegistry, McpServerConfig, McpServerState,
+    McpServerHealth, McpTool, McpTransport, McpToolInfo, SessionMcpSummary, ServerStatus,
+};
+
+pub use plugin::{
+    auth::{AuthActionHint, AuthAvailability, AuthInteractionRequest, AuthInteractionResponse,
+           AuthInteractionResult, AuthState, CredentialBinding, OAuthProvider, OAuthRequirements},
+    config::{Checksum, ChecksumAlgorithm, PluginConfig as PluginSourceConfig, PluginSource},
+    effective_tools::{EffectivePluginToolView, PluginTool},
+    lifecycle::{InstallResult, PluginLifecycle},
+    manifest::{ExportedTool, PluginIdentity, PluginManifest, PluginPublisher, 
+               PresentationMetadata, ToolAuthRequirements},
+    registry::{PluginId, PluginRegistry, PluginState},
+    session::SessionPluginEnablement,
+    status::{PerToolAvailability, PluginHealth, PluginRuntimeStatus, PluginStatus},
+    network::NetworkPolicy as PluginNetworkPolicy,
 };
 
 pub use iron_providers::{

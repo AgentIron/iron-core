@@ -55,6 +55,10 @@ pub struct Config {
     pub embedded_python: EmbeddedPythonConfig,
     /// Prompt composition configuration (baseline, repo instructions, runtime context).
     pub prompt_composition: PromptCompositionConfig,
+    /// MCP configuration
+    pub mcp: McpConfig,
+    /// Plugin configuration
+    pub plugins: PluginConfig,
 }
 
 impl Default for Config {
@@ -69,6 +73,8 @@ impl Default for Config {
             context_management: ContextManagementConfig::default(),
             embedded_python: EmbeddedPythonConfig::default(),
             prompt_composition: PromptCompositionConfig::default(),
+            mcp: McpConfig::default(),
+            plugins: PluginConfig::default(),
         }
     }
 }
@@ -139,6 +145,18 @@ impl Config {
         self
     }
 
+    /// Set the MCP configuration.
+    pub fn with_mcp(mut self, mcp: McpConfig) -> Self {
+        self.mcp = mcp;
+        self
+    }
+
+    /// Set the plugin configuration.
+    pub fn with_plugins(mut self, plugins: PluginConfig) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
     /// Validate this config, returning an error if required fields are missing
     /// or generation constraints are out of range.
     pub fn validate(&self) -> Result<(), LoopError> {
@@ -203,10 +221,8 @@ pub enum ContextWindowPolicy {
     KeepRecent(usize),
     /// Summarize older messages once more than `N` are retained.
     ///
-    /// This variant is reserved for future direct summarization support. The
-    /// currently supported summarization path is provider-backed
-    /// `context_management` compaction; when this policy is applied directly,
-    /// older messages are dropped.
+    /// This variant is reserved for future summarization support. At present,
+    /// older messages are dropped when the policy is applied directly.
     SummarizeAfter(usize),
 }
 
@@ -239,8 +255,8 @@ impl ContextWindowPolicy {
 /// Configuration for the embedded Python runtime.
 ///
 /// `iron-core` keeps the Monty-backed `python_exec` runtime in-tree.
-/// Publishing this crate to crates.io is deferred until `monty` has
-/// a usable library release on crates.io.
+/// Publishing this crate to crates.io is deferred until `monty` is
+/// available on crates.io.
 ///
 /// These limits control source size, result size, timeout, and child tool fan-out.
 #[derive(Debug, Clone, PartialEq)]
@@ -331,5 +347,94 @@ impl EmbeddedPythonConfig {
             ));
         }
         Ok(())
+    }
+}
+
+/// Configuration for MCP (Model Context Protocol) servers.
+///
+/// This configuration controls MCP server behavior and defaults for new sessions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpConfig {
+    /// Whether MCP is enabled globally for this runtime.
+    pub enabled: bool,
+    /// Whether configured MCP servers are enabled by default for new sessions.
+    /// If false, new sessions start with all MCP servers disabled.
+    pub enabled_by_default: bool,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            enabled_by_default: true,
+        }
+    }
+}
+
+impl McpConfig {
+    /// Create a new MCP configuration using defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable or disable MCP support globally.
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Set whether MCP servers are enabled by default for new sessions.
+    pub fn with_enabled_by_default(mut self, enabled_by_default: bool) -> Self {
+        self.enabled_by_default = enabled_by_default;
+        self
+    }
+}
+
+/// Configuration for WASM integration plugins.
+///
+/// This configuration controls plugin behavior and defaults for new sessions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginConfig {
+    /// Whether plugins are enabled globally for this runtime.
+    pub enabled: bool,
+    /// Whether configured plugins are enabled by default for new sessions.
+    /// If false, new sessions start with all plugins disabled.
+    pub enabled_by_default: bool,
+    /// Base directory for caching plugin artifacts
+    pub artifact_cache_dir: std::path::PathBuf,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            enabled_by_default: true,
+            artifact_cache_dir: std::path::PathBuf::from("./plugin_cache"),
+        }
+    }
+}
+
+impl PluginConfig {
+    /// Create a new plugin configuration using defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable or disable plugin support globally.
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Set whether plugins are enabled by default for new sessions.
+    pub fn with_enabled_by_default(mut self, enabled_by_default: bool) -> Self {
+        self.enabled_by_default = enabled_by_default;
+        self
+    }
+
+    /// Set the artifact cache directory.
+    pub fn with_artifact_cache_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.artifact_cache_dir = dir;
+        self
     }
 }

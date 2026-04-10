@@ -65,6 +65,11 @@ You can also register the built-in `read`, `write`, `edit`, `glob`, `grep`, and
 `webfetch` tools, plus `bash` or `powershell` when available, through
 `IronAgent::register_builtin_tools(...)`.
 
+`iron-core` can also surface tools from MCP servers and the experimental WASM
+integration-plugin subsystem. Plugin support is currently scaffolding only;
+see [integration-plugins.md](./integration-plugins.md) for the current status
+and API surface.
+
 ## 4. Use The Stream-First Session API
 
 ```rust,ignore
@@ -106,6 +111,10 @@ Useful session APIs:
 - `checkpoint(...)` to compact context into `compacted_context + retained tail` when context management is enabled.
 - `export_handoff(...)` and `create_session_from_handoff(...)` to transfer continuity between sessions.
 
+Handoff bundles intentionally exclude runtime-local state such as repository
+instruction files, runtime context, MCP inventory, plugin inventory, plugin auth
+bindings, and session-scoped MCP/plugin enablement decisions.
+
 ## 6. Build API Docs
 
 ```bash
@@ -115,3 +124,5 @@ cargo doc -p iron-core --no-deps
 The `iron-core` crate docs are the canonical API reference for the public embedding surface.
 
 For the prompt composition model — how `iron-core` assembles provider instructions from ordered layers — see [prompt-composition.md](./prompt-composition.md).
+
+For the experimental WASM plugin surface, see [integration-plugins.md](./integration-plugins.md).

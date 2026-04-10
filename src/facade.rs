@@ -553,6 +553,24 @@ impl IronAgent {
         self.runtime.set_capability_backend(id, backend);
     }
 
+    /// Register an MCP server with the agent.
+    ///
+    /// This adds a configured MCP server to the runtime inventory.
+    /// Servers must be registered before they can be enabled for sessions.
+    pub fn register_mcp_server(&self, config: crate::mcp::McpServerConfig) {
+        self.runtime.register_mcp_server(config);
+    }
+
+    /// Get the MCP server registry for inspection.
+    pub fn mcp_registry(&self) -> std::sync::RwLockReadGuard<'_, crate::mcp::McpServerRegistry> {
+        self.runtime.mcp_registry()
+    }
+
+    /// Get effective tool definitions for a session, including MCP tools.
+    pub fn get_effective_tools(&self, session_id: SessionId) -> Vec<crate::tool::ToolDefinition> {
+        self.runtime.get_effective_tool_definitions(session_id)
+    }
+
     /// Establish a new connection to the agent.
     ///
     /// Returns an [`AgentConnection`] which can be used to create sessions
@@ -1400,6 +1418,29 @@ impl AgentSession {
             &config.context_management,
             provider_name,
         )
+    }
+
+    /// Enable or disable an MCP server for this session.
+    pub fn set_mcp_server_enabled(&self, server_id: impl Into<String>, enabled: bool) {
+        if let Ok(mut session) = self.durable.lock() {
+            session.set_mcp_server_enabled(server_id, enabled);
+        }
+    }
+
+    /// Check if an MCP server is enabled for this session.
+    pub fn is_mcp_server_enabled(&self, server_id: &str) -> Option<bool> {
+        self.durable
+            .lock()
+            .ok()
+            .and_then(|s| s.is_mcp_server_enabled(server_id))
+    }
+
+    /// Get list of MCP servers enabled for this session.
+    pub fn list_enabled_mcp_servers(&self) -> Vec<String> {
+        self.durable
+            .lock()
+            .map(|s| s.list_enabled_mcp_servers())
+            .unwrap_or_default()
     }
 
     /// Import a handoff bundle into this session.

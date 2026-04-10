@@ -306,6 +306,15 @@ pub struct DurableSession {
     pub uncompacted_tokens: usize,
     #[serde(default)]
     pub repo_instruction_payload: Option<crate::prompt::config::RepoInstructionPayload>,
+    /// Session-scoped MCP server enablement state.
+    /// Maps MCP server IDs to whether they are enabled for this session.
+    #[serde(default)]
+    pub mcp_server_enablement: std::collections::HashMap<String, bool>,
+    /// Session-scoped plugin enablement state.
+    /// Maps plugin IDs to whether they are enabled for this session.
+    /// NOTE: This is excluded from handoff bundles (see handoff.rs).
+    #[serde(default)]
+    pub plugin_enablement: crate::plugin::session::SessionPluginEnablement,
 }
 
 impl DurableSession {
@@ -321,6 +330,8 @@ impl DurableSession {
             compacted_context: None,
             uncompacted_tokens: 0,
             repo_instruction_payload: None,
+            mcp_server_enablement: std::collections::HashMap::new(),
+            plugin_enablement: crate::plugin::session::SessionPluginEnablement::new(),
         }
     }
 
@@ -845,6 +856,42 @@ impl DurableSession {
         {
             tool_rec.parent_script_id = Some(script_id.to_string());
         }
+    }
+
+    /// Enable or disable an MCP server for this session.
+    pub fn set_mcp_server_enabled(&mut self, server_id: impl Into<String>, enabled: bool) {
+        self.mcp_server_enablement.insert(server_id.into(), enabled);
+    }
+
+    /// Check if an MCP server is enabled for this session.
+    /// Returns None if not explicitly set.
+    pub fn is_mcp_server_enabled(&self, server_id: &str) -> Option<bool> {
+        self.mcp_server_enablement.get(server_id).copied()
+    }
+
+    /// Get list of MCP server IDs that are enabled for this session.
+    pub fn list_enabled_mcp_servers(&self) -> Vec<String> {
+        self.mcp_server_enablement
+            .iter()
+            .filter(|(_, &enabled)| enabled)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Enable or disable a plugin for this session.
+    pub fn set_plugin_enabled(&mut self, plugin_id: impl Into<String>, enabled: bool) {
+        self.plugin_enablement.set_enabled(plugin_id, enabled);
+    }
+
+    /// Check if a plugin is enabled for this session.
+    /// Returns None if not explicitly set.
+    pub fn is_plugin_enabled(&self, plugin_id: &str) -> Option<bool> {
+        self.plugin_enablement.is_enabled(plugin_id)
+    }
+
+    /// Get list of plugin IDs that are enabled for this session.
+    pub fn list_enabled_plugins(&self) -> Vec<String> {
+        self.plugin_enablement.list_enabled()
     }
 }
 
