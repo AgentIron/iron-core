@@ -139,9 +139,9 @@ pub struct PermissionRequest {
 /// Events emitted during a streaming prompt session.
 ///
 /// These events are produced by the [`PromptEvents`] stream returned from
-/// [`AgentSession::prompt_stream`]. They provide real-time visibility into
-/// the agent's progress, including model output, tool calls, and user
-/// approval requests.
+/// [`AgentSession::prompt_stream`] and [`AgentSession::prompt_stream_with_blocks`].
+/// They provide real-time visibility into the agent's progress, including model
+/// output, tool calls, and user approval requests.
 ///
 /// # Event Ordering
 ///
@@ -290,7 +290,8 @@ pub enum PromptStatus {
 
 /// Handle to control an active streaming prompt.
 ///
-/// Returned by [`AgentSession::prompt_stream`], this handle allows you to
+/// Returned by [`AgentSession::prompt_stream`] and
+/// [`AgentSession::prompt_stream_with_blocks`], this handle allows you to
 /// approve or deny tool calls that require permission, or cancel the entire
 /// prompt.
 ///
@@ -384,7 +385,8 @@ impl std::fmt::Debug for PromptHandle {
 
 /// A stream of prompt events.
 ///
-/// Returned by [`AgentSession::prompt_stream`], this struct provides
+/// Returned by [`AgentSession::prompt_stream`] and
+/// [`AgentSession::prompt_stream_with_blocks`], this struct provides
 /// asynchronous access to events emitted during a prompt session.
 /// It implements [`Stream`] and can be polled for events.
 ///
@@ -1133,15 +1135,21 @@ fn convert_notification_to_prompt_event_with_index(
 ///
 /// # Prompt Methods
 ///
-/// Two methods are available for sending prompts:
+/// Three methods are available for sending prompts:
 ///
-/// - [`prompt`](AgentSession::prompt) - Blocking method that waits for completion
-///   and returns the outcome. Events are collected and can be retrieved with
-///   [`drain_events`](AgentSession::drain_events).
+/// - [`prompt`](AgentSession::prompt) - Blocking text-only method that waits
+///   for completion and returns the outcome. Events are collected and can be
+///   retrieved with [`drain_events`](AgentSession::drain_events).
 ///
-/// - [`prompt_stream`](AgentSession::prompt_stream) - Returns a stream of events
-///   and a handle for real-time interaction. This is the preferred method for
-///   interactive applications.
+/// - [`prompt_stream`](AgentSession::prompt_stream) - Streaming text-only
+///   method. Returns a stream of events and a handle for real-time interaction.
+///   This is a convenience wrapper over the shared streaming path.
+///
+/// - [`prompt_stream_with_blocks`](AgentSession::prompt_stream_with_blocks) -
+///   Streaming multimodal method. Accepts structured [`ContentBlock`] values
+///   (text, images, resources) and returns the same
+///   `(PromptHandle, PromptEvents)` contract. This is the preferred method for
+///   interactive applications that need multimodal input.
 ///
 /// # Example
 ///
@@ -1154,12 +1162,27 @@ fn convert_notification_to_prompt_event_with_index(
 ///     println!("{:?}", event);
 /// }
 ///
-/// // Using the streaming API
+/// // Using the streaming API (text-only convenience)
 /// let (handle, mut events) = session.prompt_stream("Hello again");
 /// while let Some(event) = events.next().await {
 ///     match event {
 ///         PromptEvent::Output { text } => print!("{}", text),
 ///         PromptEvent::Complete { outcome } => break,
+///         _ => {}
+///     }
+/// }
+///
+/// // Using the streaming API (multimodal)
+/// use iron_core::ContentBlock;
+/// let blocks = vec![
+///     ContentBlock::text("Describe this image:"),
+///     ContentBlock::Image { data: base64_data, mime_type: "image/png".into() },
+/// ];
+/// let (handle, mut events) = session.prompt_stream_with_blocks(&blocks);
+/// while let Some(event) = events.next().await {
+///     match event {
+///         PromptEvent::Output { text } => print!("{}", text),
+///         PromptEvent::Complete { .. } => break,
 ///         _ => {}
 ///     }
 /// }
@@ -1216,11 +1239,13 @@ impl AgentSession {
         }
     }
 
-    /// Send a prompt and return a stream of events.
+    /// Send a text prompt and return a stream of events.
     ///
-    /// This is the streaming API. It returns immediately with a [`PromptHandle`]
-    /// for controlling the prompt and a [`PromptEvents`] stream for receiving
-    /// events as they occur.
+    /// This is a convenience wrapper that wraps the text as a single text
+    /// [`ContentBlock`] and delegates to the shared streaming path used by
+    /// [`prompt_stream_with_blocks`](AgentSession::prompt_stream_with_blocks).
+    ///
+    /// See [`prompt_stream_with_blocks`] for the full multimodal streaming API.
     ///
     /// # Example
     ///
@@ -1239,6 +1264,68 @@ impl AgentSession {
     /// }
     /// ```
     pub fn prompt_stream(&self, text: &str) -> (PromptHandle, PromptEvents) {
+        let acp_blocks = vec![agent_client_protocol::ContentBlock::Text(
+            agent_client_protocol::TextContent::new(text),
+        )];
+        self.prompt_stream_with_acp_blocks(acp_blocks)
+    }
+
+    /// Send a multimodal prompt and return a stream of events.
+    ///
+    /// This is the streaming API for structured content. It accepts a slice of
+    /// [`ContentBlock`] values (text, images, resources) and returns the same
+    /// `(PromptHandle, PromptEvents)` contract as [`prompt_stream`].
+    ///
+    /// Multimodal streaming preserves the same event-ordering guarantees as
+    /// text-only streaming: incremental output may arrive before completion,
+    /// `ToolCall` precedes `ToolResult`, approval requests are emitted before
+    /// resolution, and exactly one terminal `Complete` is emitted last.
+    ///
+    /// An empty slice is accepted and follows the same semantics as
+    /// [`prompt_with_blocks`] for empty input.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use iron_core::ContentBlock;
+    ///
+    /// let blocks = vec![
+    ///     ContentBlock::text("Describe this image:"),
+    ///     ContentBlock::Image {
+    ///         data: base64_data,
+    ///         mime_type: "image/png".into(),
+    ///     },
+    /// ];
+    /// let (handle, mut events) = session.prompt_stream_with_blocks(&blocks);
+    ///
+    /// while let Some(event) = events.next().await {
+    ///     match event {
+    ///         PromptEvent::Output { text } => print!("{}", text),
+    ///         PromptEvent::Complete { outcome } => break,
+    ///         _ => {}
+    ///     }
+    /// }
+    /// ```
+    pub fn prompt_stream_with_blocks(
+        &self,
+        blocks: &[ContentBlock],
+    ) -> (PromptHandle, PromptEvents) {
+        let acp_blocks: Vec<_> = blocks.iter().map(to_acp_content_block).collect();
+        self.prompt_stream_with_acp_blocks(acp_blocks)
+    }
+
+    /// Shared internal streaming path that accepts pre-converted ACP content
+    /// blocks, sets up the active-stream state, and spawns the background
+    /// prompt task.
+    ///
+    /// Both [`prompt_stream`] (text convenience) and
+    /// [`prompt_stream_with_blocks`] (multimodal) delegate here so that
+    /// ACP block request construction, active-stream registration/removal,
+    /// and completion handling are unified in one place.
+    fn prompt_stream_with_acp_blocks(
+        &self,
+        acp_blocks: Vec<agent_client_protocol::ContentBlock>,
+    ) -> (PromptHandle, PromptEvents) {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let approval_resolvers: Rc<
             RefCell<HashMap<String, tokio::sync::oneshot::Sender<PermissionVerdict>>>,
@@ -1263,12 +1350,7 @@ impl AgentSession {
         let events = PromptEvents { rx: event_rx };
 
         let acp_session_id = agent_client_protocol::SessionId::new(self.id.to_string());
-        let request = agent_client_protocol::PromptRequest::new(
-            acp_session_id,
-            vec![agent_client_protocol::ContentBlock::Text(
-                agent_client_protocol::TextContent::new(text),
-            )],
-        );
+        let request = agent_client_protocol::PromptRequest::new(acp_session_id, acp_blocks);
 
         let connection = self.connection.clone();
         let active_streams = self.active_streams.clone();

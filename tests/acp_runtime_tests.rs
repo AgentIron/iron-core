@@ -19,8 +19,8 @@ use iron_core::{
     config::ApprovalStrategy,
     facade::{AgentEvent, FacadeToolStatus, PermissionVerdict, PromptOutcome},
     tool::{FunctionTool, ToolDefinition},
-    Config, ConnectionId, DurableSession, EphemeralTurn, IronAgent, IronRuntime, Provider,
-    ProviderEvent, SessionId, ToolRecordStatus, ToolTerminalOutcome, TurnPhase,
+    Config, ConnectionId, ContentBlock, DurableSession, EphemeralTurn, IronAgent, IronRuntime,
+    Provider, ProviderEvent, SessionId, ToolRecordStatus, ToolTerminalOutcome, TurnPhase,
 };
 use iron_providers::{InferenceRequest, ToolCall};
 use serde_json::json;
@@ -3049,5 +3049,295 @@ fn tool_execution_not_found_emits_failed_result() {
         let records = session.tool_records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].status, ToolRecordStatus::Failed);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Streaming multimodal tests (prompt_stream_with_blocks)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stream_blocks_emits_ordered_events() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new("sb1", "my_tool", json!({"x": 1})),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![
+                ProviderEvent::Output {
+                    content: "done".into(),
+                },
+                ProviderEvent::Complete,
+            ],
+        ]);
+        let agent = IronAgent::new(Config::default(), provider);
+        agent.register_tool(FunctionTool::simple("my_tool", "my_tool", |_| {
+            Ok(json!(42))
+        }));
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        let blocks = vec![
+            ContentBlock::text("analyze this"),
+            ContentBlock::Image {
+                data: "iVBORw0KGgo=".into(),
+                mime_type: "image/png".into(),
+            },
+        ];
+        let (handle, mut events) = session.prompt_stream_with_blocks(&blocks);
+
+        let mut collected = Vec::new();
+        while let Some(event) = events.next().await {
+            collected.push(event);
+            if matches!(collected.last(), Some(PromptEvent::Complete { .. })) {
+                break;
+            }
+        }
+
+        assert!(handle.status() == PromptStatus::Completed);
+
+        let has_tool_call = collected
+            .iter()
+            .any(|e| matches!(e, PromptEvent::ToolCall { call_id, .. } if call_id == "sb1"));
+        let has_tool_result = collected.iter().any(|e| matches!(e, PromptEvent::ToolResult { call_id, status: ToolResultStatus::Completed, .. } if call_id == "sb1"));
+        let has_output = collected
+            .iter()
+            .any(|e| matches!(e, PromptEvent::Output { text } if text == "done"));
+        let has_complete = collected.iter().any(|e| {
+            matches!(
+                e,
+                PromptEvent::Complete {
+                    outcome: PromptOutcome::EndTurn
+                }
+            )
+        });
+
+        assert!(has_tool_call, "expected ToolCall event");
+        assert!(has_tool_result, "expected ToolResult(Completed) event");
+        assert!(has_output, "expected Output event");
+        assert!(has_complete, "expected Complete event");
+
+        let complete_idx = collected
+            .iter()
+            .position(|e| matches!(e, PromptEvent::Complete { .. }))
+            .unwrap();
+        assert_eq!(
+            complete_idx,
+            collected.len() - 1,
+            "Complete should be last event"
+        );
+    });
+}
+
+#[test]
+fn stream_blocks_tool_call_precedes_tool_result() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new("ord_blk", "t", json!({})),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![
+                ProviderEvent::Output {
+                    content: "fin".into(),
+                },
+                ProviderEvent::Complete,
+            ],
+        ]);
+        let agent = IronAgent::new(Config::default(), provider);
+        agent.register_tool(FunctionTool::simple("t", "t", |_| Ok(json!(0))));
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        let blocks = vec![
+            ContentBlock::text("go"),
+            ContentBlock::Image {
+                data: "AAAA".into(),
+                mime_type: "image/jpeg".into(),
+            },
+        ];
+        let (_handle, mut events) = session.prompt_stream_with_blocks(&blocks);
+
+        let mut collected = Vec::new();
+        while let Some(event) = events.next().await {
+            collected.push(event);
+            if matches!(collected.last(), Some(PromptEvent::Complete { .. })) {
+                break;
+            }
+        }
+
+        let tool_call_pos = collected
+            .iter()
+            .position(|e| matches!(e, PromptEvent::ToolCall { call_id, .. } if call_id == "ord_blk"))
+            .unwrap();
+        let tool_result_pos = collected
+            .iter()
+            .position(|e| matches!(e, PromptEvent::ToolResult { call_id, .. } if call_id == "ord_blk"))
+            .unwrap();
+        assert!(
+            tool_call_pos < tool_result_pos,
+            "ToolCall must precede ToolResult"
+        );
+
+        let complete_idx = collected
+            .iter()
+            .position(|e| matches!(e, PromptEvent::Complete { .. }))
+            .unwrap();
+        assert_eq!(
+            complete_idx,
+            collected.len() - 1,
+            "Complete should be last event"
+        );
+    });
+}
+
+#[test]
+fn stream_blocks_approval_deny_resolves_as_tool_result() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new("ap_blk", "risky", json!({})),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![
+                ProviderEvent::Output {
+                    content: "after".into(),
+                },
+                ProviderEvent::Complete,
+            ],
+        ]);
+        let agent = IronAgent::new(
+            Config::default().with_approval_strategy(ApprovalStrategy::PerTool),
+            provider,
+        );
+        agent.register_tool(FunctionTool::new(
+            ToolDefinition::new("risky", "risky", json!({})).with_approval(true),
+            |_| Ok(json!("should not run")),
+        ));
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        let blocks = vec![
+            ContentBlock::text("do it"),
+            ContentBlock::Image {
+                data: "iVBOR".into(),
+                mime_type: "image/png".into(),
+            },
+        ];
+        let (handle, mut events) = session.prompt_stream_with_blocks(&blocks);
+
+        let mut collected = Vec::new();
+        while let Some(event) = events.next().await {
+            collected.push(event.clone());
+            if let PromptEvent::ApprovalRequest { ref call_id, .. } = event {
+                if call_id == "ap_blk" {
+                    handle.deny(call_id).unwrap();
+                }
+            }
+            if matches!(&event, PromptEvent::Complete { .. }) {
+                break;
+            }
+        }
+
+        let has_denied_result = collected.iter().any(|e| {
+            matches!(e, PromptEvent::ToolResult { call_id, status: ToolResultStatus::Denied, .. } if call_id == "ap_blk")
+        });
+        assert!(
+            has_denied_result,
+            "denied approval should produce ToolResult(Denied)"
+        );
+
+        let complete_idx = collected
+            .iter()
+            .position(|e| matches!(e, PromptEvent::Complete { .. }))
+            .unwrap();
+        assert_eq!(
+            complete_idx,
+            collected.len() - 1,
+            "Complete should be last event"
+        );
+    });
+}
+
+#[test]
+fn stream_blocks_cancel_emits_terminal_complete() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::Output {
+                content: "thinking".into(),
+            },
+            ProviderEvent::Complete,
+        ]]);
+        let agent = IronAgent::new(Config::default(), provider);
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        let blocks = vec![ContentBlock::text("start")];
+        let (handle, mut events) = session.prompt_stream_with_blocks(&blocks);
+
+        // Cancel immediately
+        handle.cancel().await;
+
+        let mut collected = Vec::new();
+        while let Some(event) = events.next().await {
+            collected.push(event);
+            if matches!(collected.last(), Some(PromptEvent::Complete { .. })) {
+                break;
+            }
+        }
+
+        let completes: Vec<_> = collected
+            .iter()
+            .filter(|e| matches!(e, PromptEvent::Complete { .. }))
+            .collect();
+        assert_eq!(
+            completes.len(),
+            1,
+            "exactly one Complete event expected after cancel"
+        );
+    });
+}
+
+#[test]
+fn stream_blocks_empty_slice_completes_normally() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::Output {
+                content: "ok".into(),
+            },
+            ProviderEvent::Complete,
+        ]]);
+        let agent = IronAgent::new(Config::default(), provider);
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        // Empty slice — should behave same as prompt_with_blocks(&[])
+        let (handle, mut events) = session.prompt_stream_with_blocks(&[]);
+
+        let mut collected = Vec::new();
+        while let Some(event) = events.next().await {
+            collected.push(event);
+            if matches!(collected.last(), Some(PromptEvent::Complete { .. })) {
+                break;
+            }
+        }
+
+        let has_complete = collected.iter().any(|e| {
+            matches!(
+                e,
+                PromptEvent::Complete {
+                    outcome: PromptOutcome::EndTurn
+                }
+            )
+        });
+        assert!(has_complete, "empty blocks should still complete normally");
+        assert!(handle.status() == PromptStatus::Completed);
     });
 }

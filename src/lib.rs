@@ -14,8 +14,10 @@
 //! Use [`IronAgent`] as the primary entry point. It wraps an `IronRuntime` and provides
 //! an ergonomic facade over the ACP-native connection/session/prompt model.
 //!
-//! The **canonical interaction model is stream-first**. Call `session.prompt_stream(text)`
-//! to get a split `(PromptHandle, PromptEvents)` pair:
+//! The **canonical interaction model is stream-first**. Call
+//! `session.prompt_stream_with_blocks(&[ContentBlock])` for multimodal prompts, or
+//! `session.prompt_stream(text)` for text-only prompts. Both return the same
+//! `(PromptHandle, PromptEvents)` pair:
 //!
 //! ```ignore
 //! let agent = IronAgent::new(config, provider);
@@ -23,7 +25,16 @@
 //! let connection = agent.connect();
 //! let session = connection.create_session()?;
 //!
+//! // Text-only streaming (convenience wrapper)
 //! let (handle, mut events) = session.prompt_stream("hello");
+//!
+//! // Multimodal streaming (text + images)
+//! use iron_core::ContentBlock;
+//! let blocks = vec![
+//!     ContentBlock::text("Describe this image:"),
+//!     ContentBlock::Image { data: img_data, mime_type: "image/png".into() },
+//! ];
+//! let (handle, mut events) = session.prompt_stream_with_blocks(&blocks);
 //!
 //! while let Some(event) = events.next().await {
 //!     match event {
@@ -38,6 +49,13 @@
 //!     }
 //! }
 //! ```
+//!
+//! `prompt_stream(&str)` is a convenience wrapper that wraps the text as a single
+//! text `ContentBlock` before delegating to the shared streaming path used by
+//! `prompt_stream_with_blocks`. Both methods preserve the same event-ordering
+//! guarantees: incremental output may arrive before completion, `ToolCall` precedes
+//! `ToolResult`, approval requests are emitted before resolution, and exactly one
+//! terminal `Complete` is emitted last.
 //!
 //! Legacy `session.prompt().await` + `session.drain_events()` helpers remain as
 //! compatibility wrappers but are not recommended for new code.
