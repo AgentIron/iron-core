@@ -78,14 +78,9 @@ pub struct McpServerState {
 
 impl McpServerState {
     pub fn new(config: McpServerConfig) -> Self {
-        let enabled_by_default = config.enabled_by_default;
         Self {
             config,
-            health: if enabled_by_default {
-                McpServerHealth::Configured
-            } else {
-                McpServerHealth::Disabled
-            },
+            health: McpServerHealth::Configured,
             discovered_tools: Vec::new(),
             last_error: None,
         }
@@ -151,11 +146,12 @@ impl McpServerRegistry {
     pub fn set_error(&self, server_id: &str, error: String) {
         let mut servers = self.servers.write().unwrap();
         if let Some(state) = servers.get_mut(server_id) {
+            let log_message = error.clone();
             state.health = McpServerHealth::Error;
             state.last_error = Some(error);
             warn!(
-                "MCP server {} entered error state: {:?}",
-                server_id, state.last_error
+                "MCP server {} entered error state: {}",
+                server_id, log_message
             );
         }
     }

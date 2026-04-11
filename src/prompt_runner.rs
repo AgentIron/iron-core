@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::context::compaction::{CompactionEngine, CompactionReason};
 use crate::durable::DurableSession;
 use crate::ephemeral::EphemeralTurn;
+use crate::mcp::SessionToolCatalog;
 use crate::prompt_lifecycle::{
     ApprovalRequest, ApprovalVerdict, PromptLifecycleEvent, PromptSink, ToolUpdateStatus,
 };
@@ -66,20 +67,39 @@ impl PromptRunner {
             }
 
             let request = {
+                let session_id = {
+                    let session = durable.lock().unwrap();
+                    session.id
+                };
+                let tool_catalog = self.runtime.get_session_tool_catalog(session_id);
                 let session = durable.lock().unwrap();
                 let instructions = session.instructions.clone();
                 let compacted_context = session.compacted_context.clone();
                 let repo_payload = session.repo_instruction_payload.clone();
                 let messages = session.to_transcript().messages;
-                let tool_registry = self.runtime.tool_registry();
-                crate::request_builder::build_inference_request_with_context_and_repo(
-                    config,
-                    &messages,
-                    compacted_context.as_ref(),
-                    instructions.as_deref(),
-                    repo_payload.as_ref(),
-                    &tool_registry,
-                )
+                drop(session);
+
+                if let Some(tool_catalog) = tool_catalog {
+                    crate::request_builder::build_inference_request_with_effective_tools(
+                        config,
+                        &messages,
+                        compacted_context.as_ref(),
+                        instructions.as_deref(),
+                        repo_payload.as_ref(),
+                        tool_catalog.definitions(),
+                        tool_catalog.contains("python_exec"),
+                    )
+                } else {
+                    let tool_registry = self.runtime.tool_registry();
+                    crate::request_builder::build_inference_request_with_context_and_repo(
+                        config,
+                        &messages,
+                        compacted_context.as_ref(),
+                        instructions.as_deref(),
+                        repo_payload.as_ref(),
+                        &tool_registry,
+                    )
+                }
             };
 
             let request = match request {
@@ -125,17 +145,23 @@ impl PromptRunner {
             }
 
             let needs_permission = {
-                let tool_registry = self.runtime.tool_registry();
-                step.tool_calls.iter().any(|call| {
-                    tool_registry
-                        .get(&call.tool_name)
-                        .map(|tool| {
-                            config
-                                .default_approval_strategy
-                                .is_approval_required(tool.requires_approval())
-                        })
-                        .unwrap_or(false)
-                })
+                // Get session ID and tool catalog for permission checks
+                let session_id = {
+                    let session = durable.lock().unwrap();
+                    session.id
+                };
+
+                let approval_strategy = config.default_approval_strategy;
+                if let Some(tool_catalog) = self.runtime.get_session_tool_catalog(session_id) {
+                    step.tool_calls.iter().any(|call| {
+                        let tool_requires = tool_catalog.requires_approval(&call.tool_name);
+                        approval_strategy.is_approval_required(tool_requires)
+                    })
+                } else {
+                    // If we can't get the catalog, assume no tools need permission
+                    // (they'll fail during execution with a clearer error)
+                    false
+                }
             };
 
             let cancel_token = {
@@ -242,22 +268,44 @@ impl PromptRunner {
         ephemeral: &Arc<std::sync::Mutex<EphemeralTurn>>,
         sink: &dyn PromptSink,
         tool_calls: &[iron_providers::ToolCall],
-        config: &Config,
+        _config: &Config,
     ) -> Result<Vec<iron_providers::ToolCall>, agent_client_protocol::StopReason> {
+        // Get session ID and tool catalog for permission checks
+        let session_id = {
+            let session = durable.lock().unwrap();
+            session.id
+        };
+
+        let tool_catalog = match self.runtime.get_session_tool_catalog(session_id) {
+            Some(catalog) => catalog,
+            None => {
+                // If we can't get the catalog, deny all tools that require permission
+                for call in tool_calls {
+                    let error_result =
+                        serde_json::json!({"error": "denied - session tool catalog unavailable"});
+                    {
+                        let mut session = durable.lock().unwrap();
+                        session.deny_tool_call(&call.call_id);
+                    }
+                    sink.emit(PromptLifecycleEvent::ToolCallUpdate {
+                        call_id: call.call_id.clone(),
+                        tool_name: call.tool_name.clone(),
+                        status: ToolUpdateStatus::Failed,
+                        output: Some(error_result),
+                    })
+                    .await;
+                }
+                return Ok(Vec::new());
+            }
+        };
+
         let mut approved = Vec::new();
 
+        let approval_strategy = _config.default_approval_strategy;
+
         for call in tool_calls {
-            let requires = {
-                let tool_registry = self.runtime.tool_registry();
-                tool_registry
-                    .get(&call.tool_name)
-                    .map(|t| {
-                        config
-                            .default_approval_strategy
-                            .is_approval_required(t.requires_approval())
-                    })
-                    .unwrap_or(false)
-            };
+            let tool_requires = tool_catalog.requires_approval(&call.tool_name);
+            let requires = approval_strategy.is_approval_required(tool_requires);
 
             if !requires {
                 approved.push(call.clone());
@@ -391,36 +439,26 @@ impl PromptRunner {
         durable: &Arc<std::sync::Mutex<DurableSession>>,
         sink: &dyn PromptSink,
         call: &iron_providers::ToolCall,
+        tool_catalog: &SessionToolCatalog,
     ) -> bool {
-        let tool_def = {
-            let tool_registry = self.runtime.tool_registry();
-            tool_registry
-                .get(&call.tool_name)
-                .map(|tool| tool.definition())
-        };
-
-        let Some(definition) = tool_def else {
-            let error_result =
-                serde_json::json!({"error": format!("Tool '{}' not found", call.tool_name)});
-            {
-                let mut session = durable.lock().unwrap();
-                session.start_tool_call(&call.call_id, &call.tool_name, call.arguments.clone());
-                session.fail_tool_call(&call.call_id, error_result.clone());
-            }
-            sink.emit(PromptLifecycleEvent::ToolCallUpdate {
-                call_id: call.call_id.clone(),
-                tool_name: call.tool_name.clone(),
-                status: ToolUpdateStatus::Failed,
-                output: Some(error_result),
-            })
-            .await;
-            return false;
-        };
+        let tool_def = tool_catalog.get_definition(&call.tool_name).cloned();
 
         {
             let mut session = durable.lock().unwrap();
             session.start_tool_call(&call.call_id, &call.tool_name, call.arguments.clone());
         }
+
+        let Some(definition) = tool_def else {
+            sink.emit(PromptLifecycleEvent::ToolCallUpdate {
+                call_id: call.call_id.clone(),
+                tool_name: call.tool_name.clone(),
+                status: ToolUpdateStatus::InProgress,
+                output: None,
+            })
+            .await;
+
+            return true;
+        };
 
         match crate::schema::validate_arguments(&definition.input_schema, &call.arguments) {
             crate::schema::SchemaValidationOutcome::Valid => {}
@@ -484,7 +522,36 @@ impl PromptRunner {
         #[cfg(not(feature = "embedded-python"))]
         let _ = &cancel_token;
 
-        if !self.validate_and_prepare(durable, sink, &call).await {
+        // Get session ID and tool catalog
+        let session_id = {
+            let session = durable.lock().unwrap();
+            session.id
+        };
+
+        let tool_catalog = match self.runtime.get_session_tool_catalog(session_id) {
+            Some(catalog) => catalog,
+            None => {
+                let error_result =
+                    serde_json::json!({"error": "Failed to get session tool catalog"});
+                {
+                    let mut session = durable.lock().unwrap();
+                    session.fail_tool_call(&call.call_id, error_result.clone());
+                }
+                sink.emit(PromptLifecycleEvent::ToolCallUpdate {
+                    call_id: call.call_id.clone(),
+                    tool_name: call.tool_name.clone(),
+                    status: ToolUpdateStatus::Failed,
+                    output: Some(error_result),
+                })
+                .await;
+                return;
+            }
+        };
+
+        if !self
+            .validate_and_prepare(durable, sink, &call, &tool_catalog)
+            .await
+        {
             return;
         }
 
@@ -495,7 +562,8 @@ impl PromptRunner {
             return;
         }
 
-        self.execute_standard_tool(durable, sink, call).await;
+        self.execute_standard_tool(durable, sink, call, &tool_catalog)
+            .await;
     }
 
     async fn execute_standard_tool(
@@ -503,21 +571,17 @@ impl PromptRunner {
         durable: &Arc<std::sync::Mutex<DurableSession>>,
         sink: &dyn PromptSink,
         call: iron_providers::ToolCall,
+        tool_catalog: &SessionToolCatalog,
     ) {
         let call_id = call.call_id.clone();
         let tool_name = call.tool_name.clone();
 
+        let call_id_owned = call.call_id.clone();
+        let tool_name_owned = call.tool_name.clone();
+        let arguments = call.arguments.clone();
         let execute_future = {
-            let tool_registry = self.runtime.tool_registry();
-            match tool_registry.get(&call.tool_name) {
-                Some(tool) => tool.execute(&call.call_id, call.arguments.clone()),
-                None => Box::pin(async move {
-                    Err(crate::error::LoopError::tool_execution(format!(
-                        "Tool '{}' no longer available",
-                        call.tool_name
-                    )))
-                }),
-            }
+            let session_guard = durable.lock().unwrap();
+            tool_catalog.execute(&call_id_owned, &tool_name_owned, arguments, &session_guard)
         };
 
         let execute_result = execute_future.await;
@@ -576,6 +640,25 @@ impl PromptRunner {
         }
     }
 
+    /// Execute an embedded Python script, routing all child-tool calls
+    /// through the canonical [`SessionToolCatalog`] execution path.
+    ///
+    /// ## Phase 8 guarantees
+    ///
+    /// * **Canonical execution path**: Every child-tool call (including
+    ///   plugin-backed tools) goes through `SessionToolCatalog::execute()`,
+    ///   which handles enablement, health, auth-gating, scope checks, and
+    ///   WASM host execution identically to model-issued tool calls.
+    ///
+    /// * **Approval consistency**: The approval strategy is the single
+    ///   arbiter for whether user confirmation is needed, applied uniformly
+    ///   regardless of whether the call originates from the model or from
+    ///   embedded Python.
+    ///
+    /// * **Visibility parity**: The Python-visible tool catalog is built
+    ///   from `session_tool_catalog.definitions()`, which already excludes
+    ///   tools from disabled, unhealthy, or auth-gated plugins.  Python
+    ///   scripts see exactly the same set of tools as the model.
     #[cfg(feature = "embedded-python")]
     async fn execute_python_script(
         &self,
@@ -640,10 +723,43 @@ impl PromptRunner {
 
         let (req_tx, req_rx) = std::sync::mpsc::channel::<ChildReq>();
         let timeout_secs = config.max_script_timeout_secs;
-        let tool_catalog = {
-            let tool_registry = self.runtime.tool_registry();
-            crate::embedded_python::ToolCatalog::from_registry(&tool_registry)
+        let session_id = {
+            let session = durable.lock().unwrap();
+            session.id
         };
+        let session_tool_catalog = match self.runtime.get_session_tool_catalog(session_id) {
+            Some(catalog) => catalog,
+            None => {
+                let error_result =
+                    serde_json::json!({"error": "Failed to get session tool catalog"});
+                {
+                    let mut session = durable.lock().unwrap();
+                    session.fail_tool_call(&call.call_id, error_result.clone());
+                }
+                sink.emit(PromptLifecycleEvent::ToolCallUpdate {
+                    call_id: call.call_id.clone(),
+                    tool_name: call.tool_name.clone(),
+                    status: ToolUpdateStatus::Failed,
+                    output: Some(error_result),
+                })
+                .await;
+                return;
+            }
+        };
+        // Build the Python-visible tool catalog from the session-effective
+        // definitions.  Because `SessionToolCatalog` already applies session
+        // enablement, health, auth-gating, and scope checks for every tool
+        // source (local, MCP, and plugin), the resulting catalog only
+        // includes tools that are *actually usable* in this session.
+        //
+        // Phase 8 guarantee: embedded Python tool visibility matches
+        // runtime-effective visibility.  A plugin tool that is disabled for
+        // this session, unhealthy, or auth-gated will NOT appear in
+        // `tools.available()` or be callable via `tools.call(...)` / alias
+        // methods.
+        let tool_catalog = crate::embedded_python::ToolCatalog::from_definitions(
+            session_tool_catalog.definitions().to_vec(),
+        );
 
         let executor: std::sync::Arc<ToolExecutorFn> = std::sync::Arc::new({
             let req_tx = req_tx.clone();
@@ -696,35 +812,78 @@ impl PromptRunner {
                     })
                     .await;
 
-                    let tool_def = {
-                        let tool_registry = self.runtime.tool_registry();
-                        tool_registry
-                            .get(&req.tool_name)
-                            .map(|tool| tool.definition())
-                    };
+                    let tool_def = session_tool_catalog.get_definition(&req.tool_name).cloned();
+
+                    // Phase 8 guarantee: all child-tool execution routes
+                    // through `SessionToolCatalog::execute()`, which is the
+                    // same canonical path used for model-issued tool calls.
+                    // For plugin-backed tools this means:
+                    //   - Session enablement check (plugin enabled for this session)
+                    //   - Health check (plugin is healthy)
+                    //   - Auth-gating check (credentials present if required)
+                    //   - WASM host execution via Extism
+                    // No separate or legacy code path exists for plugin tools
+                    // called from embedded Python.
 
                     let Some(definition) = tool_def else {
-                        let error_result = serde_json::json!({"error": format!("Tool '{}' not found", req.tool_name)});
                         {
                             let mut session = durable.lock().unwrap();
                             session.start_tool_call(&req.call_id, &req.tool_name, req.args.clone());
-                            session.fail_tool_call(&req.call_id, error_result.clone());
                             session.link_child_to_script(&script_id, &req.call_id);
                         }
+
+                        let req_call_id = req.call_id.clone();
+                        let req_tool_name = req.tool_name.clone();
+                        let execute_future = {
+                            let session_guard = durable.lock().unwrap();
+                            session_tool_catalog.execute(
+                                &req.call_id,
+                                &req.tool_name,
+                                req.args.clone(),
+                                &session_guard,
+                            )
+                        };
+
+                        let result = match execute_future.await {
+                            Ok(result) => {
+                                let limited = limit_result_size(result);
+                                {
+                                    let mut session = durable.lock().unwrap();
+                                    session.complete_tool_call(&req_call_id, limited.clone());
+                                }
+                                (ChildCallStatus::Completed, Some(limited))
+                            }
+                            Err(error) => {
+                                let result = serde_json::json!({"error": error.to_string()});
+                                {
+                                    let mut session = durable.lock().unwrap();
+                                    session.fail_tool_call(&req_call_id, result.clone());
+                                }
+                                (ChildCallStatus::Failed, Some(result))
+                            }
+                        };
+
                         sink.emit(PromptLifecycleEvent::ScriptActivity {
                             script_id: script_id.clone(),
                             parent_call_id: call.call_id.clone(),
-                            activity_type: "child_tool_call_failed".to_string(),
-                            status: "failed".to_string(),
+                            activity_type: if matches!(result.0, ChildCallStatus::Completed) {
+                                "child_tool_call_completed".to_string()
+                            } else {
+                                "child_tool_call_failed".to_string()
+                            },
+                            status: if matches!(result.0, ChildCallStatus::Completed) {
+                                "completed".to_string()
+                            } else {
+                                "failed".to_string()
+                            },
                             detail: Some(serde_json::json!({
-                                "call_id": req.call_id,
-                                "tool_name": req.tool_name,
+                                "call_id": req_call_id,
+                                "tool_name": req_tool_name,
                             })),
                         })
                         .await;
-                        let _ = req
-                            .response_tx
-                            .send((ChildCallStatus::Failed, Some(error_result)));
+
+                        let _ = req.response_tx.send(result);
                         continue;
                     };
 
@@ -771,18 +930,17 @@ impl PromptRunner {
                         }
                     }
 
-                    let requires_permission = {
-                        let tool_registry = self.runtime.tool_registry();
-                        tool_registry
-                            .get(&req.tool_name)
-                            .map(|tool| {
-                                self.runtime
-                                    .config()
-                                    .default_approval_strategy
-                                    .is_approval_required(tool.requires_approval())
-                            })
-                            .unwrap_or(false)
-                    };
+                    // Phase 8 guarantee: child-tool approval uses the same
+                    // approval-strategy logic as model-issued tool calls.
+                    // `requires_approval` for plugin tools comes from the
+                    // manifest's `requires_approval` field (set during
+                    // canonical `SessionToolCatalog` construction), not from
+                    // a separate or legacy code path.  The approval strategy
+                    // is the single arbiter of whether user confirmation is
+                    // needed, regardless of call origin (model or Python).
+                    let tool_requires = session_tool_catalog.requires_approval(&req.tool_name);
+                    let approval_strategy = self.runtime.config().default_approval_strategy;
+                    let requires_permission = approval_strategy.is_approval_required(tool_requires);
                     if requires_permission {
                         {
                             let mut session = durable.lock().unwrap();
@@ -855,19 +1013,14 @@ impl PromptRunner {
 
                     let req_call_id = req.call_id.clone();
                     let req_tool_name = req.tool_name.clone();
-                    let req_tool_name_for_err = req_tool_name.clone();
-
                     let execute_future = {
-                        let tool_registry = self.runtime.tool_registry();
-                        match tool_registry.get(&req.tool_name) {
-                            Some(tool) => tool.execute(&req.call_id, req.args.clone()),
-                            None => Box::pin(async move {
-                                Err(crate::error::LoopError::tool_execution(format!(
-                                    "Tool '{}' no longer available",
-                                    req_tool_name_for_err
-                                )))
-                            }) as crate::tool::ToolFuture,
-                        }
+                        let session_guard = durable.lock().unwrap();
+                        session_tool_catalog.execute(
+                            &req.call_id,
+                            &req.tool_name,
+                            req.args.clone(),
+                            &session_guard,
+                        )
                     };
 
                     let (status, result) = match execute_future.await {

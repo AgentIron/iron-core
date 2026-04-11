@@ -4,25 +4,22 @@
 TBD - created by archiving change expose-python-tool-methods. Update Purpose after archive.
 ## Requirements
 ### Requirement: Embedded Python exposes the runtime tool catalog
-The embedded Python runtime SHALL expose callable tool access for every tool currently visible in `ToolRegistry` at the start of a script run.
+The embedded Python runtime SHALL expose callable tool access for every tool visible in the session-effective runtime tool catalog at the start of a script run, rather than limiting the namespace to tools present in the static global `ToolRegistry`.
 
-#### Scenario: Built-in tool appears in Python namespace
-- **WHEN** a built-in tool is registered in `ToolRegistry` and a `python_exec` script starts
-- **THEN** the embedded Python environment exposes a callable entry for that tool
-
-#### Scenario: Custom tool appears in Python namespace
-- **WHEN** a custom tool is registered in `ToolRegistry` and a `python_exec` script starts
-- **THEN** the embedded Python environment exposes a callable entry for that tool
+#### Scenario: Public and Python-visible session tool views stay aligned
+- **WHEN** a tool is visible to embedded Python through the session-effective runtime tool catalog
+- **THEN** the public effective-tool inspection for that same session reports the same tool as visible
+- **THEN** embedded Python does not depend on a divergent MCP visibility implementation
 
 ### Requirement: Tool registry is the only canonical callable catalog
-The embedded Python runtime SHALL derive its callable tool surface from `ToolRegistry` rather than directly from capability metadata.
+The embedded Python runtime SHALL derive its callable tool surface from the session-effective runtime tool catalog rather than directly from capability metadata or only from the static global `ToolRegistry`.
 
 #### Scenario: Metadata-only capability does not become a Python method
-- **WHEN** a capability exists only in capability metadata and is not represented as a registered tool
+- **WHEN** a capability exists only in capability metadata and is not present in the session-effective runtime tool catalog
 - **THEN** the embedded Python environment does not expose it as a callable tool method
 
-#### Scenario: Capability-backed tool is callable when registered as a tool
-- **WHEN** a capability-backed implementation is materialized in `ToolRegistry` under a tool name
+#### Scenario: Session-visible tool becomes callable
+- **WHEN** a tool is present in the session-effective runtime tool catalog under a tool name
 - **THEN** the embedded Python environment exposes that tool name as callable
 
 ### Requirement: Python tool access supports identifier-safe aliases and raw-name fallback
@@ -44,11 +41,18 @@ The embedded Python runtime SHALL execute namespace-exposed tool calls through t
 - **THEN** the runtime applies the same schema validation, permission checks, and durable tool-record lifecycle used for other child tool calls
 
 ### Requirement: Tool namespace is stable for a single script run
-The embedded Python runtime SHALL expose a stable snapshot of the visible tool catalog for the lifetime of one script execution.
+The embedded Python runtime SHALL expose a stable snapshot of the session-effective runtime tool catalog for the lifetime of one script execution.
 
-#### Scenario: Mid-run registry mutation does not change in-flight script namespace
-- **WHEN** the runtime tool catalog changes after a script has already started
+#### Scenario: Mid-run effective tool change does not alter in-flight namespace
+- **WHEN** the session-effective runtime tool catalog changes after a script has already started
 - **THEN** the in-flight script continues to use the tool namespace snapshot captured at script start
+
+### Requirement: Child-tool execution reuses the session-effective runtime path
+The embedded Python runtime SHALL resolve child-tool validation, approval, and execution through the same session-effective runtime tool path used for ordinary model-issued tool calls.
+
+#### Scenario: MCP child-tool lookup remains unambiguous
+- **WHEN** a Python child-tool call targets an MCP-backed tool whose provider-visible name includes a server ID containing underscores or other separator-like characters
+- **THEN** the runtime resolves the intended MCP tool using the same unambiguous lookup logic used for ordinary MCP tool execution
 
 ### Requirement: Python tool discovery is documented and inspectable
 The embedded Python runtime SHALL document the supported tool namespace, SHALL describe `python_exec` as a sandboxed orchestration environment, and SHALL explain that filesystem, shell, network, and other host interactions from embedded Python MUST use visible runtime tools rather than direct Python OS APIs.

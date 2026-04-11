@@ -1,11 +1,17 @@
+use crate::durable::DurableSession;
 use crate::mcp::server::McpServerHealth;
 use crate::mcp::McpServerRegistry;
 use crate::tool::{Tool, ToolDefinition, ToolRegistry};
-use crate::durable::DurableSession;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-/// A tool that wraps an MCP tool for use in the runtime
+/// A tool that wraps an MCP tool for use in the runtime.
+///
+/// **Deprecated**: `McpTool::execute` is not wired to the runtime-owned MCP
+/// connection manager. Use [`SessionToolCatalog`] for MCP tool execution.
+#[deprecated(
+    since = "0.2.0",
+    note = "McpTool::execute is not wired to the runtime MCP connection manager; use SessionToolCatalog instead"
+)]
 pub struct McpTool {
     definition: ToolDefinition,
     server_id: String,
@@ -13,14 +19,19 @@ pub struct McpTool {
 }
 
 impl McpTool {
-    pub fn new(server_id: String, tool_name: String, description: String, input_schema: serde_json::Value) -> Self {
+    pub fn new(
+        server_id: String,
+        tool_name: String,
+        description: String,
+        input_schema: serde_json::Value,
+    ) -> Self {
         // Create a namespaced tool name to avoid collisions
         let namespaced_name = format!("mcp_{}_{}", server_id, tool_name);
-        
+
         Self {
             definition: ToolDefinition::new(
                 &namespaced_name,
-                &format!("[MCP:{}] {}", server_id, description),
+                format!("[MCP:{}] {}", server_id, description),
                 input_schema,
             ),
             server_id,
@@ -43,10 +54,18 @@ impl Tool for McpTool {
     }
 
     fn execute(&self, _call_id: &str, _arguments: serde_json::Value) -> crate::tool::ToolFuture {
-        // TODO: Implement actual MCP tool execution
-        // This would call the MCP server via the connection manager
-        let result = serde_json::json!({"error": "MCP tool execution not yet implemented"});
-        Box::pin(async move { Ok(result) })
+        // McpTool is a legacy helper type whose execution is not wired to the
+        // runtime-owned MCP connection manager. The canonical MCP execution
+        // path is through SessionToolCatalog + McpConnectionManager.
+        // Return a clear error so callers cannot mistake this for a real result.
+        let tool_name = self.definition.name.clone();
+        Box::pin(async move {
+            Err(crate::error::LoopError::tool_execution(format!(
+                "McpTool::execute is not wired to the runtime MCP connection manager; \
+                 use SessionToolCatalog for MCP tool execution (tool: {})",
+                tool_name
+            )))
+        })
     }
 
     fn requires_approval(&self) -> bool {
@@ -55,8 +74,16 @@ impl Tool for McpTool {
     }
 }
 
-/// Computes the effective tool set for a session
-/// Combines local tools with MCP-backed tools that are enabled and usable
+/// Legacy helper for computing MCP-visible tools for a session.
+/// Public runtime inspection should prefer `SessionToolCatalog` so inspection,
+/// prompt construction, and execution all use the same source of truth.
+///
+/// **Deprecated**: Prefer [`SessionToolCatalog`] which is the single source of
+/// truth for prompt construction, execution, and public inspection.
+#[deprecated(
+    since = "0.2.0",
+    note = "Prefer SessionToolCatalog, which is the single source of truth for MCP tool visibility"
+)]
 pub struct EffectiveToolView {
     local_registry: Arc<ToolRegistry>,
     mcp_registry: Arc<McpServerRegistry>,
@@ -103,22 +130,17 @@ impl EffectiveToolView {
 
     /// Get an MCP tool by its namespaced name
     pub fn get_mcp_tool(&self, namespaced_name: &str) -> Option<McpTool> {
-        // Parse the namespaced name: mcp_{server_id}_{tool_name}
-        let prefix = "mcp_";
-        if !namespaced_name.starts_with(prefix) {
-            return None;
-        }
-
-        let rest = &namespaced_name[prefix.len()..];
-        if let Some(first_underscore) = rest.find('_') {
-            let server_id = &rest[..first_underscore];
-            let tool_name = &rest[first_underscore + 1..];
-
-            if let Some(server) = self.mcp_registry.get_server(server_id) {
+        if let Some((server_id, tool_name)) =
+            crate::mcp::session_catalog::SessionToolCatalog::resolve_mcp_tool_name(
+                namespaced_name,
+                &self.mcp_registry,
+            )
+        {
+            if let Some(server) = self.mcp_registry.get_server(&server_id) {
                 for tool_info in &server.discovered_tools {
                     if tool_info.name == tool_name {
                         return Some(McpTool::new(
-                            server_id.to_string(),
+                            server_id,
                             tool_info.name.clone(),
                             tool_info.description.clone(),
                             tool_info.input_schema.clone(),
@@ -162,7 +184,7 @@ impl EffectiveToolView {
 
         for server in self.mcp_registry.list_servers() {
             let server_id = &server.config.id;
-            
+
             // Check session enablement
             match session.is_mcp_server_enabled(server_id) {
                 Some(true) => {
@@ -191,7 +213,8 @@ impl EffectiveToolView {
 
         for server in self.mcp_registry.list_servers() {
             let server_id = server.config.id.clone();
-            let enabled = session.is_mcp_server_enabled(&server_id)
+            let enabled = session
+                .is_mcp_server_enabled(&server_id)
                 .unwrap_or(server.config.enabled_by_default);
             let usable = server.health.is_usable();
 

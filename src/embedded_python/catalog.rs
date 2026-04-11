@@ -1,4 +1,4 @@
-use crate::tool::{ToolDefinition, ToolRegistry};
+use crate::tool::ToolDefinition;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -49,12 +49,6 @@ pub(crate) struct ToolCatalog {
 }
 
 impl ToolCatalog {
-    pub(crate) fn from_registry(registry: &ToolRegistry) -> Self {
-        let mut definitions = registry.definitions();
-        definitions.sort_by(|a, b| a.name.cmp(&b.name));
-        Self::from_definitions(definitions)
-    }
-
     pub(crate) fn from_definitions(definitions: Vec<ToolDefinition>) -> Self {
         let mut entries = Vec::with_capacity(definitions.len());
         let mut by_name = HashMap::with_capacity(definitions.len());

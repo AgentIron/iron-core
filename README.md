@@ -12,7 +12,7 @@ It provides:
 - context compaction, active-context accounting, and handoff export/import
 - layered prompt composition with repository instruction loading and runtime context injection
 - optional embedded Python execution via the `embedded-python` feature
-- experimental WASM integration-plugin scaffolding with runtime-local inventory, auth metadata, and session-scoped enablement
+- WASM integration plugins via Extism with install lifecycle, manifest extraction, session-scoped enablement, auth-gated tool availability, and a 30-second execution timeout
 
 The facade API is the recommended integration surface for new code. Older `SessionHandle`-style APIs are still exported for compatibility, but are deprecated.
 
@@ -109,13 +109,31 @@ For non-streaming compatibility code, `session.prompt().await` and `session.drai
 
 Use `BuiltinToolConfig` to scope filesystem access, disable specific tools, and tune limits such as command timeouts and output caps.
 
+## MCP Servers
+
+`iron-core` supports session-scoped MCP (Model Context Protocol) servers as a tool source alongside built-in and custom tools. The full implementation covers:
+
+- Runtime-local MCP server inventory with per-server configuration
+- Session-scoped enablement governed by a single runtime-default policy
+- Canonical session-effective tool catalog with precise unavailable-tool diagnostics
+- Approval strategy enforcement for MCP tool calls
+- Transport clients for stdio, HTTP, and HTTP+SSE
+- Connection lifecycle management with single-flight connect guarding
+- Handoff exclusion — MCP state is runtime-local and not portable
+
 ## Integration Plugins
 
-`iron-core` now includes an experimental WASM integration-plugin surface alongside built-in tools and MCP servers.
+`iron-core` includes a WASM-based integration-plugin surface powered by [Extism](https://extism.org). Plugins are a third tool source alongside built-in tools and MCP servers.
 
-The current implementation includes runtime configuration, plugin inventory/registry types, session-default enablement, manifest/auth/status models, checksum utilities for remote artifacts, and namespaced plugin tool definitions.
+The plugin system is fully implemented:
 
-The end-to-end execution path is still incomplete: remote downloading, manifest extraction from WASM binaries, OAuth exchange/refresh, and WASM tool execution are not implemented yet.
+- **Install lifecycle** — fetch (local or HTTPS+checksum), cache, manifest extraction from WASM binaries, identity validation, and Extism-backed WASM host loading
+- **WASM execution** — tools are invoked via `tool_{name}` exports with a JSON request/response envelope and a 30-second timeout
+- **Session-scoped enablement** — runtime-level defaults materialised at session creation, with per-session overrides
+- **Canonical tool availability** — single-source-of-truth `compute_tool_availability()` gates tools on health, auth requirements, and scope satisfaction
+- **Auth model** — runtime-governed auth state, credential bindings, and per-tool scope checks
+- **Tool diagnostics** — structured `UnavailableReason` variants for actionable error messages
+- **Network policy** — allowlist, blocklist, and wildcard policies declared in plugin manifests
 
 ## Documentation
 

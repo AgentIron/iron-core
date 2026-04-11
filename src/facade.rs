@@ -566,9 +566,76 @@ impl IronAgent {
         self.runtime.mcp_registry()
     }
 
-    /// Get effective tool definitions for a session, including MCP tools.
+    /// Register a plugin with the agent.
+    ///
+    /// This adds a configured plugin to the runtime inventory.
+    /// Plugins must be registered before they can be enabled for sessions.
+    pub fn register_plugin(&self, config: crate::plugin::config::PluginConfig) {
+        self.runtime.register_plugin(config);
+    }
+
+    /// Get the plugin registry for inspection.
+    pub fn plugin_registry(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, crate::plugin::registry::PluginRegistry> {
+        self.runtime.plugin_registry()
+    }
+
+    /// Get effective tool definitions for a session, including MCP and plugin tools.
     pub fn get_effective_tools(&self, session_id: SessionId) -> Vec<crate::tool::ToolDefinition> {
         self.runtime.get_effective_tool_definitions(session_id)
+    }
+
+    /// Get a full inventory of all registered plugins.
+    ///
+    /// Returns a [`PluginInfo`](crate::plugin::status::PluginInfo) for every
+    /// plugin in the registry.
+    pub fn get_plugin_inventory(&self) -> Vec<crate::plugin::status::PluginInfo> {
+        self.runtime.get_plugin_inventory()
+    }
+
+    /// Get the runtime status of a single plugin.
+    ///
+    /// Returns `None` if the plugin is not registered.
+    pub fn get_plugin_status(
+        &self,
+        plugin_id: &str,
+    ) -> Option<crate::plugin::status::PluginStatus> {
+        self.runtime.get_plugin_status(plugin_id)
+    }
+
+    /// Set credentials for a plugin and mark it as authenticated.
+    pub fn set_plugin_credentials(
+        &self,
+        plugin_id: &str,
+        credentials: crate::plugin::auth::CredentialBinding,
+    ) {
+        self.runtime.set_plugin_credentials(plugin_id, credentials);
+    }
+
+    /// Clear credentials for a plugin and reset its auth state.
+    pub fn clear_plugin_credentials(&self, plugin_id: &str) {
+        self.runtime.clear_plugin_credentials(plugin_id);
+    }
+
+    /// Get a recomputed availability summary for a single plugin.
+    ///
+    /// Returns `None` if the plugin is not registered.
+    pub fn get_plugin_availability(
+        &self,
+        plugin_id: &str,
+    ) -> Option<crate::plugin::registry::PluginAvailabilitySummary> {
+        self.runtime.get_plugin_availability(plugin_id)
+    }
+
+    /// Get unified tool diagnostics for a session.
+    ///
+    /// Returns `None` if the session does not exist.
+    pub fn get_session_tool_diagnostics(
+        &self,
+        session_id: SessionId,
+    ) -> Option<Vec<crate::mcp::session_catalog::ToolDiagnostic>> {
+        self.runtime.get_session_tool_diagnostics(session_id)
     }
 
     /// Establish a new connection to the agent.
@@ -1440,6 +1507,53 @@ impl AgentSession {
         self.durable
             .lock()
             .map(|s| s.list_enabled_mcp_servers())
+            .unwrap_or_default()
+    }
+
+    /// Enable or disable a plugin for this session.
+    pub fn set_plugin_enabled(&self, plugin_id: impl Into<String>, enabled: bool) {
+        if let Ok(mut session) = self.durable.lock() {
+            session.set_plugin_enabled(plugin_id, enabled);
+        }
+    }
+
+    /// Check if a plugin is enabled for this session.
+    pub fn is_plugin_enabled(&self, plugin_id: &str) -> Option<bool> {
+        self.durable
+            .lock()
+            .ok()
+            .and_then(|s| s.is_plugin_enabled(plugin_id))
+    }
+
+    /// Get list of plugins enabled for this session.
+    pub fn list_enabled_plugins(&self) -> Vec<String> {
+        self.durable
+            .lock()
+            .map(|s| s.list_enabled_plugins())
+            .unwrap_or_default()
+    }
+
+    /// Get a session-scoped summary of plugin tool availability.
+    ///
+    /// Combines the runtime-level registry state with this session's plugin
+    /// enablement to produce a per-plugin summary of usable tool counts.
+    pub fn get_plugin_tool_summary(
+        &self,
+    ) -> crate::plugin::effective_tools::SessionPluginToolSummary {
+        self.connection
+            .runtime()
+            .get_session_plugin_summary(self.id)
+            .unwrap_or_default()
+    }
+
+    /// Get unified tool diagnostics for this session.
+    ///
+    /// Returns diagnostics for every tool visible (or potentially visible)
+    /// to this session, including unavailable plugin tools with reasons.
+    pub fn get_tool_diagnostics(&self) -> Vec<crate::mcp::session_catalog::ToolDiagnostic> {
+        self.connection
+            .runtime()
+            .get_session_tool_diagnostics(self.id)
             .unwrap_or_default()
     }
 

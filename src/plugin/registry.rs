@@ -1,12 +1,14 @@
 use crate::plugin::auth::{AuthActionHint, AuthAvailability, AuthState, CredentialBinding};
-use crate::plugin::config::{Checksum, PluginConfig, PluginSource};
+use crate::plugin::config::PluginConfig;
+use crate::plugin::effective_tools::compute_tool_availability;
 use crate::plugin::manifest::PluginManifest;
-use crate::plugin::status::{PluginHealth, PluginStatus};
+use crate::plugin::status::{PerToolAvailability, PluginHealth, PluginInfo, PluginStatus};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Stable identifier for a plugin
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -30,6 +32,42 @@ impl From<&str> for PluginId {
     }
 }
 
+/// Summary of per-tool availability for a plugin after recomputation.
+///
+/// Returned by [`PluginRegistry::recompute_availability`] so callers can
+/// inspect the effect of an auth state change without pulling the full
+/// `PluginState`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginAvailabilitySummary {
+    /// Plugin identifier.
+    pub plugin_id: String,
+    /// Whether the plugin is currently healthy.
+    pub healthy: bool,
+    /// Whether the plugin is currently authenticated.
+    pub authenticated: bool,
+    /// Total number of tools declared in the manifest.
+    pub total_tools: usize,
+    /// Number of tools that are available given current health + auth + scopes.
+    pub available_tools: usize,
+    /// Per-tool breakdown.
+    pub per_tool: Vec<PerToolAvailability>,
+}
+
+/// Runtime-owned metadata about a plugin installation.
+///
+/// These fields are set by the lifecycle manager during install and are
+/// **trusted** because they are derived from the runtime's own state rather
+/// than from the plugin artifact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallMetadata {
+    /// When the plugin was installed (or last re-installed).
+    pub installed_at: DateTime<Utc>,
+    /// The origin of the artifact: local path or remote URL.
+    pub source_description: String,
+    /// Whether the artifact was fetched over HTTPS with checksum verification.
+    pub checksum_verified: bool,
+}
+
 /// Runtime state for an installed plugin
 #[derive(Debug, Clone)]
 pub struct PluginState {
@@ -47,23 +85,27 @@ pub struct PluginState {
     pub auth_state: AuthState,
     /// Stored credentials (if authenticated)
     pub credentials: Option<CredentialBinding>,
+    /// Trusted runtime metadata — set by the install pipeline, not by the
+    /// plugin author.  This is kept separate from `manifest` because manifest
+    /// values are embedded in the WASM artifact and are *untrusted* until
+    /// the runtime validates them.
+    pub install_metadata: Option<InstallMetadata>,
 }
 
 impl PluginState {
     pub fn new(config: PluginConfig) -> Self {
-        let enabled_by_default = config.enabled_by_default;
+        // Runtime health starts as Configured regardless of session-level
+        // enablement defaults.  Session enablement is a separate concern
+        // managed by SessionPluginEnablement, not by PluginHealth.
         Self {
             config,
             manifest: None,
-            health: if enabled_by_default {
-                PluginHealth::Configured
-            } else {
-                PluginHealth::Disabled
-            },
+            health: PluginHealth::Configured,
             last_error: None,
             artifact_path: None,
             auth_state: AuthState::Unauthenticated,
             credentials: None,
+            install_metadata: None,
         }
     }
 
@@ -222,6 +264,14 @@ impl PluginRegistry {
         }
     }
 
+    /// Record trusted install metadata for a plugin.
+    pub fn set_install_metadata(&self, plugin_id: &str, metadata: InstallMetadata) {
+        let mut plugins = self.plugins.write().unwrap();
+        if let Some(state) = plugins.get_mut(plugin_id) {
+            state.install_metadata = Some(metadata);
+        }
+    }
+
     /// Update plugin auth state
     pub fn update_auth_state(&self, plugin_id: &str, auth_state: AuthState) {
         let mut plugins = self.plugins.write().unwrap();
@@ -230,21 +280,114 @@ impl PluginRegistry {
         }
     }
 
-    /// Set credentials for a plugin
+    /// Set credentials for a plugin and mark as authenticated
     pub fn set_credentials(&self, plugin_id: &str, credentials: CredentialBinding) {
-        let mut plugins = self.plugins.write().unwrap();
-        if let Some(state) = plugins.get_mut(plugin_id) {
-            state.credentials = Some(credentials);
-            state.auth_state = AuthState::Authenticated;
+        {
+            let mut plugins = self.plugins.write().unwrap();
+            if let Some(state) = plugins.get_mut(plugin_id) {
+                state.credentials = Some(credentials);
+                state.auth_state = AuthState::Authenticated;
+            }
+        }
+        if let Some(summary) = self.recompute_availability(plugin_id) {
+            info!(
+                plugin_id = %summary.plugin_id,
+                available = summary.available_tools,
+                total = summary.total_tools,
+                "Credentials set; recomputed availability"
+            );
         }
     }
 
-    /// Clear credentials for a plugin
+    /// Clear credentials for a plugin and reset auth state
     pub fn clear_credentials(&self, plugin_id: &str) {
+        {
+            let mut plugins = self.plugins.write().unwrap();
+            if let Some(state) = plugins.get_mut(plugin_id) {
+                state.credentials = None;
+                state.auth_state = AuthState::Unauthenticated;
+            }
+        }
+        if let Some(summary) = self.recompute_availability(plugin_id) {
+            info!(
+                plugin_id = %summary.plugin_id,
+                available = summary.available_tools,
+                total = summary.total_tools,
+                "Credentials cleared; recomputed availability"
+            );
+        }
+    }
+
+    /// Mark authentication as expired
+    pub fn mark_auth_expired(&self, plugin_id: &str) {
+        {
+            let mut plugins = self.plugins.write().unwrap();
+            if let Some(state) = plugins.get_mut(plugin_id) {
+                if state.auth_state.is_authenticated() {
+                    state.auth_state = AuthState::Expired;
+                }
+            }
+        }
+        if let Some(summary) = self.recompute_availability(plugin_id) {
+            info!(
+                plugin_id = %summary.plugin_id,
+                available = summary.available_tools,
+                total = summary.total_tools,
+                "Auth expired; recomputed availability"
+            );
+        }
+    }
+
+    /// Mark authentication as revoked
+    pub fn mark_auth_revoked(&self, plugin_id: &str) {
+        {
+            let mut plugins = self.plugins.write().unwrap();
+            if let Some(state) = plugins.get_mut(plugin_id) {
+                state.credentials = None;
+                state.auth_state = AuthState::Revoked;
+            }
+        }
+        if let Some(summary) = self.recompute_availability(plugin_id) {
+            info!(
+                plugin_id = %summary.plugin_id,
+                available = summary.available_tools,
+                total = summary.total_tools,
+                "Auth revoked; recomputed availability"
+            );
+        }
+    }
+
+    /// Start authentication flow
+    pub fn start_authentication(&self, plugin_id: &str) -> Result<(), String> {
         let mut plugins = self.plugins.write().unwrap();
         if let Some(state) = plugins.get_mut(plugin_id) {
+            match state.auth_state {
+                AuthState::Authenticating => Err("Authentication already in progress".to_string()),
+                AuthState::Authenticated => Err("Already authenticated".to_string()),
+                _ => {
+                    state.auth_state = AuthState::Authenticating;
+                    Ok(())
+                }
+            }
+        } else {
+            Err(format!("Plugin '{}' not found", plugin_id))
+        }
+    }
+
+    /// Clear runtime-loaded state (manifest, artifact path, credentials)
+    /// while preserving the plugin configuration.
+    ///
+    /// Used during install rollback so a failed reinstall does not leave
+    /// stale manifest or artifact references from a prior successful install.
+    pub fn clear_runtime_state(&self, plugin_id: &str) {
+        let mut plugins = self.plugins.write().unwrap();
+        if let Some(state) = plugins.get_mut(plugin_id) {
+            state.manifest = None;
+            state.artifact_path = None;
             state.credentials = None;
             state.auth_state = AuthState::Unauthenticated;
+            state.last_error = None;
+            state.install_metadata = None;
         }
     }
 
@@ -254,7 +397,16 @@ impl PluginRegistry {
         let state = plugins.get(plugin_id)?;
 
         let auth = state.auth_availability();
-        let runtime_status = PluginStatus::compute_runtime_status(state.health, &auth);
+
+        // Compute per-tool availability canonically.
+        let (total_tools, available_tool_count) = self.count_tools(state);
+
+        let runtime_status = PluginStatus::compute_runtime_status(
+            state.health,
+            &auth,
+            total_tools,
+            available_tool_count,
+        );
         let status_message = PluginStatus::generate_status_message(
             runtime_status,
             state
@@ -264,19 +416,13 @@ impl PluginRegistry {
                 .unwrap_or(&state.config.id),
         );
 
-        let available_tool_count = if state.is_usable() {
-            state.manifest.as_ref().map(|m| m.tools.len()).unwrap_or(0)
-        } else {
-            0
-        };
-
         Some(PluginStatus {
             plugin_id: plugin_id.to_string(),
             health: state.health,
             auth,
             runtime_status,
             status_message,
-            ready: state.is_usable(),
+            ready: available_tool_count > 0,
             available_tool_count,
         })
     }
@@ -289,12 +435,219 @@ impl PluginRegistry {
             .filter_map(|id| self.get_status(id))
             .collect()
     }
+
+    /// Count total and available tools for a plugin using the canonical
+    /// [`compute_tool_availability`] function.
+    ///
+    /// Returns `(total_tools, available_tools)`.
+    fn count_tools(&self, state: &PluginState) -> (usize, usize) {
+        match &state.manifest {
+            None => (0, 0),
+            Some(manifest) => {
+                let total = manifest.tools.len();
+                let available = manifest
+                    .tools
+                    .iter()
+                    .filter(|t| compute_tool_availability(state, t).available)
+                    .count();
+                (total, available)
+            }
+        }
+    }
+
+    /// Recompute per-tool availability for a plugin and return a summary.
+    ///
+    /// Intended to be called after auth state transitions (credentials set,
+    /// cleared, expired, revoked) so that callers and logs can observe the
+    /// effect on tool availability.
+    pub fn recompute_availability(&self, plugin_id: &str) -> Option<PluginAvailabilitySummary> {
+        let plugins = self.plugins.read().unwrap();
+        let state = plugins.get(plugin_id)?;
+
+        let manifest = match &state.manifest {
+            Some(m) => m,
+            None => {
+                return Some(PluginAvailabilitySummary {
+                    plugin_id: plugin_id.to_string(),
+                    healthy: state.health.is_healthy(),
+                    authenticated: state.auth_state.is_authenticated(),
+                    total_tools: 0,
+                    available_tools: 0,
+                    per_tool: vec![],
+                });
+            }
+        };
+
+        let total_tools = manifest.tools.len();
+        let mut per_tool = Vec::with_capacity(total_tools);
+        let mut available_tools = 0;
+
+        for tool in &manifest.tools {
+            let result = compute_tool_availability(state, tool);
+            if result.available {
+                available_tools += 1;
+            }
+
+            // Determine auth satisfaction independently of health.
+            let auth_satisfied = match &tool.auth_requirements {
+                None => true,
+                Some(reqs) => {
+                    if reqs.available_unauthenticated {
+                        true
+                    } else if !state.auth_state.is_authenticated() {
+                        false
+                    } else {
+                        // Authenticated — check scopes
+                        let granted: Vec<&str> = state
+                            .credentials
+                            .as_ref()
+                            .map(|c| c.scopes.iter().map(|s| s.as_str()).collect())
+                            .unwrap_or_default();
+                        reqs.scopes.iter().all(|s| granted.contains(&s.as_str()))
+                    }
+                }
+            };
+
+            per_tool.push(PerToolAvailability {
+                name: tool.name.clone(),
+                metadata: tool.clone(),
+                available: result.available,
+                unavailable_reason: result.reason,
+                requires_auth: tool.auth_requirements.is_some(),
+                auth_satisfied,
+            });
+        }
+
+        Some(PluginAvailabilitySummary {
+            plugin_id: plugin_id.to_string(),
+            healthy: state.health.is_healthy(),
+            authenticated: state.auth_state.is_authenticated(),
+            total_tools,
+            available_tools,
+            per_tool,
+        })
+    }
+
+    /// Get per-tool availability for a plugin
+    pub fn get_tool_availability(&self, plugin_id: &str) -> Vec<(String, bool, Option<String>)> {
+        let plugins = self.plugins.read().unwrap();
+        let state = match plugins.get(plugin_id) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+
+        let manifest = match &state.manifest {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+
+        manifest
+            .tools
+            .iter()
+            .map(|tool| {
+                let result = compute_tool_availability(state, tool);
+                let reason_str = result.reason.as_ref().map(|r| format!("{:?}", r));
+                (tool.name.clone(), result.available, reason_str)
+            })
+            .collect()
+    }
+
+    /// Get comprehensive plugin info for client consumption.
+    ///
+    /// Returns a single serialization-friendly snapshot that combines trusted
+    /// runtime metadata with validated (but plugin-declared) manifest metadata.
+    pub fn get_plugin_info(&self, plugin_id: &str) -> Option<PluginInfo> {
+        let plugins = self.plugins.read().unwrap();
+        let state = plugins.get(plugin_id)?;
+
+        let auth = state.auth_availability();
+
+        // Compute per-tool availability canonically.
+        let (total_tools, available_tool_count) = self.count_tools(state);
+
+        let runtime_status = PluginStatus::compute_runtime_status(
+            state.health,
+            &auth,
+            total_tools,
+            available_tool_count,
+        );
+
+        // Extract manifest data (untrusted but validated by the install pipeline).
+        let (
+            identity_id,
+            name,
+            version,
+            publisher_name,
+            publisher_url,
+            description,
+            category,
+            tool_names,
+            declared_tool_count,
+        ) = state.manifest.as_ref().map_or(
+            (None, None, None, None, None, None, None, Vec::new(), 0),
+            |m| {
+                (
+                    Some(m.identity.id.clone()),
+                    Some(m.identity.name.clone()),
+                    Some(m.identity.version.clone()),
+                    Some(m.publisher.name.clone()),
+                    m.publisher.url.clone(),
+                    Some(m.presentation.description.clone()),
+                    m.presentation.category.clone(),
+                    m.tools.iter().map(|t| t.name.clone()).collect(),
+                    m.tools.len(),
+                )
+            },
+        );
+
+        // Extract trusted install metadata.
+        let (source, checksum_verified, installed_at) = state
+            .install_metadata
+            .as_ref()
+            .map(|md| {
+                (
+                    Some(md.source_description.clone()),
+                    md.checksum_verified,
+                    Some(md.installed_at),
+                )
+            })
+            .unwrap_or((None, false, None));
+
+        Some(PluginInfo {
+            identity_id,
+            name,
+            version,
+            publisher_name,
+            publisher_url,
+            description,
+            category,
+            health: state.health,
+            runtime_status,
+            ready: available_tool_count > 0,
+            last_error: state.last_error.clone(),
+            declared_tool_count,
+            available_tool_count,
+            tool_names,
+            source,
+            checksum_verified,
+            installed_at,
+            auth_required: auth.auth_required,
+            auth_state: state.auth_state,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin::auth::CredentialBinding;
     use crate::plugin::config::PluginSource;
+    use crate::plugin::effective_tools::UnavailableReason;
+    use crate::plugin::manifest::{
+        ExportedTool, PluginIdentity, PluginManifest, PluginPublisher, PresentationMetadata,
+        ToolAuthRequirements,
+    };
+    use crate::plugin::network::NetworkPolicy;
 
     fn create_test_config(id: &str) -> PluginConfig {
         PluginConfig {
@@ -303,6 +656,42 @@ mod tests {
                 path: PathBuf::from("/dev/null"),
             },
             enabled_by_default: true,
+        }
+    }
+
+    fn create_test_manifest(tools: Vec<ExportedTool>) -> PluginManifest {
+        PluginManifest {
+            identity: PluginIdentity {
+                id: "com.test.plugin".to_string(),
+                name: "Test Plugin".to_string(),
+                version: "1.0.0".to_string(),
+            },
+            publisher: PluginPublisher {
+                name: "Test".to_string(),
+                url: None,
+                contact: None,
+            },
+            presentation: PresentationMetadata {
+                description: "Test".to_string(),
+                long_description: None,
+                icon: None,
+                category: None,
+                keywords: vec![],
+            },
+            network_policy: NetworkPolicy::Wildcard,
+            auth: None,
+            tools,
+            api_version: "1.0".to_string(),
+        }
+    }
+
+    fn make_tool(name: &str, auth: Option<ToolAuthRequirements>) -> ExportedTool {
+        ExportedTool {
+            name: name.to_string(),
+            description: format!("Tool {}", name),
+            input_schema: serde_json::json!({"type": "object"}),
+            requires_approval: false,
+            auth_requirements: auth,
         }
     }
 
@@ -340,5 +729,251 @@ mod tests {
 
         let state = registry.get("test-plugin").unwrap();
         assert!(state.health.is_healthy());
+    }
+
+    #[test]
+    fn test_new_plugin_state_health_is_configured_regardless_of_enablement_default() {
+        // PluginState::new() must always start as Configured, even when
+        // the plugin is disabled-by-default for sessions.  Session
+        // enablement is a separate concern managed by
+        // SessionPluginEnablement.
+        let enabled_config = PluginConfig {
+            id: "enabled-plugin".to_string(),
+            source: PluginSource::LocalPath {
+                path: PathBuf::from("/dev/null"),
+            },
+            enabled_by_default: true,
+        };
+        let disabled_config = PluginConfig {
+            id: "disabled-plugin".to_string(),
+            source: PluginSource::LocalPath {
+                path: PathBuf::from("/dev/null"),
+            },
+            enabled_by_default: false,
+        };
+
+        let enabled_state = PluginState::new(enabled_config);
+        let disabled_state = PluginState::new(disabled_config);
+
+        assert_eq!(enabled_state.health, PluginHealth::Configured);
+        assert_eq!(
+            disabled_state.health,
+            PluginHealth::Configured,
+            "runtime health must not be derived from enabled_by_default"
+        );
+    }
+
+    // ---- recompute_availability tests ----
+
+    #[test]
+    fn test_recompute_availability_no_manifest() {
+        let registry = PluginRegistry::new();
+        registry.register(create_test_config("p1"));
+
+        let summary = registry.recompute_availability("p1").unwrap();
+        assert_eq!(summary.total_tools, 0);
+        assert_eq!(summary.available_tools, 0);
+        assert!(summary.per_tool.is_empty());
+    }
+
+    #[test]
+    fn test_recompute_availability_all_available() {
+        let registry = PluginRegistry::new();
+        registry.register(create_test_config("p1"));
+        registry.update_health("p1", PluginHealth::Healthy);
+        registry.set_manifest(
+            "p1",
+            create_test_manifest(vec![make_tool("t1", None), make_tool("t2", None)]),
+        );
+
+        let summary = registry.recompute_availability("p1").unwrap();
+        assert_eq!(summary.total_tools, 2);
+        assert_eq!(summary.available_tools, 2);
+        assert!(summary.per_tool.iter().all(|t| t.available));
+        assert!(summary
+            .per_tool
+            .iter()
+            .all(|t| t.unavailable_reason.is_none()));
+    }
+
+    #[test]
+    fn test_recompute_availability_auth_gated() {
+        let registry = PluginRegistry::new();
+        registry.register(create_test_config("p1"));
+        registry.update_health("p1", PluginHealth::Healthy);
+        registry.set_manifest(
+            "p1",
+            create_test_manifest(vec![
+                make_tool(
+                    "free",
+                    Some(ToolAuthRequirements {
+                        scopes: vec![],
+                        available_unauthenticated: true,
+                    }),
+                ),
+                make_tool(
+                    "gated",
+                    Some(ToolAuthRequirements {
+                        scopes: vec![],
+                        available_unauthenticated: false,
+                    }),
+                ),
+            ]),
+        );
+
+        // Not authenticated
+        let summary = registry.recompute_availability("p1").unwrap();
+        assert_eq!(summary.total_tools, 2);
+        assert_eq!(summary.available_tools, 1);
+
+        let free_tool = summary.per_tool.iter().find(|t| t.name == "free").unwrap();
+        assert!(free_tool.available);
+        assert!(free_tool.auth_satisfied);
+
+        let gated_tool = summary.per_tool.iter().find(|t| t.name == "gated").unwrap();
+        assert!(!gated_tool.available);
+        assert!(!gated_tool.auth_satisfied);
+        assert!(matches!(
+            gated_tool.unavailable_reason,
+            Some(UnavailableReason::AuthRequired)
+        ));
+    }
+
+    #[test]
+    fn test_recompute_availability_scope_check() {
+        let registry = PluginRegistry::new();
+        registry.register(create_test_config("p1"));
+        registry.update_health("p1", PluginHealth::Healthy);
+        registry.set_manifest(
+            "p1",
+            create_test_manifest(vec![make_tool(
+                "scoped",
+                Some(ToolAuthRequirements {
+                    scopes: vec!["read".to_string(), "write".to_string()],
+                    available_unauthenticated: false,
+                }),
+            )]),
+        );
+
+        // Authenticate with partial scopes
+        registry.set_credentials(
+            "p1",
+            CredentialBinding {
+                plugin_id: "p1".to_string(),
+                provider: "test".to_string(),
+                access_token: "tok".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                scopes: vec!["read".to_string()],
+            },
+        );
+
+        let summary = registry.recompute_availability("p1").unwrap();
+        assert_eq!(summary.total_tools, 1);
+        assert_eq!(summary.available_tools, 0);
+
+        let tool = &summary.per_tool[0];
+        assert!(!tool.available);
+        assert!(matches!(
+            &tool.unavailable_reason,
+            Some(UnavailableReason::ScopeMissing { missing, .. }) if missing.len() == 1 && missing[0] == "write"
+        ));
+    }
+
+    #[test]
+    fn test_recompute_availability_after_clear_credentials() {
+        let registry = PluginRegistry::new();
+        registry.register(create_test_config("p1"));
+        registry.update_health("p1", PluginHealth::Healthy);
+        registry.set_manifest(
+            "p1",
+            create_test_manifest(vec![make_tool(
+                "gated",
+                Some(ToolAuthRequirements {
+                    scopes: vec![],
+                    available_unauthenticated: false,
+                }),
+            )]),
+        );
+
+        // Authenticate
+        registry.set_credentials(
+            "p1",
+            CredentialBinding {
+                plugin_id: "p1".to_string(),
+                provider: "test".to_string(),
+                access_token: "tok".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                scopes: vec![],
+            },
+        );
+        let summary = registry.recompute_availability("p1").unwrap();
+        assert_eq!(summary.available_tools, 1);
+
+        // Clear credentials
+        registry.clear_credentials("p1");
+        let summary = registry.recompute_availability("p1").unwrap();
+        assert_eq!(summary.available_tools, 0);
+        assert!(matches!(
+            summary.per_tool[0].unavailable_reason,
+            Some(UnavailableReason::AuthRequired)
+        ));
+    }
+
+    #[test]
+    fn test_recompute_availability_unknown_plugin() {
+        let registry = PluginRegistry::new();
+        assert!(registry.recompute_availability("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_get_status_uses_canonical_availability() {
+        let registry = PluginRegistry::new();
+        registry.register(create_test_config("p1"));
+        registry.update_health("p1", PluginHealth::Healthy);
+        registry.set_manifest(
+            "p1",
+            create_test_manifest(vec![
+                make_tool(
+                    "free",
+                    Some(ToolAuthRequirements {
+                        scopes: vec![],
+                        available_unauthenticated: true,
+                    }),
+                ),
+                make_tool(
+                    "gated",
+                    Some(ToolAuthRequirements {
+                        scopes: vec![],
+                        available_unauthenticated: false,
+                    }),
+                ),
+            ]),
+        );
+
+        let status = registry.get_status("p1").unwrap();
+        assert_eq!(status.available_tool_count, 1); // only "free" available
+        assert!(status.ready); // at least one tool
+        assert_eq!(
+            status.runtime_status,
+            crate::plugin::status::PluginRuntimeStatus::Partial
+        );
+    }
+
+    #[test]
+    fn test_get_plugin_info_uses_canonical_availability() {
+        let registry = PluginRegistry::new();
+        registry.register(create_test_config("p1"));
+        registry.update_health("p1", PluginHealth::Healthy);
+        registry.set_manifest(
+            "p1",
+            create_test_manifest(vec![make_tool("t1", None), make_tool("t2", None)]),
+        );
+
+        let info = registry.get_plugin_info("p1").unwrap();
+        assert_eq!(info.available_tool_count, 2);
+        assert_eq!(info.declared_tool_count, 2);
+        assert!(info.ready);
     }
 }

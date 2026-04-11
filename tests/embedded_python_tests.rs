@@ -19,13 +19,13 @@ fn make_engine() -> ScriptEngine {
     ScriptEngine::new(&default_config())
 }
 
-fn tool_registry_executor(
-    registry: Arc<ToolRegistry>,
-) -> Arc<
+type ToolExecutor = Arc<
     dyn Fn(&str, &str, serde_json::Value) -> (ChildCallStatus, Option<serde_json::Value>)
         + Send
         + Sync,
-> {
+>;
+
+fn tool_registry_executor(registry: Arc<ToolRegistry>) -> ToolExecutor {
     Arc::new(move |call_id: &str, name: &str, args: serde_json::Value| {
         let Some(tool) = registry.get(name) else {
             return (

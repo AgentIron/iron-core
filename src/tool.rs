@@ -98,7 +98,7 @@ impl ToolDefinition {
 /// Registry of tools available to the agent runtime.
 #[derive(Default)]
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: HashMap<String, Arc<dyn Tool>>,
 }
 
 impl std::fmt::Debug for ToolRegistry {
@@ -112,10 +112,8 @@ impl std::fmt::Debug for ToolRegistry {
 
 impl Clone for ToolRegistry {
     fn clone(&self) -> Self {
-        // ToolRegistry contains Box<dyn Tool> which can't be easily cloned
-        // We create a new empty registry - tools need to be re-registered
         Self {
-            tools: HashMap::new(),
+            tools: self.tools.clone(),
         }
     }
 }
@@ -129,7 +127,7 @@ impl ToolRegistry {
     /// Register or replace a tool by its definition name.
     pub fn register<T: Tool + 'static>(&mut self, tool: T) {
         let definition = tool.definition();
-        self.tools.insert(definition.name, Box::new(tool));
+        self.tools.insert(definition.name, Arc::new(tool));
     }
 
     /// Look up a tool by name.

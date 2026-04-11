@@ -214,3 +214,80 @@ fn is_local_resource(uri: &str) -> bool {
         || uri.starts_with("unix://")
         || uri.starts_with("/dev/")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies that `hydrate_into_new` does **not** carry over plugin
+    /// enablement state from the source session.  The destination runtime
+    /// must determine its own tool availability.
+    #[test]
+    fn hydrate_into_new_produces_empty_plugin_enablement() {
+        // Create a source session with plugin enablement state.
+        let mut source = DurableSession::new(SessionId::new());
+        source.set_plugin_enabled("plugin-a", true);
+        source.set_plugin_enabled("plugin-b", false);
+        assert_eq!(
+            source.list_enabled_plugins(),
+            vec!["plugin-a".to_string()],
+            "sanity check: source should have plugin-a enabled"
+        );
+
+        // Export a handoff bundle (minimal — no messages needed).
+        let config = ContextManagementConfig::default();
+        let bundle = HandoffExporter::export(&source, "test-model", None, vec![], &config, None)
+            .expect("export should succeed for idle session");
+
+        // Hydrate into a new session.
+        let hydrated = HandoffImporter::hydrate_into_new(bundle);
+
+        // The hydrated session must have empty plugin enablement.
+        assert!(
+            hydrated.list_enabled_plugins().is_empty(),
+            "plugin enablement must not survive handoff; got {:?}",
+            hydrated.list_enabled_plugins()
+        );
+        assert_eq!(
+            hydrated.is_plugin_enabled("plugin-a"),
+            None,
+            "plugin-a must have no explicit enablement after hydration"
+        );
+        assert_eq!(
+            hydrated.is_plugin_enabled("plugin-b"),
+            None,
+            "plugin-b must have no explicit enablement after hydration"
+        );
+    }
+
+    /// Verifies that the `hydrate` (in-place) path also excludes plugin
+    /// enablement — the import path never touches plugin_enablement.
+    #[test]
+    fn hydrate_in_place_does_not_modify_plugin_enablement() {
+        let mut source = DurableSession::new(SessionId::new());
+        source.set_plugin_enabled("plugin-x", true);
+        source.add_agent_text("hello");
+
+        let config = ContextManagementConfig::default();
+        let bundle = HandoffExporter::export(&source, "test-model", None, vec![], &config, None)
+            .expect("export should succeed");
+
+        // Create a target with its own plugin enablement.
+        let mut target = DurableSession::new(SessionId::new());
+        target.set_plugin_enabled("plugin-y", true);
+
+        HandoffImporter::hydrate(&mut target, bundle).expect("hydrate should succeed");
+
+        // Target must retain its own enablement; nothing from source imported.
+        assert_eq!(
+            target.is_plugin_enabled("plugin-x"),
+            None,
+            "source plugin enablement must not leak into target"
+        );
+        assert_eq!(
+            target.is_plugin_enabled("plugin-y"),
+            Some(true),
+            "target's own plugin enablement must be preserved"
+        );
+    }
+}

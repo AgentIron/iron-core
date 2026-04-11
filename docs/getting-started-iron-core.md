@@ -65,10 +65,12 @@ You can also register the built-in `read`, `write`, `edit`, `glob`, `grep`, and
 `webfetch` tools, plus `bash` or `powershell` when available, through
 `IronAgent::register_builtin_tools(...)`.
 
-`iron-core` can also surface tools from MCP servers and the experimental WASM
-integration-plugin subsystem. Plugin support is currently scaffolding only;
-see [integration-plugins.md](./integration-plugins.md) for the current status
-and API surface.
+`iron-core` can also surface tools from MCP servers and the WASM
+integration-plugin subsystem. MCP support is fully implemented with session-scoped
+enablement, transport clients for stdio/HTTP/HTTP+SSE, and connection lifecycle
+management. The WASM plugin system is also fully implemented with install lifecycle,
+Extism-backed execution, and canonical tool availability gating.
+See [integration-plugins.md](./integration-plugins.md) for the plugin API surface.
 
 ## 4. Use The Stream-First Session API
 

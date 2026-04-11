@@ -53,7 +53,7 @@ impl ScriptRun {
     }
 
     pub fn with_tool_catalog_from_registry(mut self, registry: &ToolRegistry) -> Self {
-        self.tool_catalog = ToolCatalog::from_registry(registry);
+        self.tool_catalog = ToolCatalog::from_definitions(registry.definitions());
         self
     }
 
@@ -376,18 +376,13 @@ impl ScriptRun {
             }
             "call" => {
                 let tool_name = self.string_arg(&call.args, 1, "tools.call")?;
-                let entry = self.tool_catalog.entry_by_name(&tool_name).ok_or_else(|| {
-                    MontyException::new(
-                        ExcType::RuntimeError,
-                        Some(format!(
-                            "tool '{}' is not present in the script tool catalog",
-                            tool_name
-                        )),
-                    )
-                })?;
                 let args = self.payload_from_call(&call.args, &call.kwargs, 2)?;
                 Ok(ResolvedFunctionCall::Tool {
-                    tool_name: entry.name().to_string(),
+                    tool_name: self
+                        .tool_catalog
+                        .entry_by_name(&tool_name)
+                        .map(|entry| entry.name().to_string())
+                        .unwrap_or(tool_name),
                     args,
                 })
             }

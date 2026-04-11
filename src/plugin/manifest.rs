@@ -1,7 +1,6 @@
 use crate::plugin::auth::OAuthRequirements;
 use crate::plugin::network::NetworkPolicy;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Plugin manifest containing metadata, capabilities, and exported tools
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

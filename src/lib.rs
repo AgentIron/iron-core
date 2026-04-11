@@ -3,6 +3,7 @@
     rustdoc::private_intra_doc_links,
     rustdoc::redundant_explicit_links
 )]
+#![allow(deprecated)] // Allow deprecated items in re-exports until callers migrate
 //! iron-core: Core AgentIron runtime, ACP-native session management, and tool registry
 //!
 //! This crate provides the ACP-native runtime, session management, tool registration,
@@ -255,22 +256,30 @@ pub use transport::{
 };
 
 pub use mcp::{
-    EffectiveToolView, McpConnectionManager, McpServerRegistry, McpServerConfig, McpServerState,
-    McpServerHealth, McpTool, McpTransport, McpToolInfo, SessionMcpSummary, ServerStatus,
+    EffectiveToolView, McpConnectionManager, McpServerConfig, McpServerHealth, McpServerRegistry,
+    McpServerState, McpTool, McpToolInfo, McpTransport, ServerStatus, SessionMcpSummary,
+    SessionToolCatalog,
 };
 
 pub use plugin::{
-    auth::{AuthActionHint, AuthAvailability, AuthInteractionRequest, AuthInteractionResponse,
-           AuthInteractionResult, AuthState, CredentialBinding, OAuthProvider, OAuthRequirements},
+    auth::{
+        AuthActionHint, AuthAvailability, AuthInteractionRequest, AuthInteractionResponse,
+        AuthInteractionResult, AuthState, CredentialBinding, OAuthProvider, OAuthRequirements,
+    },
     config::{Checksum, ChecksumAlgorithm, PluginConfig as PluginSourceConfig, PluginSource},
-    effective_tools::{EffectivePluginToolView, PluginTool},
+    effective_tools::{
+        compute_tool_availability, EffectivePluginToolView, PluginTool, ToolAvailabilityResult,
+        UnavailableReason,
+    },
     lifecycle::{InstallResult, PluginLifecycle},
-    manifest::{ExportedTool, PluginIdentity, PluginManifest, PluginPublisher, 
-               PresentationMetadata, ToolAuthRequirements},
-    registry::{PluginId, PluginRegistry, PluginState},
+    manifest::{
+        ExportedTool, PluginIdentity, PluginManifest, PluginPublisher, PresentationMetadata,
+        ToolAuthRequirements,
+    },
+    network::NetworkPolicy as PluginNetworkPolicy,
+    registry::{PluginAvailabilitySummary, PluginId, PluginRegistry, PluginState},
     session::SessionPluginEnablement,
     status::{PerToolAvailability, PluginHealth, PluginRuntimeStatus, PluginStatus},
-    network::NetworkPolicy as PluginNetworkPolicy,
 };
 
 pub use iron_providers::{

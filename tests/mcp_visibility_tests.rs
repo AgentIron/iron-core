@@ -1,8 +1,9 @@
 //! Tests for MCP effective tool visibility
+#![allow(deprecated)] // EffectiveToolView is deprecated; tests still verify legacy behavior
 
 use iron_core::{
-    config::McpConfig, tool::ToolRegistry, Config, EffectiveToolView, McpServerConfig,
-    McpServerHealth, McpServerRegistry, McpToolInfo, McpTransport,
+    tool::ToolRegistry, EffectiveToolView, McpServerConfig, McpServerHealth, McpServerRegistry,
+    McpToolInfo, McpTransport,
 };
 use std::sync::Arc;
 

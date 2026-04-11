@@ -1,10 +1,7 @@
 //! Tests for MCP (Model Context Protocol) session-scoped support
 
 use futures::StreamExt;
-use iron_core::{
-    config::McpConfig, Config, IronAgent, McpServerConfig, McpServerHealth, McpTransport,
-    SessionId,
-};
+use iron_core::{config::McpConfig, Config, IronAgent, McpServerConfig, McpTransport, SessionId};
 use iron_providers::{Provider, ProviderEvent};
 
 // Mock provider for testing
@@ -22,24 +19,23 @@ impl Provider for MockProvider {
     fn infer_stream(
         &self,
         _request: iron_providers::InferenceRequest,
-    ) -> iron_providers::ProviderFuture<'_, futures::stream::BoxStream<'static, iron_providers::ProviderResult<ProviderEvent>>>
-    {
-        Box::pin(async { 
-            Ok(futures::stream::iter(vec![Ok(ProviderEvent::Complete)]).boxed()) 
-        })
+    ) -> iron_providers::ProviderFuture<
+        '_,
+        futures::stream::BoxStream<'static, iron_providers::ProviderResult<ProviderEvent>>,
+    > {
+        Box::pin(async { Ok(futures::stream::iter(vec![Ok(ProviderEvent::Complete)]).boxed()) })
     }
 }
 
 #[test]
 fn new_session_uses_runtime_default_enablement_enabled() {
-    let config = Config::new()
-        .with_mcp(
-            McpConfig::new()
-                .with_enabled(true)
-                .with_enabled_by_default(true),
-        );
+    let config = Config::new().with_mcp(
+        McpConfig::new()
+            .with_enabled(true)
+            .with_enabled_by_default(true),
+    );
 
-    let runtime = iron_core::IronRuntime::new(config, MockProvider::default());
+    let runtime = iron_core::IronRuntime::new(config, MockProvider);
 
     // Register an MCP server
     let server_config = McpServerConfig {
@@ -54,8 +50,8 @@ fn new_session_uses_runtime_default_enablement_enabled() {
     runtime.register_mcp_server(server_config);
 
     // Create a connection and session
-    let conn = iron_core::IronConnection::new(runtime.clone());
-    let (session_id, session) = runtime
+    let _conn = iron_core::IronConnection::new(runtime.clone());
+    let (_session_id, session) = runtime
         .create_session(iron_core::ConnectionId(1))
         .expect("Failed to create session");
 
@@ -70,14 +66,13 @@ fn new_session_uses_runtime_default_enablement_enabled() {
 
 #[test]
 fn new_session_uses_runtime_default_enablement_disabled() {
-    let config = Config::new()
-        .with_mcp(
-            McpConfig::new()
-                .with_enabled(true)
-                .with_enabled_by_default(false),
-        );
+    let config = Config::new().with_mcp(
+        McpConfig::new()
+            .with_enabled(true)
+            .with_enabled_by_default(false),
+    );
 
-    let runtime = iron_core::IronRuntime::new(config, MockProvider::default());
+    let runtime = iron_core::IronRuntime::new(config, MockProvider);
 
     // Register an MCP server
     let server_config = McpServerConfig {
@@ -92,7 +87,7 @@ fn new_session_uses_runtime_default_enablement_disabled() {
     runtime.register_mcp_server(server_config);
 
     // Create a connection and session
-    let (session_id, session) = runtime
+    let (_session_id, session) = runtime
         .create_session(iron_core::ConnectionId(1))
         .expect("Failed to create session");
 
@@ -107,14 +102,13 @@ fn new_session_uses_runtime_default_enablement_disabled() {
 
 #[test]
 fn session_toggle_does_not_affect_another_session() {
-    let config = Config::new()
-        .with_mcp(
-            McpConfig::new()
-                .with_enabled(true)
-                .with_enabled_by_default(true),
-        );
+    let config = Config::new().with_mcp(
+        McpConfig::new()
+            .with_enabled(true)
+            .with_enabled_by_default(true),
+    );
 
-    let runtime = iron_core::IronRuntime::new(config, MockProvider::default());
+    let runtime = iron_core::IronRuntime::new(config, MockProvider);
 
     // Register an MCP server
     let server_config = McpServerConfig {
@@ -129,11 +123,11 @@ fn session_toggle_does_not_affect_another_session() {
     runtime.register_mcp_server(server_config);
 
     // Create two sessions
-    let (session1_id, session1) = runtime
+    let (_session1_id, session1) = runtime
         .create_session(iron_core::ConnectionId(1))
         .expect("Failed to create session 1");
 
-    let (session2_id, session2) = runtime
+    let (_session2_id, session2) = runtime
         .create_session(iron_core::ConnectionId(2))
         .expect("Failed to create session 2");
 
@@ -163,8 +157,8 @@ fn session_toggle_does_not_affect_another_session() {
 
 #[test]
 fn mcp_state_not_included_in_handoff() {
-    use iron_core::context::{HandoffExporter, HandoffImporter};
     use iron_core::context::config::ContextManagementConfig;
+    use iron_core::context::{HandoffExporter, HandoffImporter};
 
     let config = Config::new()
         .with_mcp(
@@ -174,7 +168,7 @@ fn mcp_state_not_included_in_handoff() {
         )
         .with_context_management(ContextManagementConfig::default());
 
-    let runtime = iron_core::IronRuntime::new(config.clone(), MockProvider::default());
+    let runtime = iron_core::IronRuntime::new(config.clone(), MockProvider);
 
     // Register an MCP server
     let server_config = McpServerConfig {
@@ -189,7 +183,7 @@ fn mcp_state_not_included_in_handoff() {
     runtime.register_mcp_server(server_config);
 
     // Create a session with MCP enabled
-    let (session_id, session) = runtime
+    let (_session_id, session) = runtime
         .create_session(iron_core::ConnectionId(1))
         .expect("Failed to create session");
 
@@ -218,9 +212,8 @@ fn mcp_state_not_included_in_handoff() {
     // Create a new session and import the bundle
     let new_session_id = SessionId::new();
     let mut new_durable = iron_core::durable::DurableSession::new(new_session_id);
-    
-    HandoffImporter::hydrate(&mut new_durable, bundle)
-        .expect("Failed to import handoff");
+
+    HandoffImporter::hydrate(&mut new_durable, bundle).expect("Failed to import handoff");
 
     // Verify MCP enablement state was NOT imported (should be empty)
     assert!(
@@ -231,5 +224,104 @@ fn mcp_state_not_included_in_handoff() {
         new_durable.is_mcp_server_enabled("test-server"),
         None,
         "MCP server enablement should be None after handoff import"
+    );
+}
+
+#[tokio::test]
+async fn imported_session_adopts_destination_runtime_mcp_policy() {
+    let source_agent = IronAgent::new(
+        Config::new().with_mcp(
+            McpConfig::new()
+                .with_enabled(true)
+                .with_enabled_by_default(true),
+        ),
+        MockProvider,
+    );
+    source_agent.register_mcp_server(McpServerConfig {
+        id: "test-server".to_string(),
+        label: "Test Server".to_string(),
+        transport: McpTransport::Http {
+            url: "http://localhost:8080".to_string(),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    });
+
+    let source_connection = source_agent.connect();
+    let source_session = source_connection.create_session().unwrap();
+    assert_eq!(
+        source_session.is_mcp_server_enabled("test-server"),
+        Some(true)
+    );
+
+    let bundle = source_session
+        .export_handoff("test-model", None)
+        .await
+        .expect("handoff export should succeed");
+
+    let destination_agent = IronAgent::new(
+        Config::new().with_mcp(
+            McpConfig::new()
+                .with_enabled(true)
+                .with_enabled_by_default(false),
+        ),
+        MockProvider,
+    );
+    destination_agent.register_mcp_server(McpServerConfig {
+        id: "test-server".to_string(),
+        label: "Test Server".to_string(),
+        transport: McpTransport::Http {
+            url: "http://localhost:8080".to_string(),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    });
+
+    let destination_connection = destination_agent.connect();
+    let imported_session = destination_connection
+        .create_session_from_handoff(bundle)
+        .expect("handoff import should succeed");
+
+    assert_eq!(
+        imported_session.is_mcp_server_enabled("test-server"),
+        Some(false),
+        "imported sessions should adopt the destination runtime default policy"
+    );
+}
+
+#[test]
+fn registering_new_server_materializes_runtime_default_for_existing_sessions() {
+    let runtime = iron_core::IronRuntime::new(
+        Config::new().with_mcp(
+            McpConfig::new()
+                .with_enabled(true)
+                .with_enabled_by_default(false),
+        ),
+        MockProvider,
+    );
+
+    let (_session_id, session) = runtime
+        .create_session(iron_core::ConnectionId(1))
+        .expect("Failed to create session");
+
+    assert_eq!(
+        session.lock().unwrap().is_mcp_server_enabled("late-server"),
+        None
+    );
+
+    runtime.register_mcp_server(McpServerConfig {
+        id: "late-server".to_string(),
+        label: "Late Server".to_string(),
+        transport: McpTransport::Http {
+            url: "http://localhost:8080".to_string(),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    });
+
+    assert_eq!(
+        session.lock().unwrap().is_mcp_server_enabled("late-server"),
+        Some(false),
+        "existing sessions should get explicit runtime-default MCP state for newly registered servers"
     );
 }

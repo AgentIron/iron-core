@@ -6,8 +6,12 @@ use crate::{
     durable::{DurableSession, SessionId},
     ephemeral::EphemeralTurn,
     error::RuntimeError,
-    mcp::{McpConnectionManager, McpServerRegistry},
-    plugin::registry::PluginRegistry,
+    mcp::{McpConnectionManager, McpServerRegistry, ReconnectConfig, SessionToolCatalog},
+    plugin::auth::CredentialBinding,
+    plugin::effective_tools::{EffectivePluginToolView, SessionPluginToolSummary},
+    plugin::registry::{PluginAvailabilitySummary, PluginRegistry},
+    plugin::status::{PluginInfo, PluginStatus},
+    plugin::wasm_host::WasmHost,
     tool::ToolRegistry,
 };
 use iron_providers::Provider;
@@ -25,7 +29,9 @@ struct RuntimeInner {
     capabilities: RwLock<CapabilityRegistry>,
     tool_registry: RwLock<ToolRegistry>,
     mcp_registry: RwLock<McpServerRegistry>,
+    mcp_connection_manager: Arc<McpConnectionManager>,
     plugin_registry: RwLock<PluginRegistry>,
+    wasm_host: RwLock<WasmHost>,
     sessions: RwLock<HashMap<SessionId, Arc<RuntimeSession>>>,
     connections: RwLock<HashMap<ConnectionId, Arc<RuntimeConnection>>>,
     tokio_handle: tokio::runtime::Handle,
@@ -72,6 +78,76 @@ pub struct IronRuntime {
 }
 
 impl IronRuntime {
+    fn apply_runtime_mcp_policy_to_session(&self, durable: &mut DurableSession) {
+        if !self.inner.config.mcp.enabled {
+            return;
+        }
+
+        let runtime_default = self.inner.config.mcp.enabled_by_default;
+        let mcp_registry = self.mcp_registry();
+        for server in mcp_registry.list_servers() {
+            durable
+                .mcp_server_enablement
+                .entry(server.config.id)
+                .or_insert(runtime_default);
+        }
+    }
+
+    /// Apply the runtime-level plugin default policy to a session's
+    /// enablement map.  Only adds entries for plugins that do not already
+    /// have an explicit value (preserves admin/client overrides).
+    fn apply_runtime_plugin_policy_to_session(&self, durable: &mut DurableSession) {
+        if !self.inner.config.plugins.enabled {
+            return;
+        }
+
+        let runtime_default = self.inner.config.plugins.enabled_by_default;
+        let plugin_registry = self.plugin_registry();
+        for plugin in plugin_registry.list() {
+            let plugin_id = &plugin.config.id;
+            // Only insert if not already set — imported sessions may carry
+            // their own enablement choices.
+            if durable.is_plugin_enabled(plugin_id).is_none() {
+                durable.set_plugin_enabled(plugin_id, runtime_default);
+            }
+        }
+    }
+
+    fn initialize_existing_sessions_for_new_mcp_server(&self, server_id: &str) {
+        if !self.inner.config.mcp.enabled {
+            return;
+        }
+
+        let runtime_default = self.inner.config.mcp.enabled_by_default;
+        let sessions = self.inner.sessions.read().unwrap();
+        for runtime_session in sessions.values() {
+            if let Ok(mut session) = runtime_session.session.lock() {
+                session
+                    .mcp_server_enablement
+                    .entry(server_id.to_string())
+                    .or_insert(runtime_default);
+            }
+        }
+    }
+
+    /// When a new plugin is registered, seed any existing sessions with
+    /// the runtime-default enablement value (same pattern as MCP).
+    fn initialize_existing_sessions_for_new_plugin(&self, plugin_id: &str) {
+        if !self.inner.config.plugins.enabled {
+            return;
+        }
+
+        let runtime_default = self.inner.config.plugins.enabled_by_default;
+        let sessions = self.inner.sessions.read().unwrap();
+        for runtime_session in sessions.values() {
+            if let Ok(mut session) = runtime_session.session.lock() {
+                if session.is_plugin_enabled(plugin_id).is_none() {
+                    session.set_plugin_enabled(plugin_id, runtime_default);
+                }
+            }
+        }
+    }
+
     /// Create a new runtime with a privately owned Tokio runtime.
     pub fn new<P>(config: Config, provider: P) -> Self
     where
@@ -80,14 +156,18 @@ impl IronRuntime {
         let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
         let handle = runtime.handle().clone();
         let (shutdown_tx, _) = watch::channel(false);
+        let mcp_registry = McpServerRegistry::new();
+        let mcp_connection_manager = Arc::new(McpConnectionManager::new(mcp_registry.clone()));
 
         let inner = RuntimeInner {
             config,
             provider: Arc::new(provider),
             capabilities: RwLock::new(CapabilityRegistry::new()),
             tool_registry: RwLock::new(ToolRegistry::new()),
-            mcp_registry: RwLock::new(McpServerRegistry::new()),
+            mcp_registry: RwLock::new(mcp_registry),
+            mcp_connection_manager,
             plugin_registry: RwLock::new(PluginRegistry::new()),
+            wasm_host: RwLock::new(WasmHost::new()),
             sessions: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
             tokio_handle: handle,
@@ -97,9 +177,19 @@ impl IronRuntime {
             active_tasks: Mutex::new(Vec::new()),
         };
 
-        Self {
+        let this = Self {
             inner: Arc::new(inner),
+        };
+
+        if this.inner.config.mcp.enabled {
+            let manager = this.inner.mcp_connection_manager.clone();
+            let shutdown_rx = this.shutdown_token();
+            let _ = this.spawn(async move {
+                manager.start(ReconnectConfig::default(), shutdown_rx).await;
+            });
         }
+
+        this
     }
 
     /// Create a new runtime using an existing Tokio runtime handle.
@@ -108,14 +198,18 @@ impl IronRuntime {
         P: Provider + 'static,
     {
         let (shutdown_tx, _) = watch::channel(false);
+        let mcp_registry = McpServerRegistry::new();
+        let mcp_connection_manager = Arc::new(McpConnectionManager::new(mcp_registry.clone()));
 
         let inner = RuntimeInner {
             config,
             provider: Arc::new(provider),
             capabilities: RwLock::new(CapabilityRegistry::new()),
             tool_registry: RwLock::new(ToolRegistry::new()),
-            mcp_registry: RwLock::new(McpServerRegistry::new()),
+            mcp_registry: RwLock::new(mcp_registry),
+            mcp_connection_manager,
             plugin_registry: RwLock::new(PluginRegistry::new()),
+            wasm_host: RwLock::new(WasmHost::new()),
             sessions: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
             tokio_handle: handle,
@@ -125,9 +219,19 @@ impl IronRuntime {
             active_tasks: Mutex::new(Vec::new()),
         };
 
-        Self {
+        let this = Self {
             inner: Arc::new(inner),
+        };
+
+        if this.inner.config.mcp.enabled {
+            let manager = this.inner.mcp_connection_manager.clone();
+            let shutdown_rx = this.shutdown_token();
+            let _ = this.spawn(async move {
+                manager.start(ReconnectConfig::default(), shutdown_rx).await;
+            });
         }
+
+        this
     }
 
     /// Borrow the validated runtime configuration.
@@ -195,11 +299,24 @@ impl IronRuntime {
 
     /// Register an MCP server configuration.
     pub fn register_mcp_server(&self, config: crate::mcp::McpServerConfig) {
+        let server_id = config.id.clone();
         self.inner
             .mcp_registry
             .write()
             .unwrap()
             .register_server(config);
+        self.initialize_existing_sessions_for_new_mcp_server(&server_id);
+
+        if self.inner.config.mcp.enabled {
+            let manager = self.inner.mcp_connection_manager.clone();
+            let _ = self.spawn(async move {
+                manager.connect_server(&server_id).await;
+            });
+        }
+    }
+
+    pub fn mcp_connection_manager(&self) -> Arc<McpConnectionManager> {
+        self.inner.mcp_connection_manager.clone()
     }
 
     /// Borrow the plugin registry.
@@ -209,7 +326,9 @@ impl IronRuntime {
 
     /// Register a plugin configuration.
     pub fn register_plugin(&self, config: crate::plugin::config::PluginConfig) {
+        let plugin_id = config.id.clone();
         self.inner.plugin_registry.write().unwrap().register(config);
+        self.initialize_existing_sessions_for_new_plugin(&plugin_id);
     }
 
     /// Borrow the Tokio runtime handle used for orchestration.
@@ -285,28 +404,16 @@ impl IronRuntime {
         }
 
         // Initialize MCP server enablement state for new session
-        if self.inner.config.mcp.enabled {
-            let mcp_registry = self.mcp_registry();
-            for server in mcp_registry.list_servers() {
-                let enabled = if self.inner.config.mcp.enabled_by_default {
-                    server.config.enabled_by_default
-                } else {
-                    false
-                };
-                durable.set_mcp_server_enabled(&server.config.id, enabled);
-            }
-        }
+        // Uses the single runtime-level default policy without per-server override
+        self.apply_runtime_mcp_policy_to_session(&mut durable);
 
         // Initialize plugin enablement state for new session
+        // Uses the single runtime-level default policy without per-plugin override
         if self.inner.config.plugins.enabled {
             let plugin_registry = self.plugin_registry();
+            let runtime_default = self.inner.config.plugins.enabled_by_default;
             for plugin in plugin_registry.list() {
-                let enabled = if self.inner.config.plugins.enabled_by_default {
-                    plugin.config.enabled_by_default
-                } else {
-                    false
-                };
-                durable.set_plugin_enabled(&plugin.config.id, enabled);
+                durable.set_plugin_enabled(&plugin.config.id, runtime_default);
             }
         }
 
@@ -326,12 +433,16 @@ impl IronRuntime {
     pub fn insert_session(
         &self,
         session_id: SessionId,
-        durable: DurableSession,
+        mut durable: DurableSession,
         connection_id: ConnectionId,
     ) -> Result<(), RuntimeError> {
         if self.is_shutdown() {
             return Err(RuntimeError::Connection("Runtime is shut down".into()));
         }
+        // Apply destination-runtime defaults for both MCP and plugin enablement.
+        // Uses .entry() / is_none() guards so existing client choices are preserved.
+        self.apply_runtime_mcp_policy_to_session(&mut durable);
+        self.apply_runtime_plugin_policy_to_session(&mut durable);
         let session = Arc::new(Mutex::new(durable));
         let runtime_session = RuntimeSession::new(session, connection_id);
         self.inner
@@ -457,6 +568,11 @@ impl IronRuntime {
     }
 
     pub fn shutdown(&self) {
+        let manager = self.inner.mcp_connection_manager.clone();
+        let _shutdown_handle = self.inner.tokio_handle.spawn(async move {
+            manager.shutdown().await;
+        });
+
         self.inner.is_shutdown.store(true, Ordering::SeqCst);
         let _ = self.inner.shutdown_tx.send(true);
 
@@ -469,34 +585,163 @@ impl IronRuntime {
         self.inner.connections.write().unwrap().clear();
     }
 
-    /// Get effective tool definitions for a session.
-    /// Combines local tools with MCP-backed tools and plugin-backed tools based on session state.
+    /// Get the session-effective tool definitions exposed by the runtime.
+    /// This follows the same session-effective path used for prompt construction
+    /// and execution.
     pub fn get_effective_tool_definitions(
         &self,
         session_id: SessionId,
     ) -> Vec<crate::tool::ToolDefinition> {
-        if let Some(session) = self.get_session(session_id) {
-            if let Ok(session_guard) = session.lock() {
-                let local_registry = Arc::new((*self.tool_registry()).clone());
-                let mcp_registry = Arc::new((*self.mcp_registry()).clone());
-                let plugin_registry = Arc::new((*self.plugin_registry()).clone());
-
-                // Get MCP tools
-                let effective_mcp_view =
-                    crate::mcp::EffectiveToolView::new(local_registry.clone(), mcp_registry);
-                let mut definitions = effective_mcp_view.get_tool_definitions(&session_guard);
-
-                // Get plugin tools
-                let effective_plugin_view =
-                    crate::plugin::effective_tools::EffectivePluginToolView::new(plugin_registry);
-                let plugin_definitions = effective_plugin_view
-                    .get_tool_definitions(&session_guard, &session_guard.plugin_enablement);
-                definitions.extend(plugin_definitions);
-
-                return definitions;
-            }
+        if let Some(catalog) = self.get_session_tool_catalog(session_id) {
+            return catalog.definitions().to_vec();
         }
+
         self.tool_registry().definitions()
+    }
+
+    /// Get a session-effective tool catalog that can be used for both
+    /// provider request building and tool execution.
+    pub fn get_session_tool_catalog(&self, session_id: SessionId) -> Option<SessionToolCatalog> {
+        let session = self.get_session(session_id)?;
+        let session_guard = session.lock().ok()?;
+
+        let local_registry = Arc::new((*self.tool_registry()).clone());
+        let mcp_registry = Arc::new((*self.mcp_registry()).clone());
+        let plugin_registry = Arc::new((*self.plugin_registry()).clone());
+        let wasm_host = Arc::new((*self.inner.wasm_host.read().ok()?).clone());
+        let connection_manager = self.mcp_connection_manager();
+
+        Some(SessionToolCatalog::new(
+            local_registry,
+            mcp_registry,
+            plugin_registry,
+            wasm_host,
+            connection_manager,
+            &session_guard,
+        ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Session-scoped plugin controls (Phase 6)
+    // -----------------------------------------------------------------------
+
+    /// Enable or disable a plugin for a specific session.
+    ///
+    /// This is the runtime-level entry point for callers that have a
+    /// [`SessionId`] but not an [`AgentSession`](crate::facade::AgentSession).
+    pub fn set_session_plugin_enabled(
+        &self,
+        session_id: SessionId,
+        plugin_id: impl Into<String>,
+        enabled: bool,
+    ) -> Result<(), RuntimeError> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| RuntimeError::SessionNotFound(session_id.to_string()))?;
+        let mut guard = session
+            .lock()
+            .map_err(|_| RuntimeError::Connection(session_id.to_string()))?;
+        guard.set_plugin_enabled(plugin_id, enabled);
+        Ok(())
+    }
+
+    /// Check whether a plugin is enabled for a specific session.
+    ///
+    /// Returns `None` if the session does not exist or the plugin has no
+    /// explicit enablement state for the session.
+    pub fn is_session_plugin_enabled(
+        &self,
+        session_id: SessionId,
+        plugin_id: &str,
+    ) -> Option<bool> {
+        let session = self.get_session(session_id)?;
+        let guard = session.lock().ok()?;
+        guard.is_plugin_enabled(plugin_id)
+    }
+
+    /// Get a full inventory of all registered plugins.
+    ///
+    /// Returns a [`PluginInfo`] for every plugin in the registry, reflecting
+    /// the current runtime state (health, auth, tool counts).
+    pub fn get_plugin_inventory(&self) -> Vec<PluginInfo> {
+        let registry = self.plugin_registry();
+        registry
+            .list()
+            .iter()
+            .filter_map(|p| registry.get_plugin_info(&p.config.id))
+            .collect()
+    }
+
+    /// Get the runtime status of a single plugin.
+    ///
+    /// Returns `None` if the plugin is not registered.
+    pub fn get_plugin_status(&self, plugin_id: &str) -> Option<PluginStatus> {
+        self.plugin_registry().get_status(plugin_id)
+    }
+
+    /// Set credentials for a plugin and mark it as authenticated.
+    ///
+    /// This triggers a recomputation of per-tool availability.
+    pub fn set_plugin_credentials(&self, plugin_id: &str, credentials: CredentialBinding) {
+        self.inner
+            .plugin_registry
+            .write()
+            .unwrap()
+            .set_credentials(plugin_id, credentials);
+    }
+
+    /// Clear credentials for a plugin and reset its auth state.
+    ///
+    /// This triggers a recomputation of per-tool availability.
+    pub fn clear_plugin_credentials(&self, plugin_id: &str) {
+        self.inner
+            .plugin_registry
+            .write()
+            .unwrap()
+            .clear_credentials(plugin_id);
+    }
+
+    /// Get a session-scoped summary of plugin tool availability.
+    ///
+    /// Combines the runtime-level registry state with the session's plugin
+    /// enablement to produce a per-plugin summary of how many tools are
+    /// usable for the given session.
+    ///
+    /// Returns `None` if the session does not exist.
+    pub fn get_session_plugin_summary(
+        &self,
+        session_id: SessionId,
+    ) -> Option<SessionPluginToolSummary> {
+        let session = self.get_session(session_id)?;
+        let guard = session.lock().ok()?;
+        let plugin_registry = Arc::new((*self.plugin_registry()).clone());
+        let wasm_host = Arc::new((*self.inner.wasm_host.read().ok()?).clone());
+        let view = EffectivePluginToolView::new(plugin_registry, wasm_host);
+        Some(view.get_session_summary(&guard, &guard.plugin_enablement))
+    }
+
+    /// Get a recomputed availability summary for a single plugin.
+    ///
+    /// Returns `None` if the plugin is not registered.
+    pub fn get_plugin_availability(&self, plugin_id: &str) -> Option<PluginAvailabilitySummary> {
+        self.inner
+            .plugin_registry
+            .read()
+            .unwrap()
+            .recompute_availability(plugin_id)
+    }
+
+    /// Get unified tool diagnostics for a session.
+    ///
+    /// Returns `None` if the session does not exist.
+    pub fn get_session_tool_diagnostics(
+        &self,
+        session_id: SessionId,
+    ) -> Option<Vec<crate::mcp::session_catalog::ToolDiagnostic>> {
+        let catalog = self.get_session_tool_catalog(session_id)?;
+        let session = self.get_session(session_id)?;
+        let guard = session.lock().ok()?;
+        Some(catalog.inspect_tools(&guard))
     }
 }
 

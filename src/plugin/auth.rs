@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// OAuth authentication requirements declared by a plugin
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
