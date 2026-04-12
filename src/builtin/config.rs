@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::policy::{BuiltinToolPolicy, ShellAvailability};
@@ -16,6 +18,7 @@ pub struct BuiltinToolConfig {
     pub max_grep_results: usize,
     pub max_fetch_bytes: usize,
     pub disabled_tools: Vec<String>,
+    pub read_tracking: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl Default for BuiltinToolConfig {
@@ -32,6 +35,7 @@ impl Default for BuiltinToolConfig {
             max_grep_results: 500,
             max_fetch_bytes: 512 * 1024,
             disabled_tools: Vec::new(),
+            read_tracking: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -98,5 +102,18 @@ impl BuiltinToolConfig {
             }
         }
         Ok(())
+    }
+
+    pub fn record_read(&self, path: &Path) {
+        if let Ok(mut guard) = self.read_tracking.lock() {
+            guard.insert(path.to_path_buf());
+        }
+    }
+
+    pub fn has_read(&self, path: &Path) -> bool {
+        self.read_tracking
+            .lock()
+            .map(|guard| guard.contains(path))
+            .unwrap_or(false)
     }
 }

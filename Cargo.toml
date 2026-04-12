@@ -39,6 +39,15 @@ regex = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 url = "2"
 
+# Ripgrep ecosystem — embedded search engine for glob/grep tools.
+# These are the same library crates that power ripgrep itself, providing
+# correct glob semantics, .gitignore-aware traversal, and high-performance
+# regex search without requiring an external `rg` binary on the host.
+ignore = "0.4"
+globset = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+
 # Embedded Python runtime (Monty)
 #
 # Position B adoption: pinned to upstream git main branch.

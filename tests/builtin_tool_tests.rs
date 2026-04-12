@@ -13,6 +13,16 @@ fn temp_config() -> (TempDir, BuiltinToolConfig) {
     (tmp, config)
 }
 
+fn mark_file_as_read(config: &BuiltinToolConfig, path: &std::path::Path) {
+    let tool = iron_core::builtin::file_ops::ReadTool::new(config.clone());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(tool.execute(
+        "prep-read",
+        serde_json::json!({ "path": path.to_str().unwrap() }),
+    ))
+    .unwrap();
+}
+
 #[test]
 fn policy_validates_absolute_allowed_root() {
     let tmp = TempDir::new().unwrap();
@@ -213,8 +223,8 @@ fn read_tool_supports_offset_and_limit() {
     let content = result.get("content").unwrap().as_str().unwrap();
     assert!(content.contains("2: b"));
     assert!(content.contains("3: c"));
-    assert!(!content.contains("a"));
-    assert!(!content.contains("d"));
+    assert!(!content.contains("1: a"));
+    assert!(!content.contains("4: d"));
 }
 
 #[test]
@@ -258,7 +268,8 @@ fn write_tool_creates_file() {
         ))
         .unwrap();
 
-    assert!(result.get("created").unwrap().as_bool().unwrap());
+    let internal = result.get("internal").unwrap();
+    assert!(internal.get("created").unwrap().as_bool().unwrap());
     assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "hello world");
 }
 
@@ -279,7 +290,8 @@ fn write_tool_creates_missing_parent_directories() {
         ))
         .unwrap();
 
-    assert!(result.get("created").unwrap().as_bool().unwrap());
+    let internal = result.get("internal").unwrap();
+    assert!(internal.get("created").unwrap().as_bool().unwrap());
     assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "deep");
 }
 
@@ -303,6 +315,7 @@ fn edit_tool_applies_exact_replacement() {
     let (tmp, config) = temp_config();
     let file_path = tmp.path().join("edit_me.txt");
     std::fs::write(&file_path, "foo bar baz").unwrap();
+    mark_file_as_read(&config, &file_path);
 
     let tool = iron_core::builtin::file_ops::EditTool::new(config);
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -317,7 +330,7 @@ fn edit_tool_applies_exact_replacement() {
         ))
         .unwrap();
 
-    assert_eq!(result.get("replacements").unwrap().as_u64().unwrap(), 1);
+    assert_eq!(result["internal"]["replacements"].as_u64().unwrap(), 1);
     assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "foo BAR baz");
 }
 
@@ -326,6 +339,7 @@ fn edit_tool_rejects_missing_text() {
     let (tmp, config) = temp_config();
     let file_path = tmp.path().join("edit_missing.txt");
     std::fs::write(&file_path, "foo bar baz").unwrap();
+    mark_file_as_read(&config, &file_path);
 
     let tool = iron_core::builtin::file_ops::EditTool::new(config);
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -345,6 +359,7 @@ fn edit_tool_rejects_ambiguous_match() {
     let (tmp, config) = temp_config();
     let file_path = tmp.path().join("edit_ambig.txt");
     std::fs::write(&file_path, "abc abc").unwrap();
+    mark_file_as_read(&config, &file_path);
 
     let tool = iron_core::builtin::file_ops::EditTool::new(config);
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -378,7 +393,8 @@ fn glob_tool_finds_matching_files() {
         ))
         .unwrap();
 
-    let paths = result.get("paths").unwrap().as_array().unwrap();
+    let internal = result.get("internal").unwrap();
+    let paths = internal.get("paths").unwrap().as_array().unwrap();
     assert_eq!(paths.len(), 2);
 }
 
@@ -402,7 +418,8 @@ fn glob_tool_respects_result_bounds() {
         ))
         .unwrap();
 
-    assert!(result.get("truncated").unwrap().as_bool().unwrap());
+    let internal = result.get("internal").unwrap();
+    assert!(internal.get("truncated").unwrap().as_bool().unwrap());
 }
 
 #[test]
@@ -427,9 +444,8 @@ fn grep_tool_finds_matches() {
         ))
         .unwrap();
 
-    let matches = result.get("matches").unwrap().as_array().unwrap();
-    assert_eq!(matches.len(), 1);
-    assert!(matches[0]["line"].as_str().unwrap().contains("hello"));
+    let content = result.get("content").unwrap().as_str().unwrap();
+    assert!(content.contains("hello"));
 }
 
 #[test]
@@ -451,9 +467,9 @@ fn grep_tool_applies_include_filter() {
         ))
         .unwrap();
 
-    let matches = result.get("matches").unwrap().as_array().unwrap();
-    assert_eq!(matches.len(), 1);
-    assert!(matches[0]["path"].as_str().unwrap().ends_with("code.rs"));
+    let content = result.get("content").unwrap().as_str().unwrap();
+    assert!(content.contains("code.rs"));
+    assert!(!content.contains("notes.txt"));
 }
 
 #[test]
@@ -537,7 +553,390 @@ fn smoke_test_register_all_builtin_tools_via_agent() {
     assert!(registry.contains("read"));
     assert!(registry.contains("write"));
     assert!(registry.contains("edit"));
+    assert!(registry.contains("multiedit"));
     assert!(registry.contains("glob"));
     assert!(registry.contains("grep"));
     assert!(registry.contains("webfetch"));
+}
+
+// ---------------------------------------------------------------------------
+// New tests for efficiency improvements
+// ---------------------------------------------------------------------------
+
+#[test]
+fn read_directory_returns_listing() {
+    let (tmp, config) = temp_config();
+    std::fs::write(tmp.path().join("file.txt"), "content").unwrap();
+    std::fs::create_dir(tmp.path().join("subdir")).unwrap();
+
+    let tool = iron_core::builtin::file_ops::ReadTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(tool.execute(
+            "test-dir-read",
+            serde_json::json!({
+                "path": tmp.path().to_str().unwrap()
+            }),
+        ))
+        .unwrap();
+
+    assert!(result.get("is_directory").unwrap().as_bool().unwrap());
+    let content = result.get("content").unwrap().as_str().unwrap();
+    assert!(content.contains("file.txt"));
+    assert!(content.contains("subdir/"));
+    // Should NOT contain . or ..
+    assert!(!content.contains("/.\n"));
+    assert!(!content.contains("/..\n"));
+}
+
+#[test]
+fn read_directory_includes_hidden_entries() {
+    let (tmp, config) = temp_config();
+    std::fs::write(tmp.path().join(".hidden"), "secret").unwrap();
+    std::fs::write(tmp.path().join("visible.txt"), "public").unwrap();
+
+    let tool = iron_core::builtin::file_ops::ReadTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(tool.execute(
+            "test-dir-hidden",
+            serde_json::json!({
+                "path": tmp.path().to_str().unwrap()
+            }),
+        ))
+        .unwrap();
+
+    let content = result.get("content").unwrap().as_str().unwrap();
+    assert!(content.contains(".hidden"));
+    assert!(content.contains("visible.txt"));
+}
+
+#[test]
+fn edit_replace_all_replaces_every_occurrence() {
+    let (tmp, config) = temp_config();
+    let file_path = tmp.path().join("multi.txt");
+    std::fs::write(&file_path, "abc abc abc").unwrap();
+    mark_file_as_read(&config, &file_path);
+
+    let tool = iron_core::builtin::file_ops::EditTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(tool.execute(
+            "test-replace-all",
+            serde_json::json!({
+                "path": file_path.to_str().unwrap(),
+                "old_string": "abc",
+                "new_string": "XYZ",
+                "replace_all": true
+            }),
+        ))
+        .unwrap();
+
+    assert_eq!(result["internal"]["replacements"].as_u64().unwrap(), 3);
+    assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "XYZ XYZ XYZ");
+}
+
+#[test]
+fn edit_replace_all_fails_on_zero_matches() {
+    let (tmp, config) = temp_config();
+    let file_path = tmp.path().join("no_match.txt");
+    std::fs::write(&file_path, "foo bar").unwrap();
+    mark_file_as_read(&config, &file_path);
+
+    let tool = iron_core::builtin::file_ops::EditTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(tool.execute(
+        "test-replace-all-miss",
+        serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "not_here",
+            "new_string": "XYZ",
+            "replace_all": true
+        }),
+    ));
+    assert!(result.is_err());
+}
+
+#[test]
+fn edit_requires_prior_read() {
+    let (tmp, config) = temp_config();
+    let file_path = tmp.path().join("must_read.txt");
+    std::fs::write(&file_path, "foo").unwrap();
+
+    let tool = iron_core::builtin::file_ops::EditTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(tool.execute(
+        "test-edit-read-required",
+        serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "foo",
+            "new_string": "bar"
+        }),
+    ));
+    assert!(result.is_err());
+}
+
+#[test]
+fn multiedit_applies_multiple_edits_atomically() {
+    let (tmp, config) = temp_config();
+    let file_path = tmp.path().join("multi_edit.txt");
+    std::fs::write(&file_path, "one two three").unwrap();
+    mark_file_as_read(&config, &file_path);
+
+    let tool = iron_core::builtin::file_ops::MultieditTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(tool.execute(
+            "test-multiedit",
+            serde_json::json!({
+                "path": file_path.to_str().unwrap(),
+                "edits": [
+                    { "old_string": "one", "new_string": "ONE" },
+                    { "old_string": "two", "new_string": "TWO" },
+                    { "old_string": "three", "new_string": "THREE" }
+                ]
+            }),
+        ))
+        .unwrap();
+
+    assert_eq!(result["internal"]["edits_applied"].as_u64().unwrap(), 3);
+    assert_eq!(
+        std::fs::read_to_string(&file_path).unwrap(),
+        "ONE TWO THREE"
+    );
+}
+
+#[test]
+fn multiedit_is_atomic_on_failure() {
+    let (tmp, config) = temp_config();
+    let file_path = tmp.path().join("atomic.txt");
+    let original = "alpha beta gamma";
+    std::fs::write(&file_path, original).unwrap();
+    mark_file_as_read(&config, &file_path);
+
+    let tool = iron_core::builtin::file_ops::MultieditTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(tool.execute(
+        "test-multiedit-atomic",
+        serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "edits": [
+                { "old_string": "alpha", "new_string": "ALPHA" },
+                { "old_string": "not_found", "new_string": "FAIL" }
+            ]
+        }),
+    ));
+    assert!(result.is_err());
+    // File should be unchanged (atomic rollback).
+    assert_eq!(std::fs::read_to_string(&file_path).unwrap(), original);
+}
+
+#[test]
+fn multiedit_supports_replace_all_per_item() {
+    let (tmp, config) = temp_config();
+    let file_path = tmp.path().join("per_item.txt");
+    std::fs::write(&file_path, "foo foo bar bar").unwrap();
+    mark_file_as_read(&config, &file_path);
+
+    let tool = iron_core::builtin::file_ops::MultieditTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _result = rt
+        .block_on(tool.execute(
+            "test-multiedit-replace-all",
+            serde_json::json!({
+                "path": file_path.to_str().unwrap(),
+                "edits": [
+                    { "old_string": "foo", "new_string": "FOO", "replace_all": true },
+                    { "old_string": "bar", "new_string": "BAR", "replace_all": true }
+                ]
+            }),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&file_path).unwrap(),
+        "FOO FOO BAR BAR"
+    );
+}
+
+#[test]
+fn multiedit_requires_prior_read() {
+    let (tmp, config) = temp_config();
+    let file_path = tmp.path().join("must_read_multi.txt");
+    std::fs::write(&file_path, "foo bar").unwrap();
+
+    let tool = iron_core::builtin::file_ops::MultieditTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(tool.execute(
+        "test-multiedit-read-required",
+        serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "edits": [{"old_string": "foo", "new_string": "FOO"}]
+        }),
+    ));
+    assert!(result.is_err());
+}
+
+#[test]
+fn grep_mode_files_with_matches() {
+    let (tmp, config) = temp_config();
+    std::fs::write(tmp.path().join("a.rs"), "fn find() {}\n").unwrap();
+    std::fs::write(tmp.path().join("b.rs"), "fn other() {}\n").unwrap();
+    std::fs::write(tmp.path().join("c.txt"), "find me\n").unwrap();
+
+    let tool = iron_core::builtin::search::GrepTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(tool.execute(
+            "test-grep-files",
+            serde_json::json!({
+                "pattern": "find",
+                "path": tmp.path().to_str().unwrap(),
+                "mode": "files_with_matches"
+            }),
+        ))
+        .unwrap();
+
+    let content = result.get("content").unwrap().as_str().unwrap();
+    assert!(content.contains("a.rs"));
+    assert!(content.contains("c.txt"));
+    assert!(!content.contains("b.rs"));
+}
+
+#[test]
+fn grep_mode_count_returns_totals() {
+    let (tmp, config) = temp_config();
+    std::fs::write(tmp.path().join("a.rs"), "find one\nfind two\n").unwrap();
+    std::fs::write(tmp.path().join("b.rs"), "find three\n").unwrap();
+
+    let tool = iron_core::builtin::search::GrepTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(tool.execute(
+            "test-grep-count",
+            serde_json::json!({
+                "pattern": "find",
+                "path": tmp.path().to_str().unwrap(),
+                "mode": "count"
+            }),
+        ))
+        .unwrap();
+
+    let content = result.get("content").unwrap().as_str().unwrap();
+    assert!(content.contains("3 matches total"));
+    assert!(content.contains("a.rs: 2"));
+    assert!(content.contains("b.rs: 1"));
+}
+
+#[test]
+fn grep_case_insensitive() {
+    let (tmp, config) = temp_config();
+    std::fs::write(tmp.path().join("mixed.txt"), "Hello World\n").unwrap();
+
+    let tool = iron_core::builtin::search::GrepTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(tool.execute(
+            "test-grep-ci",
+            serde_json::json!({
+                "pattern": "hello",
+                "path": tmp.path().to_str().unwrap(),
+                "case_insensitive": true
+            }),
+        ))
+        .unwrap();
+
+    let content = result.get("content").unwrap().as_str().unwrap();
+    assert!(content.contains("Hello"));
+}
+
+#[test]
+fn write_output_is_compact_summary() {
+    let (tmp, config) = temp_config();
+    let file_path = tmp.path().join("summary.txt");
+
+    let tool = iron_core::builtin::file_ops::WriteTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(tool.execute(
+            "test-write-summary",
+            serde_json::json!({
+                "path": file_path.to_str().unwrap(),
+                "content": "test"
+            }),
+        ))
+        .unwrap();
+
+    let content = result.get("content").unwrap().as_str().unwrap();
+    assert!(content.starts_with("Created"));
+}
+
+#[test]
+fn glob_output_is_compact_paths() {
+    let (tmp, config) = temp_config();
+    std::fs::write(tmp.path().join("a.rs"), "").unwrap();
+    std::fs::write(tmp.path().join("b.rs"), "").unwrap();
+
+    let tool = iron_core::builtin::search::GlobTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(tool.execute(
+            "test-glob-compact",
+            serde_json::json!({
+                "pattern": "*.rs",
+                "path": tmp.path().to_str().unwrap()
+            }),
+        ))
+        .unwrap();
+
+    let content = result.get("content").unwrap().as_str().unwrap();
+    assert!(content.contains("a.rs"));
+    assert!(content.contains("b.rs"));
+    // Should NOT contain JSON keys like "paths" or "count"
+    assert!(!content.contains("\"paths\""));
+}
+
+#[test]
+fn grep_explicit_hidden_include_overrides_default_filters() {
+    let (tmp, config) = temp_config();
+    std::fs::create_dir_all(tmp.path().join(".hidden")).unwrap();
+    std::fs::write(tmp.path().join(".hidden/secret.txt"), "needle\n").unwrap();
+
+    let tool = iron_core::builtin::search::GrepTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(tool.execute(
+            "test-grep-hidden-override",
+            serde_json::json!({
+                "pattern": "needle",
+                "path": tmp.path().to_str().unwrap(),
+                "include": ".hidden/**"
+            }),
+        ))
+        .unwrap();
+
+    let content = result["content"].as_str().unwrap();
+    assert!(content.contains(".hidden/secret.txt"));
+}
+
+#[test]
+fn glob_explicit_hidden_pattern_overrides_default_filters() {
+    let (tmp, config) = temp_config();
+    std::fs::create_dir_all(tmp.path().join(".hidden")).unwrap();
+    std::fs::write(tmp.path().join(".hidden/file.txt"), "x").unwrap();
+
+    let tool = iron_core::builtin::search::GlobTool::new(config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(tool.execute(
+            "test-glob-hidden-override",
+            serde_json::json!({
+                "pattern": ".hidden/**",
+                "path": tmp.path().to_str().unwrap()
+            }),
+        ))
+        .unwrap();
+
+    let content = result["content"].as_str().unwrap();
+    assert!(content.contains(".hidden/file.txt"));
 }

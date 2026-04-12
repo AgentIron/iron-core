@@ -12,6 +12,9 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry, config: &BuiltinToolC
     if config.is_tool_enabled("edit") {
         registry.register(super::file_ops::EditTool::new(config.clone()));
     }
+    if config.is_tool_enabled("multiedit") {
+        registry.register(super::file_ops::MultieditTool::new(config.clone()));
+    }
     if config.is_tool_enabled("glob") {
         registry.register(super::search::GlobTool::new(config.clone()));
     }

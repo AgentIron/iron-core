@@ -4,6 +4,7 @@ pub mod file_ops;
 pub mod helpers;
 pub mod policy;
 pub mod registration;
+pub mod render;
 pub mod search;
 pub mod shell;
 pub mod web;
