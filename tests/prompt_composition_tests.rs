@@ -362,3 +362,78 @@ fn prompt_composition_builder_chaining() {
     assert_eq!(config.additional_inline, vec!["inline block"]);
     assert_eq!(config.protected_resources, vec![".secret"]);
 }
+
+#[test]
+fn runtime_context_uses_first_workspace_root_as_working_dir() {
+    let config = Config::default().with_workspace_roots(vec![
+        PathBuf::from("/project/alpha"),
+        PathBuf::from("/project/beta"),
+    ]);
+    let ctx = RuntimeContextRenderer::render(
+        &config,
+        None,
+        config.workspace_roots.first().unwrap(),
+        &config.workspace_roots,
+        false,
+        false,
+    );
+    assert!(ctx.contains("Working directory: /project/alpha"));
+    assert!(ctx.contains("Workspace root: /project/alpha"));
+    assert!(ctx.contains("Workspace root: /project/beta"));
+}
+
+#[test]
+fn runtime_context_lists_all_workspace_roots() {
+    let config = Config::default().with_workspace_roots(vec![
+        PathBuf::from("/a"),
+        PathBuf::from("/b"),
+        PathBuf::from("/c"),
+    ]);
+    let ctx = RuntimeContextRenderer::render(
+        &config,
+        None,
+        config.workspace_roots.first().unwrap(),
+        &config.workspace_roots,
+        false,
+        false,
+    );
+    assert!(ctx.contains("Workspace root: /a"));
+    assert!(ctx.contains("Workspace root: /b"));
+    assert!(ctx.contains("Workspace root: /c"));
+}
+
+#[test]
+fn runtime_context_falls_back_to_current_dir_when_no_roots() {
+    let config = Config::default();
+    assert!(config.workspace_roots.is_empty());
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let ctx = RuntimeContextRenderer::render(&config, None, &cwd, &[], false, false);
+    assert!(ctx.contains(&format!("Working directory: {}", cwd.display())));
+    assert!(!ctx.contains("Workspace root:"));
+}
+
+#[test]
+fn request_builder_uses_configured_workspace_roots() {
+    let config = Config::default().with_workspace_roots(vec![PathBuf::from("/configured/root")]);
+    let registry = iron_core::ToolRegistry::new();
+    let messages: Vec<iron_providers::Message> = vec![];
+    let result = iron_core::request_builder::build_inference_request(
+        &config,
+        &messages,
+        Some("session instructions"),
+        &registry,
+    );
+    assert!(result.is_ok());
+    let req = result.unwrap();
+    let instr = req.instructions.unwrap();
+    assert!(
+        instr.contains("Working directory: /configured/root"),
+        "request builder should use configured workspace root as working directory, got: {}",
+        instr
+    );
+    assert!(
+        instr.contains("Workspace root: /configured/root"),
+        "request builder should pass workspace roots, got: {}",
+        instr
+    );
+}

@@ -59,6 +59,11 @@ pub struct Config {
     pub mcp: McpConfig,
     /// Plugin configuration
     pub plugins: PluginConfig,
+    /// Workspace roots used to derive the runtime context working directory
+    /// and workspace root list. When non-empty, the first root becomes the
+    /// primary working directory and all roots are surfaced as workspace roots.
+    /// When empty, `std::env::current_dir()` is used as a fallback.
+    pub workspace_roots: Vec<std::path::PathBuf>,
 }
 
 impl Default for Config {
@@ -75,6 +80,7 @@ impl Default for Config {
             prompt_composition: PromptCompositionConfig::default(),
             mcp: McpConfig::default(),
             plugins: PluginConfig::default(),
+            workspace_roots: Vec::new(),
         }
     }
 }
@@ -154,6 +160,12 @@ impl Config {
     /// Set the plugin configuration.
     pub fn with_plugins(mut self, plugins: PluginConfig) -> Self {
         self.plugins = plugins;
+        self
+    }
+
+    /// Set the workspace roots used for runtime context rendering.
+    pub fn with_workspace_roots(mut self, roots: Vec<std::path::PathBuf>) -> Self {
+        self.workspace_roots = roots;
         self
     }
 

@@ -174,14 +174,21 @@ fn build_composed_instructions(
 
     let repo_payload = repo_instruction_payload.cloned().unwrap_or_default();
 
-    let working_dir = std::env::current_dir().unwrap_or_default();
+    let (working_dir, workspace_roots) = if config.workspace_roots.is_empty() {
+        (std::env::current_dir().unwrap_or_default(), Vec::new())
+    } else {
+        (
+            config.workspace_roots[0].clone(),
+            config.workspace_roots.clone(),
+        )
+    };
     let is_git_repo = working_dir.join(".git").exists();
 
     let runtime_context = crate::prompt::RuntimeContextRenderer::render(
         config,
         None,
         &working_dir,
-        &[],
+        &workspace_roots,
         is_git_repo,
         python_exec_available,
     );
