@@ -55,6 +55,9 @@ pub struct StdioMcpClient {
     stdout_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     stderr_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     stderr_excerpt: Arc<Mutex<VecDeque<String>>>,
+    /// When true, the reader may route id-less responses to the sole pending
+    /// waiter as a bootstrap interoperability exception.
+    bootstrap_mode: Arc<AtomicBool>,
 }
 
 impl StdioMcpClient {
@@ -119,12 +122,14 @@ impl StdioMcpClient {
             tokio::sync::oneshot::Sender<Result<JsonRpcResponse, String>>,
         >::new()));
         let stderr_excerpt = Arc::new(Mutex::new(VecDeque::new()));
+        let bootstrap_mode = Arc::new(AtomicBool::new(true));
 
         let stdout_task = tokio::spawn(start_stdio_stdout_reader(
             server_id.clone(),
             stdout,
             Arc::clone(&waiters),
             Arc::clone(&stderr_excerpt),
+            Arc::clone(&bootstrap_mode),
         ));
         let stderr_task = tokio::spawn(start_stdio_stderr_reader(
             server_id.clone(),
@@ -143,6 +148,7 @@ impl StdioMcpClient {
             stdout_task: Arc::new(Mutex::new(Some(stdout_task))),
             stderr_task: Arc::new(Mutex::new(Some(stderr_task))),
             stderr_excerpt,
+            bootstrap_mode,
         })
     }
 
@@ -204,10 +210,22 @@ impl StdioMcpClient {
             };
 
         if response.id != Some(id) {
-            return Err(format!(
-                "Response ID mismatch: expected {}, got {:?}",
-                id, response.id
-            ));
+            // The reader may have routed an id-less bootstrap response to us.
+            // Accept it only when the response is unambiguous.
+            if response.id.is_none()
+                && response.error.is_none()
+                && response.result.is_some()
+            {
+                tracing::debug!(
+                    "Accepting MCP response with missing id during bootstrap for server '{}'",
+                    self.server_id
+                );
+            } else {
+                return Err(format!(
+                    "Response ID mismatch: expected {}, got {:?}",
+                    id, response.id
+                ));
+            }
         }
 
         if let Some(error) = response.error {
@@ -242,6 +260,7 @@ async fn start_stdio_stdout_reader(
     stdout: ChildStdout,
     waiters: WaiterMap,
     stderr_excerpt: Arc<Mutex<VecDeque<String>>>,
+    bootstrap_mode: Arc<AtomicBool>,
 ) {
     let mut stdout = BufReader::new(stdout);
     let mut line = String::new();
@@ -279,7 +298,23 @@ async fn start_stdio_stdout_reader(
                 };
 
                 let Some(id) = response.id else {
-                    // Log notification messages for debugging
+                    // During bootstrap, some MCP servers return a successful
+                    // initialize response with a null or absent `id`. Route it
+                    // to the sole pending waiter only when bootstrap_mode is
+                    // still active and the response is unambiguous.
+                    if bootstrap_mode.load(Ordering::SeqCst) {
+                        let mut waiters_guard = waiters.lock().await;
+                        if is_acceptable_bootstrap_response(&response, waiters_guard.len()) {
+                            if let Some((_, sender)) = waiters_guard.drain().next() {
+                                tracing::debug!(
+                                    "Accepting MCP response with missing id during bootstrap for server '{}'",
+                                    server_id
+                                );
+                                let _ = sender.send(Ok(response));
+                            }
+                            continue;
+                        }
+                    }
                     tracing::debug!(
                         "Received notification from MCP server '{}': {}",
                         server_id,
@@ -397,6 +432,23 @@ fn format_rpc_error(error: JsonRpcError) -> String {
     }
 }
 
+/// Decide whether a response with a missing or null JSON-RPC `id` can be
+/// safely accepted as a bootstrap (`initialize`) reply.
+///
+/// The rule is intentionally narrow: accept only when there is exactly one
+/// pending waiter, the response carries a result (not an error), and the
+/// response `id` is absent. This preserves strict correlation for all
+/// post-bootstrap traffic.
+fn is_acceptable_bootstrap_response(
+    response: &JsonRpcResponse,
+    waiter_count: usize,
+) -> bool {
+    response.id.is_none()
+        && response.error.is_none()
+        && response.result.is_some()
+        && waiter_count == 1
+}
+
 async fn push_stderr_excerpt(stderr_excerpt: &Arc<Mutex<VecDeque<String>>>, line: &str) {
     let sanitized = sanitize_stderr_line(line);
     if sanitized.is_empty() {
@@ -455,6 +507,7 @@ impl McpTransportClient for StdioMcpClient {
             .send_request("initialize", serde_json::to_value(request).unwrap())
             .await?;
 
+        self.bootstrap_mode.store(false, Ordering::SeqCst);
         self.connected.store(true, Ordering::SeqCst);
         Ok(result)
     }
@@ -571,10 +624,24 @@ impl HttpMcpClient {
             .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
 
         if rpc_response.id != Some(id) {
-            return Err(format!(
-                "Response ID mismatch: expected {}, got {:?}",
-                id, rpc_response.id
-            ));
+            // During bootstrap (initialize), some MCP servers return a
+            // successful response with a null or absent `id`. Accept it only
+            // when the response is unambiguous: no error, has a result, and
+            // there is no conflicting ID present.
+            if rpc_response.id.is_none()
+                && rpc_response.error.is_none()
+                && rpc_response.result.is_some()
+            {
+                tracing::debug!(
+                    "Accepting MCP response with missing id during bootstrap for server '{}'",
+                    self.server_id
+                );
+            } else {
+                return Err(format!(
+                    "Response ID mismatch: expected {}, got {:?}",
+                    id, rpc_response.id
+                ));
+            }
         }
 
         if let Some(error) = rpc_response.error {
@@ -679,6 +746,9 @@ pub struct HttpSseMcpClient {
     waiters: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<JsonRpcResponse>>>>,
     /// Handle to the SSE reader task so we can signal shutdown on `close()`.
     sse_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// When true, the SSE reader may route id-less responses to the sole
+    /// pending waiter as a bootstrap interoperability exception.
+    bootstrap_mode: Arc<AtomicBool>,
 }
 
 impl HttpSseMcpClient {
@@ -692,6 +762,7 @@ impl HttpSseMcpClient {
             request_counter: Arc::new(Mutex::new(0)),
             waiters: Arc::new(Mutex::new(HashMap::new())),
             sse_task: Arc::new(Mutex::new(None)),
+            bootstrap_mode: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -706,6 +777,7 @@ impl HttpSseMcpClient {
         let client = self.client.clone();
         let waiters: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<JsonRpcResponse>>>> =
             self.waiters.clone();
+        let bootstrap_mode = self.bootstrap_mode.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
         let handle = tokio::spawn(async move {
@@ -799,6 +871,22 @@ impl HttpSseMcpClient {
                             };
 
                             let Some(id) = rpc_response.id else {
+                                // Bootstrap exception: route id-less response to
+                                // the sole pending waiter only during bootstrap.
+                                if bootstrap_mode.load(Ordering::SeqCst) {
+                                    let mut waiters_guard = waiters.lock().await;
+                                    if is_acceptable_bootstrap_response(
+                                        &rpc_response,
+                                        waiters_guard.len(),
+                                    ) {
+                                        if let Some((_, sender)) = waiters_guard.drain().next() {
+                                            tracing::debug!(
+                                                "Accepting MCP SSE response with missing id during bootstrap"
+                                            );
+                                            let _ = sender.send(rpc_response);
+                                        }
+                                    }
+                                }
                                 continue;
                             };
 
@@ -929,6 +1017,7 @@ impl McpTransportClient for HttpSseMcpClient {
             .send_request("initialize", serde_json::to_value(request).unwrap())
             .await?;
 
+        self.bootstrap_mode.store(false, Ordering::SeqCst);
         self.connected.store(true, Ordering::SeqCst);
         Ok(result)
     }

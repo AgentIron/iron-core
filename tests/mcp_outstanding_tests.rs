@@ -1085,3 +1085,587 @@ async fn concurrent_sse_requests_are_correctly_correlated() {
     assert!(alpha_completed, "expected alpha tool call to complete");
     assert!(beta_completed, "expected beta tool call to complete");
 }
+
+// ---------------------------------------------------------------------------
+// Bootstrap tolerance tests: initialize with null / absent response id
+// ---------------------------------------------------------------------------
+
+/// Write a fake stdio MCP server whose initialize response omits the `id` field.
+fn write_stdio_server_null_id(tempdir: &TempDir) -> std::path::PathBuf {
+    let script_path = tempdir.path().join("null-id-mcp-server.py");
+    let script = r#"#!/usr/bin/env python3
+import json, sys
+sys.stdin = open(sys.stdin.fileno(), 'r', buffering=1)
+sys.stdout = open(sys.stdout.fileno(), 'w', buffering=1)
+sys.stderr.write("ready\n")
+sys.stderr.flush()
+while True:
+    raw = sys.stdin.readline()
+    if not raw:
+        break
+    line = raw.strip()
+    if not line:
+        continue
+    try:
+        req = json.loads(line)
+        method = req["method"]
+        rid = req.get("id")
+        if method == "initialize":
+            # Omit id entirely to simulate a non-conforming server
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0",
+                "result": {
+                    "protocol_version": "2024-11-05",
+                    "capabilities": {},
+                    "server_info": {"name": "null-id-stdio", "version": "1.0.0"}
+                }
+            }) + "\n")
+            sys.stdout.flush()
+        elif method == "tools/list":
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0",
+                "id": rid,
+                "result": {"tools": [{"name": "test_tool", "description": "test", "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
+            }) + "\n")
+            sys.stdout.flush()
+        elif method == "tools/call":
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0",
+                "id": rid,
+                "result": {"content": [{"type": "text", "text": "ok"}], "is_error": False}
+            }) + "\n")
+            sys.stdout.flush()
+    except Exception as e:
+        sys.stderr.write(f"Error: {e}\n")
+        sys.stderr.flush()
+"#;
+    fs::write(&script_path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+    script_path
+}
+
+/// Write a fake stdio MCP server whose initialize response has `"id": null`.
+fn write_stdio_server_explicit_null_id(tempdir: &TempDir) -> std::path::PathBuf {
+    let script_path = tempdir.path().join("explicit-null-id-mcp-server.py");
+    let script = r#"#!/usr/bin/env python3
+import json, sys
+sys.stdin = open(sys.stdin.fileno(), 'r', buffering=1)
+sys.stdout = open(sys.stdout.fileno(), 'w', buffering=1)
+sys.stderr.write("ready\n")
+sys.stderr.flush()
+while True:
+    raw = sys.stdin.readline()
+    if not raw:
+        break
+    line = raw.strip()
+    if not line:
+        continue
+    try:
+        req = json.loads(line)
+        method = req["method"]
+        rid = req.get("id")
+        if method == "initialize":
+            # Explicitly set id to null
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0",
+                "id": None,
+                "result": {
+                    "protocol_version": "2024-11-05",
+                    "capabilities": {},
+                    "server_info": {"name": "explicit-null-stdio", "version": "1.0.0"}
+                }
+            }) + "\n")
+            sys.stdout.flush()
+        elif method == "tools/list":
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0",
+                "id": rid,
+                "result": {"tools": [{"name": "test_tool", "description": "test", "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
+            }) + "\n")
+            sys.stdout.flush()
+        elif method == "tools/call":
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0",
+                "id": rid,
+                "result": {"content": [{"type": "text", "text": "ok"}], "is_error": False}
+            }) + "\n")
+            sys.stdout.flush()
+    except Exception as e:
+        sys.stderr.write(f"Error: {e}\n")
+        sys.stderr.flush()
+"#;
+    fs::write(&script_path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+    script_path
+}
+
+#[tokio::test]
+async fn stdio_initialize_accepts_absent_response_id() {
+    let tempdir = TempDir::new().unwrap();
+    let script_path = write_stdio_server_null_id(&tempdir);
+
+    let provider =
+        RecordingProvider::with_stream_responses(vec![vec![ProviderEvent::Complete]]);
+
+    let agent = IronAgent::new(
+        Config::new().with_mcp(
+            McpConfig::new()
+                .with_enabled(true)
+                .with_enabled_by_default(true),
+        ),
+        provider,
+    );
+
+    agent.register_mcp_server(McpServerConfig {
+        id: "null-id-stdio".to_string(),
+        label: "Null ID stdio server".to_string(),
+        transport: McpTransport::Stdio {
+            command: script_path.to_string_lossy().into_owned(),
+            args: vec![],
+            env: Default::default(),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    });
+
+    wait_for_server_ready(&agent, "null-id-stdio").await;
+}
+
+#[tokio::test]
+async fn stdio_initialize_accepts_explicit_null_response_id() {
+    let tempdir = TempDir::new().unwrap();
+    let script_path = write_stdio_server_explicit_null_id(&tempdir);
+
+    let provider =
+        RecordingProvider::with_stream_responses(vec![vec![ProviderEvent::Complete]]);
+
+    let agent = IronAgent::new(
+        Config::new().with_mcp(
+            McpConfig::new()
+                .with_enabled(true)
+                .with_enabled_by_default(true),
+        ),
+        provider,
+    );
+
+    agent.register_mcp_server(McpServerConfig {
+        id: "explicit-null-stdio".to_string(),
+        label: "Explicit null ID stdio server".to_string(),
+        transport: McpTransport::Stdio {
+            command: script_path.to_string_lossy().into_owned(),
+            args: vec![],
+            env: Default::default(),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    });
+
+    wait_for_server_ready(&agent, "explicit-null-stdio").await;
+}
+
+/// Start a fake SSE server whose initialize response omits the `id` field.
+async fn start_sse_server_null_id() -> FakeSseServer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let current_sender: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<String>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
+    let handle = tokio::spawn({
+        let current_sender = Arc::clone(&current_sender);
+        async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let current_sender = Arc::clone(&current_sender);
+                tokio::spawn(async move {
+                    let (request_line, _headers, body) = read_http_request(&mut socket).await;
+
+                    if request_line.starts_with("GET ") {
+                        let response = concat!(
+                            "HTTP/1.1 200 OK\r\n",
+                            "Content-Type: text/event-stream\r\n",
+                            "Cache-Control: no-cache\r\n",
+                            "Connection: keep-alive\r\n\r\n"
+                        );
+                        socket.write_all(response.as_bytes()).await.unwrap();
+
+                        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+                        *current_sender.lock().await = Some(tx);
+
+                        while let Some(message) = rx.recv().await {
+                            if socket.write_all(message.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                    } else if request_line.starts_with("POST ") {
+                        let request: serde_json::Value =
+                            serde_json::from_slice(&body).unwrap();
+                        let method = request["method"].as_str().unwrap();
+                        let id = request["id"].as_u64().unwrap();
+
+                        let response_payload = match method {
+                            // initialize response omits id entirely
+                            "initialize" => json!({
+                                "jsonrpc": "2.0",
+                                "result": {
+                                    "protocol_version": "2024-11-05",
+                                    "capabilities": {},
+                                    "server_info": {"name": "null-id-sse", "version": "1.0.0"}
+                                }
+                            }),
+                            "tools/list" => json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "tools": [{
+                                        "name": "test_tool",
+                                        "description": "Test tool",
+                                        "input_schema": {
+                                            "type": "object",
+                                            "properties": {"text": {"type": "string"}},
+                                            "required": ["text"]
+                                        }
+                                    }]
+                                }
+                            }),
+                            "tools/call" => json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "content": [{"type": "text", "text": "ok"}],
+                                    "is_error": false
+                                }
+                            }),
+                            other => json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": {"code": -32601, "message": format!("unknown: {}", other)}
+                            }),
+                        };
+
+                        socket
+                            .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                            .await
+                            .unwrap();
+
+                        let sender = loop {
+                            if let Some(sender) = current_sender.lock().await.clone() {
+                                break sender;
+                            }
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        };
+
+                        sender
+                            .send(format!("event: message\ndata: {}\n\n", response_payload))
+                            .unwrap();
+                    }
+                });
+            }
+        }
+    });
+
+    FakeSseServer {
+        url: format!("http://{}", addr),
+        handle,
+    }
+}
+
+/// Start a fake SSE server whose initialize response has `"id": null`.
+async fn start_sse_server_explicit_null_id() -> FakeSseServer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let current_sender: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<String>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
+    let handle = tokio::spawn({
+        let current_sender = Arc::clone(&current_sender);
+        async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let current_sender = Arc::clone(&current_sender);
+                tokio::spawn(async move {
+                    let (request_line, _headers, body) = read_http_request(&mut socket).await;
+
+                    if request_line.starts_with("GET ") {
+                        let response = concat!(
+                            "HTTP/1.1 200 OK\r\n",
+                            "Content-Type: text/event-stream\r\n",
+                            "Cache-Control: no-cache\r\n",
+                            "Connection: keep-alive\r\n\r\n"
+                        );
+                        socket.write_all(response.as_bytes()).await.unwrap();
+
+                        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+                        *current_sender.lock().await = Some(tx);
+
+                        while let Some(message) = rx.recv().await {
+                            if socket.write_all(message.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                    } else if request_line.starts_with("POST ") {
+                        let request: serde_json::Value =
+                            serde_json::from_slice(&body).unwrap();
+                        let method = request["method"].as_str().unwrap();
+                        let id = request["id"].as_u64().unwrap();
+
+                        let response_payload = match method {
+                            // initialize response has explicit id: null
+                            "initialize" => json!({
+                                "jsonrpc": "2.0",
+                                "id": null,
+                                "result": {
+                                    "protocol_version": "2024-11-05",
+                                    "capabilities": {},
+                                    "server_info": {"name": "explicit-null-sse", "version": "1.0.0"}
+                                }
+                            }),
+                            "tools/list" => json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "tools": [{
+                                        "name": "test_tool",
+                                        "description": "Test tool",
+                                        "input_schema": {
+                                            "type": "object",
+                                            "properties": {"text": {"type": "string"}},
+                                            "required": ["text"]
+                                        }
+                                    }]
+                                }
+                            }),
+                            "tools/call" => json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "content": [{"type": "text", "text": "ok"}],
+                                    "is_error": false
+                                }
+                            }),
+                            other => json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": {"code": -32601, "message": format!("unknown: {}", other)}
+                            }),
+                        };
+
+                        socket
+                            .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                            .await
+                            .unwrap();
+
+                        let sender = loop {
+                            if let Some(sender) = current_sender.lock().await.clone() {
+                                break sender;
+                            }
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        };
+
+                        sender
+                            .send(format!("event: message\ndata: {}\n\n", response_payload))
+                            .unwrap();
+                    }
+                });
+            }
+        }
+    });
+
+    FakeSseServer {
+        url: format!("http://{}", addr),
+        handle,
+    }
+}
+
+#[tokio::test]
+async fn sse_initialize_accepts_absent_response_id() {
+    let fake_sse_server = start_sse_server_null_id().await;
+
+    let provider =
+        RecordingProvider::with_stream_responses(vec![vec![ProviderEvent::Complete]]);
+
+    let agent = IronAgent::new(
+        Config::new().with_mcp(
+            McpConfig::new()
+                .with_enabled(true)
+                .with_enabled_by_default(true),
+        ),
+        provider,
+    );
+
+    agent.register_mcp_server(McpServerConfig {
+        id: "null-id-sse".to_string(),
+        label: "Null ID SSE server".to_string(),
+        transport: McpTransport::HttpSse {
+            url: fake_sse_server.url.clone(),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    });
+
+    wait_for_server_ready(&agent, "null-id-sse").await;
+}
+
+#[tokio::test]
+async fn sse_initialize_accepts_explicit_null_response_id() {
+    let fake_sse_server = start_sse_server_explicit_null_id().await;
+
+    let provider =
+        RecordingProvider::with_stream_responses(vec![vec![ProviderEvent::Complete]]);
+
+    let agent = IronAgent::new(
+        Config::new().with_mcp(
+            McpConfig::new()
+                .with_enabled(true)
+                .with_enabled_by_default(true),
+        ),
+        provider,
+    );
+
+    agent.register_mcp_server(McpServerConfig {
+        id: "explicit-null-sse".to_string(),
+        label: "Explicit null ID SSE server".to_string(),
+        transport: McpTransport::HttpSse {
+            url: fake_sse_server.url.clone(),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    });
+
+    wait_for_server_ready(&agent, "explicit-null-sse").await;
+}
+
+// ---------------------------------------------------------------------------
+// Regression: post-bootstrap id-less responses must not be accepted
+// ---------------------------------------------------------------------------
+
+/// Write a fake stdio MCP server that returns proper initialize but omits id
+/// on tools/list — proving post-bootstrap strictness. Closes stdout after
+/// sending the id-less response so the test doesn't wait for a timeout.
+fn write_stdio_server_null_id_on_tools_list(tempdir: &TempDir) -> std::path::PathBuf {
+    let script_path = tempdir.path().join("null-id-tools-list.py");
+    let script = r#"#!/usr/bin/env python3
+import json, sys
+sys.stdin = open(sys.stdin.fileno(), 'r', buffering=1)
+sys.stdout = open(sys.stdout.fileno(), 'w', buffering=1)
+sys.stderr.write("ready\n")
+sys.stderr.flush()
+while True:
+    raw = sys.stdin.readline()
+    if not raw:
+        break
+    line = raw.strip()
+    if not line:
+        continue
+    try:
+        req = json.loads(line)
+        method = req["method"]
+        rid = req.get("id")
+        if method == "initialize":
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0",
+                "id": rid,
+                "result": {
+                    "protocol_version": "2024-11-05",
+                    "capabilities": {},
+                    "server_info": {"name": "null-id-tools-list", "version": "1.0.0"}
+                }
+            }) + "\n")
+            sys.stdout.flush()
+        elif method == "tools/list":
+            # Omit id on a post-bootstrap request — should NOT be accepted
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0",
+                "result": {"tools": [{"name": "rogue_tool", "description": "should not appear", "input_schema": {"type": "object", "properties": {}}}]}
+            }) + "\n")
+            sys.stdout.flush()
+            # Close stdout so the reader terminates and the pending waiter
+            # gets an error quickly instead of waiting for a 30s timeout.
+            sys.stdout.close()
+            break
+    except Exception as e:
+        sys.stderr.write(f"Error: {e}\n")
+        sys.stderr.flush()
+"#;
+    fs::write(&script_path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+    script_path
+}
+
+#[tokio::test]
+async fn stdio_post_bootstrap_id_less_response_is_rejected() {
+    let tempdir = TempDir::new().unwrap();
+    let script_path = write_stdio_server_null_id_on_tools_list(&tempdir);
+
+    let provider =
+        RecordingProvider::with_stream_responses(vec![vec![ProviderEvent::Complete]]);
+
+    let agent = IronAgent::new(
+        Config::new().with_mcp(
+            McpConfig::new()
+                .with_enabled(true)
+                .with_enabled_by_default(true),
+        ),
+        provider,
+    );
+
+    agent.register_mcp_server(McpServerConfig {
+        id: "null-id-tools-list".to_string(),
+        label: "Null ID on tools/list".to_string(),
+        transport: McpTransport::Stdio {
+            command: script_path.to_string_lossy().into_owned(),
+            args: vec![],
+            env: Default::default(),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    });
+
+    // The server should connect (initialize succeeds) but tool discovery
+    // should fail because the tools/list response has no id and there is
+    // no longer a bootstrap exception active. The fake server closes stdout
+    // after the id-less response, so the reader terminates and the pending
+    // waiter gets an error quickly.
+    for _ in 0..100 {
+        let server = agent
+            .runtime()
+            .mcp_registry()
+            .get_server("null-id-tools-list");
+        if let Some(server) = server {
+            if server.health == McpServerHealth::Error {
+                assert!(
+                    server.discovered_tools.is_empty(),
+                    "no tools should be discovered from an id-less tools/list response"
+                );
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let server = agent
+        .runtime()
+        .mcp_registry()
+        .get_server("null-id-tools-list");
+    panic!(
+        "expected Error health after id-less tools/list, got {:?}",
+        server.map(|s| s.health.clone())
+    );
+}
