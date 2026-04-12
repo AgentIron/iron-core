@@ -76,13 +76,13 @@ fn write_fake_stdio_mcp_server(tempdir: &TempDir, tool_result: &str) -> std::pat
 while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*)
-      printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocol_version":"2024-11-05","capabilities":{{}},"server_info":{{"name":"fake-mcp","version":"1.0.0"}}}}}}'
+      printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"fake-mcp","version":"1.0.0"}}}}}}'
       ;;
     *'"method":"tools/list"'*)
-      printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"test_tool","description":"Test MCP tool","input_schema":{{"type":"object","properties":{{"text":{{"type":"string"}}}},"required":["text"]}}}}]}}}}'
+      printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"test_tool","description":"Test MCP tool","inputSchema":{{"type":"object","properties":{{"text":{{"type":"string"}}}},"required":["text"]}}}}]}}}}'
       ;;
     *'"method":"tools/call"'*)
-      printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"content":[{{"type":"text","text":"{}"}}],"is_error":false}}}}'
+      printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"content":[{{"type":"text","text":"{}"}}],"isError":false}}}}'
       ;;
   esac
 done
@@ -155,9 +155,9 @@ while True:
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": {
-                    "protocol_version": "2024-11-05",
+                    "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "server_info": {"name": "review-stdio", "version": "1.0.0"}
+                    "serverInfo": {"name": "review-stdio", "version": "1.0.0"}
                 }
             })
         elif method == "tools/list":
@@ -169,10 +169,10 @@ while True:
                     "id": request_id,
                     "result": {
                         "tools": [
-                            {"name": "pwd_tool", "description": "Return cwd", "input_schema": {"type": "object", "properties": {}}},
-                            {"name": "env_tool", "description": "Return env var", "input_schema": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}}
+                            {"name": "pwd_tool", "description": "Return cwd", "inputSchema": {"type": "object", "properties": {}}},
+                            {"name": "env_tool", "description": "Return env var", "inputSchema": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}}
                         ],
-                        "next_cursor": "page-2"
+                        "nextCursor": "page-2"
                     }
                 })
             else:
@@ -181,8 +181,8 @@ while True:
                     "id": request_id,
                     "result": {
                         "tools": [
-                            {"name": "error_tool", "description": "Return call error", "input_schema": {"type": "object", "properties": {}}},
-                            {"name": "delayed_tool", "description": "Return delayed result", "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}
+                            {"name": "error_tool", "description": "Return call error", "inputSchema": {"type": "object", "properties": {}}},
+                            {"name": "delayed_tool", "description": "Return delayed result", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}
                         ]
                     }
                 })
@@ -195,7 +195,7 @@ while True:
                 send({
                     "jsonrpc": "2.0",
                     "id": request_id,
-                    "result": {"content": [{"type": "text", "text": os.getcwd()}], "is_error": False}
+                    "result": {"content": [{"type": "text", "text": os.getcwd()}], "isError": False}
                 })
             elif name == "env_tool":
                 key = arguments.get("key", "")
@@ -203,13 +203,13 @@ while True:
                 send({
                     "jsonrpc": "2.0",
                     "id": request_id,
-                    "result": {"content": [{"type": "text", "text": value}], "is_error": False}
+                    "result": {"content": [{"type": "text", "text": value}], "isError": False}
                 })
             elif name == "error_tool":
                 send({
                     "jsonrpc": "2.0",
                     "id": request_id,
-                    "result": {"content": [{"type": "text", "text": "server exploded: invalid token near secret-like-value"}], "is_error": True}
+                    "result": {"content": [{"type": "text", "text": "server exploded: invalid token near secret-like-value"}], "isError": True}
                 })
             elif name == "delayed_tool":
                 text = arguments.get("text", "unknown")
@@ -221,7 +221,7 @@ while True:
                     send({
                         "jsonrpc": "2.0",
                         "id": req_id,
-                        "result": {"content": [{"type": "text", "text": f"result-{captured_text}"}], "is_error": False}
+                        "result": {"content": [{"type": "text", "text": f"result-{captured_text}"}], "isError": False}
                     })
 
                 threading.Timer(delay, respond).start()
@@ -361,9 +361,9 @@ async fn start_fake_sse_server() -> FakeSseServer {
                                 "jsonrpc": "2.0",
                                 "id": id,
                                 "result": {
-                                    "protocol_version": "2024-11-05",
+                                    "protocolVersion": "2024-11-05",
                                     "capabilities": {},
-                                    "server_info": {"name": "fake-sse-mcp", "version": "1.0.0"}
+                                    "serverInfo": {"name": "fake-sse-mcp", "version": "1.0.0"}
                                 }
                             }),
                             "tools/list" if cursor.is_none() => json!({
@@ -373,13 +373,13 @@ async fn start_fake_sse_server() -> FakeSseServer {
                                     "tools": [{
                                         "name": "test_tool",
                                         "description": "Test SSE MCP tool",
-                                        "input_schema": {
+                                        "inputSchema": {
                                             "type": "object",
                                             "properties": {"text": {"type": "string"}},
                                             "required": ["text"]
                                         }
                                     }],
-                                    "next_cursor": "page-2"
+                                    "nextCursor": "page-2"
                                 }
                             }),
                             "tools/list" => json!({
@@ -389,7 +389,7 @@ async fn start_fake_sse_server() -> FakeSseServer {
                                     "tools": [{
                                         "name": "second_tool",
                                         "description": "Second SSE MCP tool",
-                                        "input_schema": {
+                                        "inputSchema": {
                                             "type": "object",
                                             "properties": {},
                                             "required": []
@@ -402,7 +402,7 @@ async fn start_fake_sse_server() -> FakeSseServer {
                                 "id": id,
                                 "result": {
                                     "content": [{"type": "text", "text": "sse-mcp-tool-result"}],
-                                    "is_error": false
+                                    "isError": false
                                 }
                             }),
                             other => json!({
@@ -940,9 +940,9 @@ async fn start_concurrent_sse_server() -> FakeSseServer {
                                 "jsonrpc": "2.0",
                                 "id": id,
                                 "result": {
-                                    "protocol_version": "2024-11-05",
+                                    "protocolVersion": "2024-11-05",
                                     "capabilities": {},
-                                    "server_info": {"name": "concurrent-sse-mcp", "version": "1.0.0"}
+                                    "serverInfo": {"name": "concurrent-sse-mcp", "version": "1.0.0"}
                                 }
                             }),
                             "tools/list" => json!({
@@ -952,7 +952,7 @@ async fn start_concurrent_sse_server() -> FakeSseServer {
                                     "tools": [{
                                         "name": "test_tool",
                                         "description": "Concurrent SSE MCP tool",
-                                        "input_schema": {
+                                        "inputSchema": {
                                             "type": "object",
                                             "properties": {"text": {"type": "string"}},
                                             "required": ["text"]
@@ -971,7 +971,7 @@ async fn start_concurrent_sse_server() -> FakeSseServer {
                                     "id": id,
                                     "result": {
                                         "content": [{"type": "text", "text": format!("result-for-{}", args_text)}],
-                                        "is_error": false
+                                        "isError": false
                                     }
                                 })
                             }
@@ -1135,9 +1135,9 @@ while True:
             sys.stdout.write(json.dumps({
                 "jsonrpc": "2.0",
                 "result": {
-                    "protocol_version": "2024-11-05",
+                    "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "server_info": {"name": "null-id-stdio", "version": "1.0.0"}
+                    "serverInfo": {"name": "null-id-stdio", "version": "1.0.0"}
                 }
             }) + "\n")
             sys.stdout.flush()
@@ -1145,14 +1145,14 @@ while True:
             sys.stdout.write(json.dumps({
                 "jsonrpc": "2.0",
                 "id": rid,
-                "result": {"tools": [{"name": "test_tool", "description": "test", "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
+                "result": {"tools": [{"name": "test_tool", "description": "test", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
             }) + "\n")
             sys.stdout.flush()
         elif method == "tools/call":
             sys.stdout.write(json.dumps({
                 "jsonrpc": "2.0",
                 "id": rid,
-                "result": {"content": [{"type": "text", "text": "ok"}], "is_error": False}
+                "result": {"content": [{"type": "text", "text": "ok"}], "isError": False}
             }) + "\n")
             sys.stdout.flush()
     except Exception as e:
@@ -1196,9 +1196,9 @@ while True:
                 "jsonrpc": "2.0",
                 "id": None,
                 "result": {
-                    "protocol_version": "2024-11-05",
+                    "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "server_info": {"name": "explicit-null-stdio", "version": "1.0.0"}
+                    "serverInfo": {"name": "explicit-null-stdio", "version": "1.0.0"}
                 }
             }) + "\n")
             sys.stdout.flush()
@@ -1206,14 +1206,14 @@ while True:
             sys.stdout.write(json.dumps({
                 "jsonrpc": "2.0",
                 "id": rid,
-                "result": {"tools": [{"name": "test_tool", "description": "test", "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
+                "result": {"tools": [{"name": "test_tool", "description": "test", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
             }) + "\n")
             sys.stdout.flush()
         elif method == "tools/call":
             sys.stdout.write(json.dumps({
                 "jsonrpc": "2.0",
                 "id": rid,
-                "result": {"content": [{"type": "text", "text": "ok"}], "is_error": False}
+                "result": {"content": [{"type": "text", "text": "ok"}], "isError": False}
             }) + "\n")
             sys.stdout.flush()
     except Exception as e:
@@ -1339,9 +1339,9 @@ async fn start_sse_server_null_id() -> FakeSseServer {
                             "initialize" => json!({
                                 "jsonrpc": "2.0",
                                 "result": {
-                                    "protocol_version": "2024-11-05",
+                                    "protocolVersion": "2024-11-05",
                                     "capabilities": {},
-                                    "server_info": {"name": "null-id-sse", "version": "1.0.0"}
+                                    "serverInfo": {"name": "null-id-sse", "version": "1.0.0"}
                                 }
                             }),
                             "tools/list" => json!({
@@ -1351,7 +1351,7 @@ async fn start_sse_server_null_id() -> FakeSseServer {
                                     "tools": [{
                                         "name": "test_tool",
                                         "description": "Test tool",
-                                        "input_schema": {
+                                        "inputSchema": {
                                             "type": "object",
                                             "properties": {"text": {"type": "string"}},
                                             "required": ["text"]
@@ -1364,7 +1364,7 @@ async fn start_sse_server_null_id() -> FakeSseServer {
                                 "id": id,
                                 "result": {
                                     "content": [{"type": "text", "text": "ok"}],
-                                    "is_error": false
+                                    "isError": false
                                 }
                             }),
                             other => json!({
@@ -1446,9 +1446,9 @@ async fn start_sse_server_explicit_null_id() -> FakeSseServer {
                                 "jsonrpc": "2.0",
                                 "id": null,
                                 "result": {
-                                    "protocol_version": "2024-11-05",
+                                    "protocolVersion": "2024-11-05",
                                     "capabilities": {},
-                                    "server_info": {"name": "explicit-null-sse", "version": "1.0.0"}
+                                    "serverInfo": {"name": "explicit-null-sse", "version": "1.0.0"}
                                 }
                             }),
                             "tools/list" => json!({
@@ -1458,7 +1458,7 @@ async fn start_sse_server_explicit_null_id() -> FakeSseServer {
                                     "tools": [{
                                         "name": "test_tool",
                                         "description": "Test tool",
-                                        "input_schema": {
+                                        "inputSchema": {
                                             "type": "object",
                                             "properties": {"text": {"type": "string"}},
                                             "required": ["text"]
@@ -1471,7 +1471,7 @@ async fn start_sse_server_explicit_null_id() -> FakeSseServer {
                                 "id": id,
                                 "result": {
                                     "content": [{"type": "text", "text": "ok"}],
-                                    "is_error": false
+                                    "isError": false
                                 }
                             }),
                             other => json!({
@@ -1597,9 +1597,9 @@ while True:
                 "jsonrpc": "2.0",
                 "id": rid,
                 "result": {
-                    "protocol_version": "2024-11-05",
+                    "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "server_info": {"name": "null-id-tools-list", "version": "1.0.0"}
+                    "serverInfo": {"name": "null-id-tools-list", "version": "1.0.0"}
                 }
             }) + "\n")
             sys.stdout.flush()
@@ -1607,7 +1607,7 @@ while True:
             # Omit id on a post-bootstrap request — should NOT be accepted
             sys.stdout.write(json.dumps({
                 "jsonrpc": "2.0",
-                "result": {"tools": [{"name": "rogue_tool", "description": "should not appear", "input_schema": {"type": "object", "properties": {}}}]}
+                "result": {"tools": [{"name": "rogue_tool", "description": "should not appear", "inputSchema": {"type": "object", "properties": {}}}]}
             }) + "\n")
             sys.stdout.flush()
             # Close stdout so the reader terminates and the pending waiter

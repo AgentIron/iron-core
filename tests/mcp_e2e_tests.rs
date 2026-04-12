@@ -70,13 +70,13 @@ fn write_fake_stdio_mcp_server(tempdir: &TempDir) -> std::path::PathBuf {
 while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocol_version":"2024-11-05","capabilities":{},"server_info":{"name":"fake-mcp","version":"1.0.0"}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fake-mcp","version":"1.0.0"}}}'
       ;;
     *'"method":"tools/list"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"test_tool","description":"Test MCP tool","input_schema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"test_tool","description":"Test MCP tool","inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]}}'
       ;;
     *'"method":"tools/call"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"mcp-tool-result"}],"is_error":false}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"mcp-tool-result"}],"isError":false}}'
       ;;
   esac
 done

@@ -359,10 +359,10 @@ async fn test_mcp_tools_have_namespaced_names() {
 while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*) 
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocol_version":"2024-11-05","capabilities":{},"server_info":{"name":"fake-mcp","version":"1.0.0"}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fake-mcp","version":"1.0.0"}}}'
       ;;
     *'"method":"tools/list"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read_file","description":"Read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}]}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read_file","description":"Read a file","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}]}}'
       ;;
   esac
 done
@@ -504,13 +504,13 @@ async fn test_end_to_end_mcp_lifecycle() {
 while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*) 
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocol_version":"2024-11-05","capabilities":{},"server_info":{"name":"fake-mcp","version":"1.0.0"}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fake-mcp","version":"1.0.0"}}}'
       ;;
     *'"method":"tools/list"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"lifecycle_tool","description":"Test lifecycle","input_schema":{"type":"object","properties":{}}}]}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"lifecycle_tool","description":"Test lifecycle","inputSchema":{"type":"object","properties":{}}}]}'
       ;;
     *'"method":"tools/call"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"success"}],"is_error":false}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"success"}],"isError":false}}'
       ;;
   esac
 done

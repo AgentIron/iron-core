@@ -46,6 +46,7 @@ pub mod messages {
 
     /// Initialize request
     #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct InitializeRequest {
         pub protocol_version: String,
         pub capabilities: Value,
@@ -53,6 +54,7 @@ pub mod messages {
     }
 
     #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct ClientInfo {
         pub name: String,
         pub version: String,
@@ -60,6 +62,7 @@ pub mod messages {
 
     /// Initialize response
     #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct InitializeResponse {
         pub protocol_version: String,
         pub capabilities: Value,
@@ -67,6 +70,7 @@ pub mod messages {
     }
 
     #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct ServerInfo {
         pub name: String,
         pub version: String,
@@ -74,6 +78,7 @@ pub mod messages {
 
     /// Tool list request
     #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct ListToolsRequest {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub cursor: Option<String>,
@@ -81,6 +86,7 @@ pub mod messages {
 
     /// Tool list response
     #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct ListToolsResponse {
         pub tools: Vec<Tool>,
         #[serde(default)]
@@ -88,6 +94,7 @@ pub mod messages {
     }
 
     #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct Tool {
         pub name: String,
         pub description: String,
@@ -96,6 +103,7 @@ pub mod messages {
 
     /// Tool call request
     #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct CallToolRequest {
         pub name: String,
         pub arguments: Value,
@@ -103,6 +111,7 @@ pub mod messages {
 
     /// Tool call response
     #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct CallToolResponse {
         pub content: Vec<ToolContent>,
         #[serde(default)]
@@ -115,12 +124,17 @@ pub mod messages {
         #[serde(rename = "text")]
         Text { text: String },
         #[serde(rename = "image")]
-        Image { data: String, mime_type: String },
+        Image {
+            data: String,
+            #[serde(rename = "mimeType")]
+            mime_type: String,
+        },
         #[serde(rename = "resource")]
         Resource { resource: Resource },
     }
 
     #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct Resource {
         pub uri: String,
         pub mime_type: Option<String>,
@@ -179,4 +193,118 @@ pub fn tool_error_to_string(content: Vec<messages::ToolContent>) -> String {
     }
 
     serde_json::to_string(&value).unwrap_or_else(|_| "Tool execution returned an error".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::messages::*;
+
+    // ── Serialization: outbound requests use camelCase ────────────────
+
+    #[test]
+    fn initialize_request_serializes_camel_case() {
+        let req = InitializeRequest {
+            protocol_version: "2024-11-05".to_string(),
+            capabilities: serde_json::json!({}),
+            client_info: ClientInfo {
+                name: "iron-core".to_string(),
+                version: "0.1.0".to_string(),
+            },
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            json.get("protocolVersion").is_some(),
+            "should use protocolVersion"
+        );
+        assert!(json.get("clientInfo").is_some(), "should use clientInfo");
+        assert!(
+            json.get("protocol_version").is_none(),
+            "should NOT use protocol_version"
+        );
+        assert!(
+            json.get("client_info").is_none(),
+            "should NOT use client_info"
+        );
+    }
+
+    #[test]
+    fn call_tool_request_serializes_camel_case() {
+        let req = CallToolRequest {
+            name: "test".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        // name and arguments are single words — no camelCase difference,
+        // but rename_all should not break them.
+        assert_eq!(json["name"], "test");
+    }
+
+    // ── Deserialization: inbound responses use camelCase ───────────────
+
+    #[test]
+    fn initialize_response_deserializes_camel_case() {
+        let json = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "serverInfo": { "name": "test-server", "version": "1.0.0" }
+        });
+        let resp: InitializeResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.protocol_version, "2024-11-05");
+        assert_eq!(resp.server_info.name, "test-server");
+    }
+
+    #[test]
+    fn list_tools_response_deserializes_camel_case() {
+        let json = serde_json::json!({
+            "tools": [{
+                "name": "my_tool",
+                "description": "A tool",
+                "inputSchema": { "type": "object" }
+            }],
+            "nextCursor": "page2"
+        });
+        let resp: ListToolsResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.tools.len(), 1);
+        assert_eq!(resp.tools[0].input_schema["type"], "object");
+        assert_eq!(resp.next_cursor, Some("page2".to_string()));
+    }
+
+    #[test]
+    fn call_tool_response_deserializes_camel_case() {
+        let json = serde_json::json!({
+            "content": [{ "type": "text", "text": "hello" }],
+            "isError": true
+        });
+        let resp: CallToolResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.is_error);
+        assert_eq!(resp.content.len(), 1);
+    }
+
+    #[test]
+    fn tool_content_image_deserializes_camel_case() {
+        let json = serde_json::json!({
+            "type": "image",
+            "data": "base64data",
+            "mimeType": "image/png"
+        });
+        let content: ToolContent = serde_json::from_value(json).unwrap();
+        match content {
+            ToolContent::Image { mime_type, .. } => {
+                assert_eq!(mime_type, "image/png");
+            }
+            _ => panic!("expected Image variant"),
+        }
+    }
+
+    #[test]
+    fn resource_deserializes_camel_case() {
+        let json = serde_json::json!({
+            "uri": "file:///test.txt",
+            "mimeType": "text/plain",
+            "text": "hello"
+        });
+        let resource: Resource = serde_json::from_value(json).unwrap();
+        assert_eq!(resource.uri, "file:///test.txt");
+        assert_eq!(resource.mime_type, Some("text/plain".to_string()));
+    }
 }
