@@ -78,8 +78,7 @@ impl StdioMcpClient {
 
         let mut cmd = Command::new(command);
         cmd.args(args)
-            .env_clear()
-            .envs(inherited_stdio_env())
+            .envs(sanitized_stdio_env())
             .envs(env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -382,33 +381,70 @@ async fn fail_pending_waiters(waiters: &WaiterMap, message: String) {
     }
 }
 
-fn inherited_stdio_env() -> HashMap<String, String> {
-    const SAFE_ENV_VARS: &[&str] = &[
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "TERM",
-        "TMPDIR",
-        "TEMP",
-        "TMP",
-        "SYSTEMROOT",
-        "COMSPEC",
-        "PATHEXT",
-        "WINDIR",
-    ];
+/// Suffixes that indicate a sensitive environment variable when they appear
+/// at the end of the var name (case-insensitive).
+const SENSITIVE_SUFFIXES: &[&str] = &[
+    "_API_KEY",
+    "_SECRET",
+    "_SECRET_KEY",
+    "_TOKEN",
+    "_PASSWORD",
+    "_CREDENTIALS",
+    "_AUTH_TOKEN",
+    "_ACCESS_KEY",
+    "_ACCESS_TOKEN",
+];
 
-    SAFE_ENV_VARS
+/// Exact environment variable names that are always considered sensitive
+/// (case-insensitive).
+const SENSITIVE_EXACT_NAMES: &[&str] = &[
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AZURE_CLIENT_SECRET",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "DATABASE_URL",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+];
+
+/// Returns true if the given environment variable name matches a known
+/// sensitive pattern. Matching is case-insensitive.
+fn is_sensitive_env_var(name: &str) -> bool {
+    let upper = name.to_uppercase();
+    SENSITIVE_EXACT_NAMES
         .iter()
-        .filter_map(|key| {
-            std::env::var(key)
-                .ok()
-                .map(|value| ((*key).to_string(), value))
-        })
-        .collect()
+        .any(|exact| upper == *exact)
+        || SENSITIVE_SUFFIXES
+            .iter()
+            .any(|suffix| upper.ends_with(suffix))
+}
+
+/// Build the environment for an MCP stdio subprocess by inheriting the full
+/// parent environment and stripping vars whose names match sensitive patterns.
+/// Logs the names (not values) of stripped vars at debug level.
+fn sanitized_stdio_env() -> HashMap<String, String> {
+    let mut env: HashMap<String, String> = std::env::vars().collect();
+    let sensitive_keys: Vec<String> = env
+        .keys()
+        .filter(|k| is_sensitive_env_var(k))
+        .cloned()
+        .collect();
+
+    if !sensitive_keys.is_empty() {
+        tracing::debug!(
+            "Stripping {} sensitive env var(s) from MCP stdio subprocess: {}",
+            sensitive_keys.len(),
+            sensitive_keys.join(", ")
+        );
+        for key in &sensitive_keys {
+            env.remove(key);
+        }
+    }
+
+    env
 }
 
 fn redact_command(command: &str) -> String {
@@ -907,6 +943,7 @@ impl HttpSseMcpClient {
             }
         });
 
+
         *task_guard = Some(handle);
 
         drop(task_guard);
@@ -1103,5 +1140,170 @@ pub fn create_transport_client(
             server_id.to_string(),
             url.clone(),
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suffix_api_key_is_sensitive() {
+        assert!(is_sensitive_env_var("MY_SERVICE_API_KEY"));
+        assert!(is_sensitive_env_var("SOMETHING_API_KEY"));
+    }
+
+    #[test]
+    fn suffix_secret_is_sensitive() {
+        assert!(is_sensitive_env_var("APP_SECRET"));
+        assert!(is_sensitive_env_var("CLIENT_SECRET_KEY"));
+    }
+
+    #[test]
+    fn suffix_token_is_sensitive() {
+        assert!(is_sensitive_env_var("SESSION_TOKEN"));
+        assert!(is_sensitive_env_var("AUTH_TOKEN"));
+    }
+
+    #[test]
+    fn suffix_password_is_sensitive() {
+        assert!(is_sensitive_env_var("DB_PASSWORD"));
+    }
+
+    #[test]
+    fn suffix_credentials_is_sensitive() {
+        assert!(is_sensitive_env_var("GOOGLE_CREDENTIALS"));
+    }
+
+    #[test]
+    fn suffix_access_key_is_sensitive() {
+        assert!(is_sensitive_env_var("S3_ACCESS_KEY"));
+        assert!(is_sensitive_env_var("S3_ACCESS_TOKEN"));
+    }
+
+    #[test]
+    fn exact_aws_keys_are_sensitive() {
+        assert!(is_sensitive_env_var("AWS_ACCESS_KEY_ID"));
+        assert!(is_sensitive_env_var("AWS_SECRET_ACCESS_KEY"));
+        assert!(is_sensitive_env_var("AWS_SESSION_TOKEN"));
+    }
+
+    #[test]
+    fn exact_cloud_credentials_are_sensitive() {
+        assert!(is_sensitive_env_var("AZURE_CLIENT_SECRET"));
+        assert!(is_sensitive_env_var("GOOGLE_APPLICATION_CREDENTIALS"));
+    }
+
+    #[test]
+    fn exact_token_names_are_sensitive() {
+        assert!(is_sensitive_env_var("GITHUB_TOKEN"));
+        assert!(is_sensitive_env_var("GH_TOKEN"));
+    }
+
+    #[test]
+    fn exact_api_keys_are_sensitive() {
+        assert!(is_sensitive_env_var("ANTHROPIC_API_KEY"));
+        assert!(is_sensitive_env_var("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn database_url_is_sensitive() {
+        assert!(is_sensitive_env_var("DATABASE_URL"));
+    }
+
+    #[test]
+    fn common_toolchain_vars_are_not_sensitive() {
+        assert!(!is_sensitive_env_var("PATH"));
+        assert!(!is_sensitive_env_var("HOME"));
+        assert!(!is_sensitive_env_var("APPDATA"));
+        assert!(!is_sensitive_env_var("LOCALAPPDATA"));
+        assert!(!is_sensitive_env_var("USERPROFILE"));
+        assert!(!is_sensitive_env_var("XDG_CONFIG_HOME"));
+        assert!(!is_sensitive_env_var("XDG_DATA_HOME"));
+        assert!(!is_sensitive_env_var("CARGO_HOME"));
+        assert!(!is_sensitive_env_var("GOPATH"));
+        assert!(!is_sensitive_env_var("NODE_PATH"));
+        assert!(!is_sensitive_env_var("PYTHONPATH"));
+        assert!(!is_sensitive_env_var("LANG"));
+        assert!(!is_sensitive_env_var("TERM"));
+        assert!(!is_sensitive_env_var("SYSTEMROOT"));
+    }
+
+    #[test]
+    fn case_insensitive_suffix_matching() {
+        assert!(is_sensitive_env_var("my_service_api_key"));
+        assert!(is_sensitive_env_var("My_Service_Api_Key"));
+        assert!(is_sensitive_env_var("APP_Secret"));
+        assert!(is_sensitive_env_var("Session_Token"));
+    }
+
+    #[test]
+    fn case_insensitive_exact_matching() {
+        assert!(is_sensitive_env_var("github_token"));
+        assert!(is_sensitive_env_var("Github_Token"));
+        assert!(is_sensitive_env_var("anthropic_api_key"));
+        assert!(is_sensitive_env_var("Anthropic_Api_Key"));
+        assert!(is_sensitive_env_var("database_url"));
+        assert!(is_sensitive_env_var("Database_Url"));
+    }
+
+    #[test]
+    fn sanitized_env_preserves_non_sensitive_vars() {
+        let env = sanitized_stdio_env();
+        assert!(
+            env.contains_key("PATH"),
+            "PATH should be preserved in sanitized env"
+        );
+    }
+
+    #[test]
+    fn sanitized_env_strips_sensitive_test_vars() {
+        let test_vars = vec![
+            ("TEST_IRON_CORE_MY_API_KEY", "secret-key-123"),
+            ("TEST_IRON_CORE_AUTH_TOKEN", "tok-456"),
+            ("TEST_IRON_CORE_DB_PASSWORD", "pw-789"),
+            ("TEST_IRON_CORE_GITHUB_TOKEN", "gh-token"),
+        ];
+
+        for (key, value) in &test_vars {
+            std::env::set_var(key, value);
+        }
+
+        let env = sanitized_stdio_env();
+
+        for (key, _) in &test_vars {
+            assert!(
+                !env.contains_key(*key),
+                "sensitive var '{}' should have been stripped",
+                key
+            );
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn sanitized_env_preserves_toolchain_test_vars() {
+        let test_vars = vec![
+            ("TEST_IRON_CORE_CARGO_HOME", "/cargo"),
+            ("TEST_IRON_CORE_GOPATH", "/go"),
+            ("TEST_IRON_CORE_NODE_PATH", "/node"),
+            ("TEST_IRON_CORE_XDG_CONFIG_HOME", "/xdg"),
+        ];
+
+        for (key, value) in &test_vars {
+            std::env::set_var(key, value);
+        }
+
+        let env = sanitized_stdio_env();
+
+        for (key, expected) in &test_vars {
+            assert_eq!(
+                env.get(*key),
+                Some(&expected.to_string()),
+                "non-sensitive var '{}' should be preserved",
+                key
+            );
+            std::env::remove_var(key);
+        }
     }
 }

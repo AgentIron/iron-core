@@ -1892,9 +1892,9 @@ dependencies = [
 
 [[package]]
 name = "iron-providers"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b955530b6cd25f602c421bf6a469cfd30ec37a872d6cb06c5a0de7aedea346b8"
+checksum = "3ca26ef0b266acb24833ef07eabf34c8a53d3afc557b431408e26f277e602580"
 dependencies = [
  "async-openai",
  "async-stream",

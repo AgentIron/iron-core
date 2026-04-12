@@ -747,11 +747,6 @@ async fn stdio_transport_applies_working_dir_and_uses_safe_environment() {
     let working_dir = tempdir.path().join("mcp-working-dir");
     fs::create_dir(&working_dir).unwrap();
 
-    let inherited_key = std::env::vars()
-        .map(|(key, _)| key)
-        .find(|key| key.starts_with("CARGO_"))
-        .expect("expected at least one CARGO_* env var during tests");
-
     let mut env = HashMap::new();
     env.insert("EXPLICIT_ALLOWED".to_string(), "present".to_string());
 
@@ -781,11 +776,36 @@ async fn stdio_transport_applies_working_dir_and_uses_safe_environment() {
         json!(working_dir.to_string_lossy().to_string())
     );
 
+    // Verify that a sensitive env var is stripped from the subprocess.
+    // Temporarily set a sensitive-named var to test stripping.
+    let sensitive_key = "TEST_IRON_CORE_SECRET_TOKEN";
+    std::env::set_var(sensitive_key, "should-be-hidden");
+
     let hidden_env = client
-        .call_tool("env_tool", json!({"key": inherited_key}))
+        .call_tool("env_tool", json!({"key": sensitive_key}))
         .await
         .unwrap();
     assert_eq!(hidden_env["result"], json!("<missing>"));
+
+    std::env::remove_var(sensitive_key);
+
+    // Verify that a non-sensitive inherited env var IS present in the
+    // subprocess (the hybrid approach inherits all non-sensitive vars).
+    let inherited_key = std::env::vars()
+        .map(|(key, _)| key)
+        .find(|key| key.starts_with("CARGO_"))
+        .expect("expected at least one CARGO_* env var during tests");
+
+    let inherited_env = client
+        .call_tool("env_tool", json!({"key": inherited_key}))
+        .await
+        .unwrap();
+    assert_ne!(
+        inherited_env["result"],
+        json!("<missing>"),
+        "non-sensitive inherited var '{}' should be present in subprocess",
+        inherited_key
+    );
 
     let explicit_env = client
         .call_tool("env_tool", json!({"key": "EXPLICIT_ALLOWED"}))
