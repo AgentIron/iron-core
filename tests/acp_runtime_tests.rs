@@ -5,8 +5,6 @@
 //! without any network transport.  The facade tests use a `current_thread`
 //! tokio runtime with a `LocalSet` because the ACP SDK uses
 //! `#[async_trait(?Send)]`.
-#![allow(deprecated)]
-
 use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -1325,34 +1323,6 @@ fn keep_recent_prunes_acp_native_transcript() {
             msg_count <= 2,
             "expected at most 2 messages after KeepRecent(2), got {}",
             msg_count
-        );
-    });
-}
-
-#[test]
-fn summarize_after_rejected_in_acp_native_prompt() {
-    run_local(async {
-        let provider = MockProvider::with_infer_responses(vec![vec![
-            ProviderEvent::Output {
-                content: "hi".into(),
-            },
-            ProviderEvent::Complete,
-        ]]);
-        let config = Config::default()
-            .with_context_window_policy(iron_core::ContextWindowPolicy::SummarizeAfter(5));
-        let agent = IronAgent::new(config, provider);
-        let conn = agent.connect();
-        let session = conn.create_session().unwrap();
-
-        let outcome = session.prompt("hello").await;
-        assert_eq!(outcome, PromptOutcome::EndTurn);
-
-        let messages = session.messages();
-        let last_text = messages.last().unwrap().text_content();
-        assert!(
-            last_text.contains("Request error") || last_text.contains("not implemented"),
-            "expected SummarizeAfter rejection, got: {}",
-            last_text
         );
     });
 }
@@ -3200,6 +3170,79 @@ fn semantic_event_denied_tool_parity() {
             assert_eq!(call_id, "tc1");
             assert_eq!(tool_name, "dangerous");
         }
+    });
+}
+
+#[test]
+fn prompt_iteration_uses_one_consistent_tool_snapshot() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new("swap1", "swap_tool", json!({})),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![ProviderEvent::Complete],
+        ]);
+        let agent = IronAgent::new(
+            Config::default().with_approval_strategy(ApprovalStrategy::PerTool),
+            provider.clone(),
+        );
+        agent.register_tool(FunctionTool::new(
+            ToolDefinition::new("swap_tool", "original tool", json!({})).with_approval(true),
+            |_| Ok(json!("old_result")),
+        ));
+
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+        let (handle, mut events) = session.prompt_stream("go");
+
+        let mut saw_approval = false;
+        let mut final_result = None;
+
+        while let Some(event) = events.next().await {
+            match event {
+                PromptEvent::ApprovalRequest { call_id, tool_name, .. } => {
+                    assert_eq!(call_id, "swap1");
+                    assert_eq!(tool_name, "swap_tool");
+                    saw_approval = true;
+
+                    // Replace the runtime tool after the prompt iteration has
+                    // already advertised tools and decided approval. Execution
+                    // should still use the original per-iteration snapshot.
+                    agent.register_tool(FunctionTool::new(
+                        ToolDefinition::new("swap_tool", "replacement tool", json!({})),
+                        |_| Ok(json!("new_result")),
+                    ));
+                    handle.approve(&call_id).unwrap();
+                }
+                PromptEvent::ToolResult {
+                    call_id,
+                    tool_name,
+                    status,
+                    result,
+                } if call_id == "swap1" && tool_name == "swap_tool" => {
+                    assert_eq!(status, ToolResultStatus::Completed);
+                    final_result = result;
+                }
+                PromptEvent::Complete { outcome } => {
+                    assert_eq!(outcome, PromptOutcome::EndTurn);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_approval, "approval should be based on the original snapshot");
+        assert_eq!(final_result, Some(json!("old_result")));
+
+        let requests = provider.requests();
+        assert!(!requests.is_empty(), "provider should receive at least one request");
+        assert!(
+            requests[0].tools.iter().any(|tool| tool.name == "swap_tool"),
+            "prompt construction should advertise the original tool snapshot"
+        );
     });
 }
 

@@ -49,6 +49,16 @@ struct RuntimeSession {
     session: Arc<Mutex<DurableSession>>,
     connection_id: ConnectionId,
     active_prompt: Mutex<Option<ActivePrompt>>,
+    tool_catalog_cache: Mutex<Option<CachedSessionToolCatalog>>,
+}
+
+struct CachedSessionToolCatalog {
+    tool_registry_version: u64,
+    mcp_registry_version: u64,
+    plugin_registry_version: u64,
+    mcp_server_enablement: std::collections::HashMap<String, bool>,
+    plugin_enablement: crate::plugin::session::SessionPluginEnablement,
+    catalog: Arc<SessionToolCatalog>,
 }
 
 impl RuntimeSession {
@@ -57,6 +67,7 @@ impl RuntimeSession {
             session,
             connection_id,
             active_prompt: Mutex::new(None),
+            tool_catalog_cache: Mutex::new(None),
         }
     }
 }
@@ -602,23 +613,57 @@ impl IronRuntime {
     /// Get a session-effective tool catalog that can be used for both
     /// provider request building and tool execution.
     pub fn get_session_tool_catalog(&self, session_id: SessionId) -> Option<SessionToolCatalog> {
-        let session = self.get_session(session_id)?;
-        let session_guard = session.lock().ok()?;
+        let runtime_session = self.inner.sessions.read().unwrap().get(&session_id).cloned()?;
+        let session_guard = runtime_session.session.lock().ok()?;
 
-        let local_registry = Arc::new((*self.tool_registry()).clone());
-        let mcp_registry = Arc::new((*self.mcp_registry()).clone());
-        let plugin_registry = Arc::new((*self.plugin_registry()).clone());
-        let wasm_host = Arc::new((*self.inner.wasm_host.read().ok()?).clone());
+        let tool_registry_version = self.inner.tool_registry.read().ok()?.version();
+        let mcp_registry_snapshot = self.inner.mcp_registry.read().ok()?.clone();
+        let mcp_registry_version = mcp_registry_snapshot.version();
+        let plugin_registry_snapshot = self.inner.plugin_registry.read().ok()?.clone();
+        let plugin_registry_version = plugin_registry_snapshot.version();
+
+        {
+            let cache_guard = runtime_session.tool_catalog_cache.lock().ok()?;
+            if let Some(cached) = cache_guard.as_ref() {
+                if cached.tool_registry_version == tool_registry_version
+                    && cached.mcp_registry_version == mcp_registry_version
+                    && cached.plugin_registry_version == plugin_registry_version
+                    && cached.mcp_server_enablement == session_guard.mcp_server_enablement
+                    && cached.plugin_enablement == session_guard.plugin_enablement
+                {
+                    return Some((*cached.catalog).clone());
+                }
+            }
+        }
+
+        let local_registry = Arc::new(self.inner.tool_registry.read().ok()?.clone());
+        let mcp_registry = Arc::new(mcp_registry_snapshot);
+        let plugin_registry = Arc::new(plugin_registry_snapshot);
+        let wasm_host = Arc::new(self.inner.wasm_host.read().ok()?.clone());
         let connection_manager = self.mcp_connection_manager();
 
-        Some(SessionToolCatalog::new(
+        let catalog = Arc::new(SessionToolCatalog::new(
             local_registry,
             mcp_registry,
             plugin_registry,
             wasm_host,
             connection_manager,
             &session_guard,
-        ))
+        ));
+
+        {
+            let mut cache_guard = runtime_session.tool_catalog_cache.lock().ok()?;
+            *cache_guard = Some(CachedSessionToolCatalog {
+                tool_registry_version,
+                mcp_registry_version,
+                plugin_registry_version,
+                mcp_server_enablement: session_guard.mcp_server_enablement.clone(),
+                plugin_enablement: session_guard.plugin_enablement.clone(),
+                catalog: catalog.clone(),
+            });
+        }
+
+        Some((*catalog).clone())
     }
 
     // -----------------------------------------------------------------------

@@ -3,6 +3,8 @@
 > **Status: APPROVED** — all gaps identified in the original audit have been resolved.
 > Updated April 11, 2026.
 
+Historical note: this document is archived status context. The supported architecture and current behavior should be taken from the crate docs, `README.md`, and tests.
+
 ## Plan Compliance
 
 - ✅ **Runtime-local MCP inventory** (`openspec/specs/session-scoped-mcp-support/spec.md:7-19`)

@@ -1,6 +1,6 @@
 //! Loop error types
 //!
-//! Errors that can occur during AgentLoop execution.
+//! Errors that can occur during runtime and prompt execution.
 
 use thiserror::Error;
 

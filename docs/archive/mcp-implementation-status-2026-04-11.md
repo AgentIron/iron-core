@@ -3,6 +3,8 @@
 **Date:** April 11, 2026
 **Change:** `fully-implement-mcp-and-wasm-plugins`
 
+Historical note: this document is archived status context. The supported architecture and current behavior should be taken from the crate docs, `README.md`, and tests.
+
 ## Summary
 
 MCP (Model Context Protocol) support and WASM integration plugins have been fully implemented and hardened. All identified gaps have been addressed, all tests pass (490 tests, 0 failures), and the implementation is production-ready.

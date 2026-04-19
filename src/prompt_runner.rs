@@ -66,12 +66,16 @@ impl PromptRunner {
                 self.maybe_compact_hard_fit(durable, config).await;
             }
 
+            let session_id = {
+                let session = durable.lock().unwrap();
+                session.id
+            };
+            let tool_catalog = self
+                .runtime
+                .get_session_tool_catalog(session_id)
+                .map(Arc::new);
+
             let request = {
-                let session_id = {
-                    let session = durable.lock().unwrap();
-                    session.id
-                };
-                let tool_catalog = self.runtime.get_session_tool_catalog(session_id);
                 let session = durable.lock().unwrap();
                 let instructions = session.instructions.clone();
                 let compacted_context = session.compacted_context.clone();
@@ -79,7 +83,7 @@ impl PromptRunner {
                 let messages = session.to_transcript().messages;
                 drop(session);
 
-                if let Some(tool_catalog) = tool_catalog {
+                if let Some(tool_catalog) = tool_catalog.as_ref() {
                     crate::request_builder::build_inference_request_with_effective_tools(
                         config,
                         &messages,
@@ -145,14 +149,8 @@ impl PromptRunner {
             }
 
             let needs_permission = {
-                // Get session ID and tool catalog for permission checks
-                let session_id = {
-                    let session = durable.lock().unwrap();
-                    session.id
-                };
-
                 let approval_strategy = config.default_approval_strategy;
-                if let Some(tool_catalog) = self.runtime.get_session_tool_catalog(session_id) {
+                if let Some(tool_catalog) = tool_catalog.as_ref() {
                     step.tool_calls.iter().any(|call| {
                         let tool_requires = tool_catalog.requires_approval(&call.tool_name);
                         approval_strategy.is_approval_required(tool_requires)
@@ -171,7 +169,14 @@ impl PromptRunner {
 
             if needs_permission {
                 let approved_tool_calls = match self
-                    .handle_permission_flow(durable, ephemeral, sink, &step.tool_calls, config)
+                    .handle_permission_flow(
+                        durable,
+                        ephemeral,
+                        sink,
+                        &step.tool_calls,
+                        config,
+                        tool_catalog.clone(),
+                    )
                     .await
                 {
                     Ok(calls) => calls,
@@ -184,11 +189,19 @@ impl PromptRunner {
                     sink,
                     approved_tool_calls,
                     cancel_token,
+                    tool_catalog.clone(),
                 )
                 .await;
             } else {
-                self.execute_tool_calls(durable, ephemeral, sink, step.tool_calls, cancel_token)
-                    .await;
+                self.execute_tool_calls(
+                    durable,
+                    ephemeral,
+                    sink,
+                    step.tool_calls,
+                    cancel_token,
+                    tool_catalog.clone(),
+                )
+                .await;
             }
         }
     }
@@ -277,14 +290,9 @@ impl PromptRunner {
         sink: &dyn PromptSink,
         tool_calls: &[iron_providers::ToolCall],
         _config: &Config,
+        tool_catalog: Option<Arc<SessionToolCatalog>>,
     ) -> Result<Vec<iron_providers::ToolCall>, agent_client_protocol::StopReason> {
-        // Get session ID and tool catalog for permission checks
-        let session_id = {
-            let session = durable.lock().unwrap();
-            session.id
-        };
-
-        let tool_catalog = match self.runtime.get_session_tool_catalog(session_id) {
+        let tool_catalog = match tool_catalog {
             Some(catalog) => catalog,
             None => {
                 // If we can't get the catalog, deny all tools that require permission
@@ -425,6 +433,7 @@ impl PromptRunner {
         sink: &dyn PromptSink,
         tool_calls: Vec<iron_providers::ToolCall>,
         cancel_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        tool_catalog: Option<Arc<SessionToolCatalog>>,
     ) {
         use std::sync::atomic::Ordering;
 
@@ -437,8 +446,15 @@ impl PromptRunner {
                 return;
             }
 
-            self.execute_single_tool(durable, ephemeral, sink, call, cancel_token.clone())
-                .await;
+            self.execute_single_tool(
+                durable,
+                ephemeral,
+                sink,
+                call,
+                cancel_token.clone(),
+                tool_catalog.clone(),
+            )
+            .await;
         }
     }
 
@@ -526,17 +542,12 @@ impl PromptRunner {
         sink: &dyn PromptSink,
         call: iron_providers::ToolCall,
         cancel_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        tool_catalog: Option<Arc<SessionToolCatalog>>,
     ) {
         #[cfg(not(feature = "embedded-python"))]
         let _ = &cancel_token;
 
-        // Get session ID and tool catalog
-        let session_id = {
-            let session = durable.lock().unwrap();
-            session.id
-        };
-
-        let tool_catalog = match self.runtime.get_session_tool_catalog(session_id) {
+        let tool_catalog = match tool_catalog {
             Some(catalog) => catalog,
             None => {
                 let error_result =
@@ -565,12 +576,19 @@ impl PromptRunner {
 
         #[cfg(feature = "embedded-python")]
         if call.tool_name == "python_exec" && self.runtime.config().embedded_python.enabled {
-            self.execute_python_script(durable, _ephemeral, sink, &call, cancel_token)
+            self.execute_python_script(
+                durable,
+                _ephemeral,
+                sink,
+                &call,
+                cancel_token,
+                tool_catalog.clone(),
+            )
                 .await;
             return;
         }
 
-        self.execute_standard_tool(durable, sink, call, &tool_catalog)
+        self.execute_standard_tool(durable, sink, call, tool_catalog.as_ref())
             .await;
     }
 
@@ -675,6 +693,7 @@ impl PromptRunner {
         sink: &dyn PromptSink,
         call: &iron_providers::ToolCall,
         cancel_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        session_tool_catalog: Arc<SessionToolCatalog>,
     ) {
         use crate::embedded_python::{
             script_output_to_json, ChildCallStatus, ScriptError, ScriptExecStatus, ScriptInput,
@@ -731,29 +750,6 @@ impl PromptRunner {
 
         let (req_tx, req_rx) = std::sync::mpsc::channel::<ChildReq>();
         let timeout_secs = config.max_script_timeout_secs;
-        let session_id = {
-            let session = durable.lock().unwrap();
-            session.id
-        };
-        let session_tool_catalog = match self.runtime.get_session_tool_catalog(session_id) {
-            Some(catalog) => catalog,
-            None => {
-                let error_result =
-                    serde_json::json!({"error": "Failed to get session tool catalog"});
-                {
-                    let mut session = durable.lock().unwrap();
-                    session.fail_tool_call(&call.call_id, error_result.clone());
-                }
-                sink.emit(PromptLifecycleEvent::ToolCallUpdate {
-                    call_id: call.call_id.clone(),
-                    tool_name: call.tool_name.clone(),
-                    status: ToolUpdateStatus::Failed,
-                    output: Some(error_result),
-                })
-                .await;
-                return;
-            }
-        };
         // Build the Python-visible tool catalog from the session-effective
         // definitions.  Because `SessionToolCatalog` already applies session
         // enablement, health, auth-gating, and scope checks for every tool

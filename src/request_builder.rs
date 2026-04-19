@@ -215,8 +215,5 @@ fn apply_context_window_policy(
             }
             Ok(())
         }
-        ContextWindowPolicy::SummarizeAfter(_) => Err(LoopError::invalid_config(
-            "ContextWindowPolicy::SummarizeAfter is not implemented; use context_management compaction instead",
-        )),
     }
 }

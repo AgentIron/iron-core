@@ -3,7 +3,6 @@
     rustdoc::private_intra_doc_links,
     rustdoc::redundant_explicit_links
 )]
-#![allow(deprecated)] // Allow deprecated items in re-exports until callers migrate
 //! iron-core: Core AgentIron runtime, ACP-native session management, and tool registry
 //!
 //! This crate provides the ACP-native runtime, session management, tool registration,
@@ -57,9 +56,6 @@
 //! `ToolResult`, approval requests are emitted before resolution, and exactly one
 //! terminal `Complete` is emitted last.
 //!
-//! Legacy `session.prompt().await` + `session.drain_events()` helpers remain as
-//! compatibility wrappers but are not recommended for new code.
-//!
 //! # Architecture
 //!
 //! The canonical interaction model follows ACP (Agent Client Protocol):
@@ -79,9 +75,9 @@
 //! # Context Window Policy
 //!
 //! `Config.context_window_policy` is applied consistently in both ACP-native and
-//! legacy request paths via a shared request builder (`request_builder` module).
-//! `SummarizeAfter` is still rejected in direct request pruning; provider-backed
-//! summarization currently lives under `context_management`.
+//! request paths via a shared request builder (`request_builder` module).
+//! Summarization lives under `context_management`; the context-window policy is
+//! limited to `KeepAll` and `KeepRecent`.
 //!
 //! # Context Management
 //!
@@ -159,13 +155,6 @@
 //! The supported ACP surface is also available programmatically via
 //! [`transport::AcpSupport`].
 //!
-//! # Legacy API
-//!
-//! The older [`SessionHandle`]-centric API (`SessionHandle`, `SessionRuntime`,
-//! `TurnHandle`, `TurnEvents`) is still available for backward compatibility but
-//! is **deprecated** for new code. It will not receive new features. Migrate to
-//! the facade types above.
-//!
 //! # Tools
 //!
 //! Register tools via [`IronAgent::register_tool`] or on the [`ToolRegistry`].
@@ -181,17 +170,7 @@ pub mod durable;
 pub mod embedded_python;
 pub mod ephemeral;
 pub mod error;
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `AgentSession::drain_events()` with `AgentEvent` instead. This module will be removed in a future release."
-)]
-pub mod events;
 pub mod facade;
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `AgentLoop` from the new facade instead. This module will be removed in a future release."
-)]
-pub mod loop_state;
 pub mod mcp;
 pub mod plugin;
 pub mod prompt;
@@ -201,28 +180,8 @@ pub mod prompt_turn;
 pub mod request_builder;
 pub mod runtime;
 pub mod schema;
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `AgentSession` from the facade instead. This module will be removed in a future release."
-)]
-pub mod session;
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `IronAgent` + `AgentConnection` + `AgentSession` from the facade instead. This module will be removed in a future release."
-)]
-pub mod session_handle;
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `IronRuntime` from the runtime module instead. This module will be removed in a future release."
-)]
-pub mod session_runtime;
 pub mod tool;
 pub mod transport;
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `AgentSession::prompt()` + `drain_events()` instead. This module will be removed in a future release."
-)]
-pub mod turn;
 
 pub use crate::prompt::{
     AdditionalInstructionFile, PromptAssembler, RepoInstructionLoader, RuntimeContextRenderer,
@@ -245,23 +204,13 @@ pub use durable::{
 };
 pub use ephemeral::{EphemeralTurn, TurnPhase};
 pub use error::{LoopError, LoopResult, RuntimeError, RuntimeResult};
-#[allow(deprecated)]
-pub use events::StreamEvent;
 pub use facade::{
     AgentConnection, AgentEvent, AgentSession, FacadeToolStatus, IronAgent, PermissionRequest,
     PermissionVerdict, PromptEvent, PromptEvents, PromptHandle, PromptOutcome, PromptStatus,
     ToolResultStatus,
 };
-#[allow(deprecated)]
-pub use loop_state::AgentLoop;
 pub use prompt_turn::PromptTurn;
 pub use runtime::{ConnectionId, IronRuntime};
-#[allow(deprecated)]
-pub use session::{Message, Session};
-#[allow(deprecated)]
-pub use session_handle::SessionHandle;
-#[allow(deprecated)]
-pub use session_runtime::SessionRuntime;
 pub use tool::{FunctionTool, Tool, ToolDefinition, ToolRegistry};
 
 pub use builtin::{
@@ -274,9 +223,8 @@ pub use transport::{
 };
 
 pub use mcp::{
-    EffectiveToolView, McpConnectionManager, McpServerConfig, McpServerHealth, McpServerRegistry,
-    McpServerState, McpTool, McpToolInfo, McpTransport, ServerStatus, SessionMcpSummary,
-    SessionToolCatalog,
+    McpConnectionManager, McpServerConfig, McpServerHealth, McpServerRegistry, McpServerState,
+    McpToolInfo, McpTransport, McpServerSummary, SessionToolCatalog, ToolDiagnostic, ToolSource,
 };
 
 pub use plugin::{
@@ -306,31 +254,13 @@ pub use iron_providers::{
     ProviderError, ProviderEvent, RuntimeConfigSource, ToolCall, ToolPolicy, Transcript,
 };
 
-#[allow(deprecated)]
-pub use events::{
-    ApprovalCallInfo, ApprovalDecision, ApprovalInteractionInfo, ApprovalInteractionResolution,
-    ApprovalVerdict, ChoiceInteractionInfo, ChoiceInteractionResolution, ChoiceItem,
-    ChoiceResolutionItem, ChoiceResolutionRecord, ChoiceResolutionStatus, ChoiceSelectionMode,
-    InteractionResolution, InteractionSource, PendingCallInfo, PendingInteractionInfo,
-    PendingInteractionPayload, TurnEvent, TurnId, TurnOutcome, TurnStatus,
-};
-#[allow(deprecated)]
-pub use turn::{TurnEvents, TurnHandle};
-
-#[allow(deprecated)]
 pub mod prelude {
-    #[allow(deprecated)]
     pub use crate::{
-        AgentConnection, AgentEvent, AgentLoop, AgentSession, ApprovalCallInfo,
-        ApprovalDecision, ApprovalInteractionInfo, ApprovalInteractionResolution,
-        ApprovalStrategy, ApprovalVerdict, ChoiceInteractionInfo, ChoiceInteractionResolution,
-        ChoiceItem, ChoiceResolutionItem, ChoiceResolutionRecord, ChoiceResolutionStatus,
-        ChoiceSelectionMode, Config, ConfigSource, ContentBlock, ContextWindowPolicy,
-        FacadeToolStatus, GenerationConfig, InteractionResolution, InteractionSource, IronAgent,
-        LoopError, LoopResult, Message, OpenAiConfig, OpenAiConfigSource, OpenAiProvider,
-        PendingCallInfo, PendingInteractionInfo, PendingInteractionPayload, PermissionVerdict,
-        PromptOutcome, Provider, RuntimeConfigSource, Session, SessionHandle, SessionId,
-        SessionRuntime, StreamEvent, Tool, ToolDefinition, ToolPolicy, ToolRegistry, Transcript,
-        TurnEvent, TurnEvents, TurnHandle, TurnId, TurnOutcome, TurnStatus,
+        AgentConnection, AgentEvent, AgentSession, ApprovalStrategy, Config, ConfigSource,
+        ContentBlock, ContextWindowPolicy, FacadeToolStatus, GenerationConfig, IronAgent,
+        LoopError, LoopResult, OpenAiConfig, OpenAiConfigSource, OpenAiProvider,
+        PermissionVerdict, PromptEvent, PromptEvents, PromptHandle, PromptOutcome, Provider,
+        RuntimeConfigSource, SessionId, Tool, ToolDefinition, ToolPolicy, ToolRegistry,
+        Transcript,
     };
 }

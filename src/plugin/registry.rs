@@ -9,7 +9,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, RwLock,
+};
 use tracing::{info, warn};
 
 /// Stable identifier for a plugin
@@ -209,13 +212,24 @@ impl PluginState {
 #[derive(Debug, Clone, Default)]
 pub struct PluginRegistry {
     plugins: Arc<RwLock<HashMap<String, PluginState>>>,
+    version: Arc<AtomicU64>,
 }
 
 impl PluginRegistry {
     pub fn new() -> Self {
         Self {
             plugins: Arc::new(RwLock::new(HashMap::new())),
+            version: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    fn bump_version(&self) {
+        self.version.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Return the current mutation version for cache invalidation.
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::SeqCst)
     }
 
     /// Register a new plugin configuration
@@ -224,6 +238,8 @@ impl PluginRegistry {
         let id = config.id.clone();
         let state = PluginState::new(config);
         plugins.insert(id.clone(), state);
+        drop(plugins);
+        self.bump_version();
         info!("Registered plugin: {}", id);
     }
 
@@ -231,7 +247,9 @@ impl PluginRegistry {
     pub fn unregister(&self, plugin_id: &str) -> Option<PluginState> {
         let mut plugins = self.plugins.write().unwrap();
         let removed = plugins.remove(plugin_id);
+        drop(plugins);
         if removed.is_some() {
+            self.bump_version();
             info!("Unregistered plugin: {}", plugin_id);
         }
         removed
@@ -257,6 +275,8 @@ impl PluginRegistry {
             if health.is_healthy() {
                 state.last_error = None;
             }
+            drop(plugins);
+            self.bump_version();
         }
     }
 
@@ -266,6 +286,8 @@ impl PluginRegistry {
         if let Some(state) = plugins.get_mut(plugin_id) {
             state.health = PluginHealth::Error;
             state.last_error = Some(error.clone());
+            drop(plugins);
+            self.bump_version();
             warn!("Plugin {} entered error state: {}", plugin_id, error);
         }
     }
@@ -275,6 +297,8 @@ impl PluginRegistry {
         let mut plugins = self.plugins.write().unwrap();
         if let Some(state) = plugins.get_mut(plugin_id) {
             state.manifest = Some(manifest);
+            drop(plugins);
+            self.bump_version();
         }
     }
 
@@ -283,6 +307,8 @@ impl PluginRegistry {
         let mut plugins = self.plugins.write().unwrap();
         if let Some(state) = plugins.get_mut(plugin_id) {
             state.artifact_path = Some(path);
+            drop(plugins);
+            self.bump_version();
         }
     }
 
@@ -291,6 +317,8 @@ impl PluginRegistry {
         let mut plugins = self.plugins.write().unwrap();
         if let Some(state) = plugins.get_mut(plugin_id) {
             state.install_metadata = Some(metadata);
+            drop(plugins);
+            self.bump_version();
         }
     }
 
@@ -299,17 +327,24 @@ impl PluginRegistry {
         let mut plugins = self.plugins.write().unwrap();
         if let Some(state) = plugins.get_mut(plugin_id) {
             state.auth_state = auth_state;
+            drop(plugins);
+            self.bump_version();
         }
     }
 
     /// Set credentials for a plugin and mark as authenticated
     pub fn set_credentials(&self, plugin_id: &str, credentials: CredentialBinding) {
+        let mut mutated = false;
         {
             let mut plugins = self.plugins.write().unwrap();
             if let Some(state) = plugins.get_mut(plugin_id) {
                 state.credentials = Some(credentials);
                 state.auth_state = AuthState::Authenticated;
+                mutated = true;
             }
+        }
+        if mutated {
+            self.bump_version();
         }
         if let Some(summary) = self.recompute_availability(plugin_id) {
             info!(
@@ -323,12 +358,17 @@ impl PluginRegistry {
 
     /// Clear credentials for a plugin and reset auth state
     pub fn clear_credentials(&self, plugin_id: &str) {
+        let mut mutated = false;
         {
             let mut plugins = self.plugins.write().unwrap();
             if let Some(state) = plugins.get_mut(plugin_id) {
                 state.credentials = None;
                 state.auth_state = AuthState::Unauthenticated;
+                mutated = true;
             }
+        }
+        if mutated {
+            self.bump_version();
         }
         if let Some(summary) = self.recompute_availability(plugin_id) {
             info!(
@@ -342,13 +382,18 @@ impl PluginRegistry {
 
     /// Mark authentication as expired
     pub fn mark_auth_expired(&self, plugin_id: &str) {
+        let mut mutated = false;
         {
             let mut plugins = self.plugins.write().unwrap();
             if let Some(state) = plugins.get_mut(plugin_id) {
                 if state.auth_state.is_authenticated() {
                     state.auth_state = AuthState::Expired;
+                    mutated = true;
                 }
             }
+        }
+        if mutated {
+            self.bump_version();
         }
         if let Some(summary) = self.recompute_availability(plugin_id) {
             info!(
@@ -362,12 +407,17 @@ impl PluginRegistry {
 
     /// Mark authentication as revoked
     pub fn mark_auth_revoked(&self, plugin_id: &str) {
+        let mut mutated = false;
         {
             let mut plugins = self.plugins.write().unwrap();
             if let Some(state) = plugins.get_mut(plugin_id) {
                 state.credentials = None;
                 state.auth_state = AuthState::Revoked;
+                mutated = true;
             }
+        }
+        if mutated {
+            self.bump_version();
         }
         if let Some(summary) = self.recompute_availability(plugin_id) {
             info!(
@@ -388,6 +438,8 @@ impl PluginRegistry {
                 AuthState::Authenticated => Err("Already authenticated".to_string()),
                 _ => {
                     state.auth_state = AuthState::Authenticating;
+                    drop(plugins);
+                    self.bump_version();
                     Ok(())
                 }
             }
@@ -436,8 +488,13 @@ impl PluginRegistry {
                     plugin_id
                 )
             })?;
+        let provider = oauth.provider.clone();
+        let scopes = oauth.scopes.clone();
+        let authorization_endpoint = oauth.authorization_endpoint.clone();
 
         state.auth_state = AuthState::Authenticating;
+        drop(plugins);
+        self.bump_version();
 
         let request_id = format!("auth-{}-{}", plugin_id, uuid::Uuid::new_v4());
 
@@ -445,18 +502,16 @@ impl PluginRegistry {
         // In a production system the runtime would construct a proper OAuth
         // URL with PKCE, state, etc.  For now we use the declared endpoint
         // or a sensible default.
-        let authorization_url = oauth
-            .authorization_endpoint
-            .clone()
-            .unwrap_or_else(|| format!("https://auth.example.com/authorize/{}", oauth.provider));
+        let authorization_url = authorization_endpoint
+            .unwrap_or_else(|| format!("https://auth.example.com/authorize/{}", provider));
 
         let redirect_uri = format!("iron://auth/callback/{}", plugin_id);
 
         Ok(crate::plugin::auth::AuthInteractionRequest {
             request_id,
             plugin_id: plugin_id.to_string(),
-            provider: oauth.provider.clone(),
-            scopes: oauth.scopes.clone(),
+            provider,
+            scopes,
             authorization_url,
             redirect_uri,
             code_verifier: None,
@@ -533,11 +588,16 @@ impl PluginRegistry {
             | AuthInteractionResult::Failed { .. }
             | AuthInteractionResult::Cancelled => {
                 // Reset to unauthenticated on failure/denial/cancel.
+                let mut mutated = false;
                 {
                     let mut plugins = self.plugins.write().unwrap();
                     if let Some(state) = plugins.get_mut(plugin_id) {
                         state.auth_state = AuthState::Unauthenticated;
+                        mutated = true;
                     }
+                }
+                if mutated {
+                    self.bump_version();
                 }
             }
         }
@@ -571,6 +631,8 @@ impl PluginRegistry {
             state.auth_state = AuthState::Unauthenticated;
             state.last_error = None;
             state.install_metadata = None;
+            drop(plugins);
+            self.bump_version();
         }
     }
 

@@ -99,6 +99,7 @@ impl ToolDefinition {
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
+    version: u64,
 }
 
 impl std::fmt::Debug for ToolRegistry {
@@ -114,6 +115,7 @@ impl Clone for ToolRegistry {
     fn clone(&self) -> Self {
         Self {
             tools: self.tools.clone(),
+            version: self.version,
         }
     }
 }
@@ -128,6 +130,7 @@ impl ToolRegistry {
     pub fn register<T: Tool + 'static>(&mut self, tool: T) {
         let definition = tool.definition();
         self.tools.insert(definition.name, Arc::new(tool));
+        self.version += 1;
     }
 
     /// Look up a tool by name.
@@ -166,6 +169,12 @@ impl ToolRegistry {
     /// Remove all registered tools.
     pub fn clear(&mut self) {
         self.tools.clear();
+        self.version += 1;
+    }
+
+    /// Return the current mutation version for cache invalidation.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 }
 

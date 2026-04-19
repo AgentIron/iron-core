@@ -14,7 +14,7 @@ It provides:
 - optional embedded Python execution via the `embedded-python` feature
 - WASM integration plugins via Extism with install lifecycle, manifest extraction, session-scoped enablement, auth-gated tool availability, and a 30-second execution timeout
 
-The facade API is the recommended integration surface for new code. Older `SessionHandle`-style APIs are still exported for compatibility, but are deprecated.
+The facade/runtime API is the supported integration surface.
 
 ## Requirements
 
@@ -101,8 +101,6 @@ The canonical interaction model is stream-first:
 - consume `PromptEvent`s as they arrive
 - use `PromptHandle` to approve, deny, or cancel an active prompt
 
-For non-streaming compatibility code, `session.prompt().await` and `session.drain_events()` are still available.
-
 ## Built-In Tools
 
 `iron-core` can register built-in `read`, `write`, `edit`, `glob`, `grep`, and `webfetch` tools, plus `bash` or `powershell` when a shell is available.
@@ -137,9 +135,11 @@ The plugin system is fully implemented:
 
 ## Documentation
 
+- [Architecture Overview](docs/architecture-overview.md)
 - [Getting Started](docs/getting-started-iron-core.md)
 - [Integration Plugins](docs/integration-plugins.md)
 - [Prompt Composition](docs/prompt-composition.md)
+- [Architecture Cleanup Checklist](docs/architecture-cleanup-checklist.md)
 
 Build the API docs locally with:
 

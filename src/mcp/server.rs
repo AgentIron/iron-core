@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, RwLock,
+};
 use tracing::{info, warn};
 
 /// Transport type for MCP servers
@@ -91,13 +94,24 @@ impl McpServerState {
 #[derive(Debug, Clone, Default)]
 pub struct McpServerRegistry {
     servers: Arc<RwLock<HashMap<String, McpServerState>>>,
+    version: Arc<AtomicU64>,
 }
 
 impl McpServerRegistry {
     pub fn new() -> Self {
         Self {
             servers: Arc::new(RwLock::new(HashMap::new())),
+            version: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    fn bump_version(&self) {
+        self.version.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Return the current mutation version for cache invalidation.
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::SeqCst)
     }
 
     /// Register a new MCP server configuration
@@ -106,6 +120,8 @@ impl McpServerRegistry {
         let id = config.id.clone();
         let state = McpServerState::new(config);
         servers.insert(id.clone(), state);
+        drop(servers);
+        self.bump_version();
         info!("Registered MCP server: {}", id);
     }
 
@@ -113,7 +129,9 @@ impl McpServerRegistry {
     pub fn unregister_server(&self, server_id: &str) -> Option<McpServerState> {
         let mut servers = self.servers.write().unwrap();
         let removed = servers.remove(server_id);
+        drop(servers);
         if removed.is_some() {
+            self.bump_version();
             info!("Unregistered MCP server: {}", server_id);
         }
         removed
@@ -139,6 +157,8 @@ impl McpServerRegistry {
             if health.is_usable() {
                 state.last_error = None;
             }
+            drop(servers);
+            self.bump_version();
         }
     }
 
@@ -149,6 +169,8 @@ impl McpServerRegistry {
             let log_message = error.clone();
             state.health = McpServerHealth::Error;
             state.last_error = Some(error);
+            drop(servers);
+            self.bump_version();
             warn!(
                 "MCP server {} entered error state: {}",
                 server_id, log_message
@@ -161,10 +183,13 @@ impl McpServerRegistry {
         let mut servers = self.servers.write().unwrap();
         if let Some(state) = servers.get_mut(server_id) {
             state.discovered_tools = tools;
+            let tool_count = state.discovered_tools.len();
+            drop(servers);
+            self.bump_version();
             info!(
                 "Updated MCP server {} with {} discovered tools",
                 server_id,
-                state.discovered_tools.len()
+                tool_count
             );
         }
     }

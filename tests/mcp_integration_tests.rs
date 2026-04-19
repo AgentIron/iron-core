@@ -296,6 +296,56 @@ async fn test_session_tool_catalog_excludes_errored_mcp_servers() {
 }
 
 #[tokio::test]
+async fn test_session_tool_catalog_cache_invalidates_on_mcp_registry_change() {
+    let config = Config::new().with_mcp(
+        McpConfig::new()
+            .with_enabled(true)
+            .with_enabled_by_default(true),
+    );
+    let runtime = IronRuntime::new(config, MockProvider::default());
+
+    let server_config = McpServerConfig {
+        id: "cached-server".to_string(),
+        label: "Cached Server".to_string(),
+        transport: McpTransport::Http {
+            url: "http://localhost:8080".to_string(),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    };
+    runtime.register_mcp_server(server_config);
+
+    runtime
+        .mcp_registry()
+        .update_health("cached-server", McpServerHealth::Connected);
+    runtime.mcp_registry().update_discovered_tools(
+        "cached-server",
+        vec![McpToolInfo {
+            name: "cached_tool".to_string(),
+            description: "Cached MCP tool".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }],
+    );
+
+    let (session_id, _session) = runtime
+        .create_session(iron_core::ConnectionId(1))
+        .expect("Failed to create session");
+
+    let first_catalog = runtime.get_session_tool_catalog(session_id).unwrap();
+    assert!(first_catalog.contains("mcp_cached-server_cached_tool"));
+
+    runtime
+        .mcp_registry()
+        .update_health("cached-server", McpServerHealth::Error);
+
+    let refreshed_catalog = runtime.get_session_tool_catalog(session_id).unwrap();
+    assert!(
+        !refreshed_catalog.contains("mcp_cached-server_cached_tool"),
+        "catalog should refresh after MCP registry health changes"
+    );
+}
+
+#[tokio::test]
 async fn test_session_tool_catalog_filters_consistently() {
     let config = Config::new().with_mcp(
         McpConfig::new()

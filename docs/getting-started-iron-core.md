@@ -2,6 +2,8 @@
 
 This guide covers the shortest path to embedding `iron-core` in an application.
 
+For the high-level supported architecture, see [architecture-overview.md](./architecture-overview.md).
+
 ## 1. Add Dependencies
 
 ```toml
@@ -124,6 +126,8 @@ cargo doc -p iron-core --no-deps
 ```
 
 The `iron-core` crate docs are the canonical API reference for the public embedding surface.
+
+For the supported architecture and compatibility boundary, see [architecture-overview.md](./architecture-overview.md).
 
 For the prompt composition model — how `iron-core` assembles provider instructions from ordered layers — see [prompt-composition.md](./prompt-composition.md).
 

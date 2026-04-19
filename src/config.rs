@@ -3,16 +3,12 @@
 //! These types define the main runtime configuration surface for `IronAgent`
 //! and `IronRuntime`.
 //!
-//! # Caller-owned config bridge
-//!
 //! Applications that keep their own config type can implement [`ConfigSource`]
 //! to project iron-core settings into a validated [`Config`] snapshot at
-//! construction time. The session handle constructors
-//! [`SessionHandle::from_source`](crate::SessionHandle::from_source) and
-//! friends consume any type implementing `ConfigSource`.
+//! construction time.
 //!
 //! Projection is a snapshot — later mutations to the caller's config do not
-//! affect already-constructed sessions.
+//! affect already-constructed runtimes or agents.
 
 use crate::error::LoopError;
 use iron_providers::{GenerationConfig, ToolPolicy};
@@ -231,11 +227,6 @@ pub enum ContextWindowPolicy {
     KeepAll,
     /// Keep only the most recent `N` messages.
     KeepRecent(usize),
-    /// Summarize older messages once more than `N` are retained.
-    ///
-    /// This variant is reserved for future summarization support. At present,
-    /// older messages are dropped when the policy is applied directly.
-    SummarizeAfter(usize),
 }
 
 impl ContextWindowPolicy {
@@ -249,15 +240,6 @@ impl ContextWindowPolicy {
                 if messages.len() > *n {
                     let start = messages.len() - *n;
                     *messages = messages.split_off(start);
-                }
-            }
-            ContextWindowPolicy::SummarizeAfter(n) => {
-                if messages.len() > *n {
-                    let split_point = messages.len() - *n;
-                    let to_summarize: Vec<T> = messages.drain(..split_point).collect();
-                    let _summary = (_summarize_fn)(&to_summarize);
-                    // For now, just drop the older messages
-                    // TODO: Actually insert summary
                 }
             }
         }
