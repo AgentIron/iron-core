@@ -1,4 +1,6 @@
-use crate::plugin::auth::{AuthActionHint, AuthAvailability, AuthState, CredentialBinding};
+use crate::plugin::auth::{
+    AuthActionHint, AuthAvailability, AuthPrompt, AuthState, CredentialBinding,
+};
 use crate::plugin::config::PluginConfig;
 use crate::plugin::effective_tools::compute_tool_availability;
 use crate::plugin::manifest::PluginManifest;
@@ -167,6 +169,26 @@ impl PluginState {
             message,
             action_hint,
         }
+    }
+
+    /// Build a structured auth prompt for client rendering.
+    ///
+    /// Returns `None` if the plugin does not require authentication.
+    pub fn auth_prompt(&self) -> Option<AuthPrompt> {
+        let oauth = self.manifest.as_ref()?.auth.as_ref()?;
+
+        let title = format!("Connect {}", oauth.provider_name);
+        let description = format!(
+            "This plugin needs {} access before it can continue.",
+            oauth.provider_name
+        );
+
+        Some(AuthPrompt {
+            auth_id: self.config.id.clone(),
+            state: self.auth_state,
+            title,
+            description,
+        })
     }
 
     /// Check if the plugin is usable (healthy and auth satisfied)
@@ -372,6 +394,167 @@ impl PluginRegistry {
         } else {
             Err(format!("Plugin '{}' not found", plugin_id))
         }
+    }
+
+    /// Start an auth flow and produce an [`AuthInteractionRequest`] for the client.
+    ///
+    /// Validates that the plugin exists, requires auth, and is in a state that
+    /// allows starting authentication.  Transitions the plugin to
+    /// `Authenticating` and returns the request the client should act on
+    /// (e.g. open a browser to the authorization URL).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plugin is not found, does not require auth,
+    /// is already authenticating, or is already authenticated.
+    pub fn begin_auth_flow(
+        &self,
+        plugin_id: &str,
+    ) -> Result<crate::plugin::auth::AuthInteractionRequest, String> {
+        let mut plugins = self.plugins.write().unwrap();
+        let state = plugins
+            .get_mut(plugin_id)
+            .ok_or_else(|| format!("Plugin '{}' not found", plugin_id))?;
+
+        match state.auth_state {
+            AuthState::Authenticating => {
+                return Err("Authentication already in progress".to_string());
+            }
+            AuthState::Authenticated => {
+                return Err("Already authenticated".to_string());
+            }
+            _ => {}
+        }
+
+        let oauth = state
+            .manifest
+            .as_ref()
+            .and_then(|m| m.auth.as_ref())
+            .ok_or_else(|| {
+                format!(
+                    "Plugin '{}' does not require authentication or has no manifest",
+                    plugin_id
+                )
+            })?;
+
+        state.auth_state = AuthState::Authenticating;
+
+        let request_id = format!("auth-{}-{}", plugin_id, uuid::Uuid::new_v4());
+
+        // Build the authorization URL from the OAuth requirements.
+        // In a production system the runtime would construct a proper OAuth
+        // URL with PKCE, state, etc.  For now we use the declared endpoint
+        // or a sensible default.
+        let authorization_url = oauth
+            .authorization_endpoint
+            .clone()
+            .unwrap_or_else(|| format!("https://auth.example.com/authorize/{}", oauth.provider));
+
+        let redirect_uri = format!("iron://auth/callback/{}", plugin_id);
+
+        Ok(crate::plugin::auth::AuthInteractionRequest {
+            request_id,
+            plugin_id: plugin_id.to_string(),
+            provider: oauth.provider.clone(),
+            scopes: oauth.scopes.clone(),
+            authorization_url,
+            redirect_uri,
+            code_verifier: None,
+        })
+    }
+
+    /// Complete an auth flow by processing the client's response.
+    ///
+    /// On success, stores the provided credentials and transitions to
+    /// `Authenticated`.  On denial, failure, or cancellation, transitions
+    /// back to `Unauthenticated`.
+    ///
+    /// Returns the resulting [`AuthStatusTransition`] so callers can
+    /// observe the state change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plugin is not found or is not in the
+    /// `Authenticating` state.
+    pub fn complete_auth_flow(
+        &self,
+        plugin_id: &str,
+        response: crate::plugin::auth::AuthInteractionResponse,
+    ) -> Result<crate::plugin::auth::AuthStatusTransition, String> {
+        use crate::plugin::auth::AuthInteractionResult;
+
+        let (previous_state, provider, scopes) = {
+            let plugins = self.plugins.read().unwrap();
+            let state = plugins
+                .get(plugin_id)
+                .ok_or_else(|| format!("Plugin '{}' not found", plugin_id))?;
+
+            if state.auth_state != AuthState::Authenticating {
+                return Err(format!(
+                    "Plugin '{}' is not in authenticating state (current: {:?})",
+                    plugin_id, state.auth_state
+                ));
+            }
+
+            let oauth = state
+                .manifest
+                .as_ref()
+                .and_then(|manifest| manifest.auth.as_ref())
+                .ok_or_else(|| {
+                    format!(
+                        "Plugin '{}' does not require authentication or has no manifest",
+                        plugin_id
+                    )
+                })?;
+
+            (
+                state.auth_state,
+                oauth.provider.clone(),
+                oauth.scopes.clone(),
+            )
+        };
+
+        match response.result {
+            AuthInteractionResult::Success { code, .. } => {
+                // Until token exchange is runtime-owned, preserve the successful
+                // completion signal by storing the returned code as the credential
+                // secret while using the plugin-declared provider/scopes.
+                let credentials = CredentialBinding {
+                    plugin_id: plugin_id.to_string(),
+                    provider,
+                    access_token: code,
+                    refresh_token: None,
+                    expires_at: None,
+                    scopes,
+                };
+                self.set_credentials(plugin_id, credentials);
+            }
+            AuthInteractionResult::Denied { .. }
+            | AuthInteractionResult::Failed { .. }
+            | AuthInteractionResult::Cancelled => {
+                // Reset to unauthenticated on failure/denial/cancel.
+                {
+                    let mut plugins = self.plugins.write().unwrap();
+                    if let Some(state) = plugins.get_mut(plugin_id) {
+                        state.auth_state = AuthState::Unauthenticated;
+                    }
+                }
+            }
+        }
+
+        let new_state = {
+            let plugins = self.plugins.read().unwrap();
+            plugins
+                .get(plugin_id)
+                .map(|s| s.auth_state)
+                .unwrap_or(AuthState::Unauthenticated)
+        };
+
+        Ok(crate::plugin::auth::AuthStatusTransition {
+            auth_id: plugin_id.to_string(),
+            previous_state,
+            new_state,
+        })
     }
 
     /// Clear runtime-loaded state (manifest, artifact path, credentials)
@@ -634,6 +817,20 @@ impl PluginRegistry {
             auth_required: auth.auth_required,
             auth_state: state.auth_state,
         })
+    }
+
+    /// Get auth prompts for all plugins that require authentication.
+    ///
+    /// Returns a list of [`AuthPrompt`](crate::plugin::auth::AuthPrompt)
+    /// values for every registered plugin that declares OAuth requirements.
+    /// Clients can use this to render auth UX without polling individual
+    /// plugin statuses.
+    pub fn get_auth_prompts(&self) -> Vec<crate::plugin::auth::AuthPrompt> {
+        let plugins = self.plugins.read().unwrap();
+        plugins
+            .values()
+            .filter_map(|state| state.auth_prompt())
+            .collect()
     }
 }
 
@@ -975,5 +1172,459 @@ mod tests {
         assert_eq!(info.available_tool_count, 2);
         assert_eq!(info.declared_tool_count, 2);
         assert!(info.ready);
+    }
+
+    // ---- Auth interaction tests ----
+
+    /// Helper: create a manifest with OAuth requirements and a gated tool.
+    fn create_auth_manifest() -> PluginManifest {
+        use crate::plugin::auth::OAuthRequirements;
+        PluginManifest {
+            identity: PluginIdentity {
+                id: "com.test.auth-plugin".to_string(),
+                name: "Auth Plugin".to_string(),
+                version: "1.0.0".to_string(),
+            },
+            publisher: PluginPublisher {
+                name: "Test".to_string(),
+                url: None,
+                contact: None,
+            },
+            presentation: PresentationMetadata {
+                description: "Auth test plugin".to_string(),
+                long_description: None,
+                icon: None,
+                category: None,
+                keywords: vec![],
+            },
+            network_policy: NetworkPolicy::Wildcard,
+            auth: Some(OAuthRequirements {
+                provider: "github".to_string(),
+                provider_name: "GitHub".to_string(),
+                scopes: vec!["repo".to_string()],
+                authorization_endpoint: Some(
+                    "https://github.com/login/oauth/authorize".to_string(),
+                ),
+                token_endpoint: None,
+            }),
+            tools: vec![make_tool(
+                "gated_tool",
+                Some(ToolAuthRequirements {
+                    scopes: vec![],
+                    available_unauthenticated: false,
+                }),
+            )],
+            api_version: "1.0".to_string(),
+        }
+    }
+
+    /// Helper: set up a healthy plugin with auth requirements.
+    fn setup_auth_plugin(registry: &PluginRegistry, id: &str) {
+        registry.register(create_test_config(id));
+        registry.update_health(id, PluginHealth::Healthy);
+        registry.set_manifest(id, create_auth_manifest());
+    }
+
+    // ---- Task 3.1: Tests for unauthenticated, pending, and authenticated
+    //      client-visible auth states ----
+
+    #[test]
+    fn test_auth_prompt_unauthenticated_state() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        // Verify the auth prompt is exposed in unauthenticated state.
+        let prompts = registry.get_auth_prompts();
+        assert_eq!(prompts.len(), 1);
+        let prompt = &prompts[0];
+        assert_eq!(prompt.auth_id, "auth-plugin");
+        assert_eq!(prompt.state, AuthState::Unauthenticated);
+        assert_eq!(prompt.title, "Connect GitHub");
+        assert!(prompt.description.contains("GitHub"));
+    }
+
+    #[test]
+    fn test_auth_prompt_pending_state() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        // Start authentication → transitions to Authenticating.
+        registry.start_authentication("auth-plugin").unwrap();
+
+        let state = registry.get("auth-plugin").unwrap();
+        assert_eq!(state.auth_state, AuthState::Authenticating);
+
+        // Auth prompt should reflect the pending state.
+        let prompts = registry.get_auth_prompts();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].state, AuthState::Authenticating);
+    }
+
+    #[test]
+    fn test_auth_prompt_authenticated_state() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        // Set credentials → transitions to Authenticated.
+        registry.set_credentials(
+            "auth-plugin",
+            CredentialBinding {
+                plugin_id: "auth-plugin".to_string(),
+                provider: "github".to_string(),
+                access_token: "ghp_test123".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                scopes: vec!["repo".to_string()],
+            },
+        );
+
+        let state = registry.get("auth-plugin").unwrap();
+        assert_eq!(state.auth_state, AuthState::Authenticated);
+
+        // Auth prompt should reflect the authenticated state.
+        let prompts = registry.get_auth_prompts();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].state, AuthState::Authenticated);
+    }
+
+    #[test]
+    fn test_auth_prompt_not_returned_for_non_auth_plugin() {
+        let registry = PluginRegistry::new();
+        registry.register(create_test_config("no-auth-plugin"));
+        registry.update_health("no-auth-plugin", PluginHealth::Healthy);
+        registry.set_manifest(
+            "no-auth-plugin",
+            create_test_manifest(vec![make_tool("t1", None)]),
+        );
+
+        // Plugin without OAuth requirements should not produce an auth prompt.
+        let prompts = registry.get_auth_prompts();
+        assert!(prompts.is_empty());
+    }
+
+    #[test]
+    fn test_auth_availability_action_hints_per_state() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        // Unauthenticated → StartOAuth
+        let avail = registry.get("auth-plugin").unwrap().auth_availability();
+        assert_eq!(avail.action_hint, AuthActionHint::StartOAuth);
+        assert!(avail.can_authenticate);
+
+        // Authenticating → None
+        registry.start_authentication("auth-plugin").unwrap();
+        let avail = registry.get("auth-plugin").unwrap().auth_availability();
+        assert_eq!(avail.action_hint, AuthActionHint::None);
+        assert!(!avail.can_authenticate);
+
+        // Reset and authenticate
+        registry.update_auth_state("auth-plugin", AuthState::Unauthenticated);
+        registry.set_credentials(
+            "auth-plugin",
+            CredentialBinding {
+                plugin_id: "auth-plugin".to_string(),
+                provider: "github".to_string(),
+                access_token: "tok".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                scopes: vec![],
+            },
+        );
+        let avail = registry.get("auth-plugin").unwrap().auth_availability();
+        assert_eq!(avail.action_hint, AuthActionHint::None);
+        assert!(!avail.can_authenticate);
+
+        // Expired → RefreshToken
+        registry.mark_auth_expired("auth-plugin");
+        let avail = registry.get("auth-plugin").unwrap().auth_availability();
+        assert_eq!(avail.action_hint, AuthActionHint::RefreshToken);
+        assert!(avail.can_authenticate);
+
+        // Revoked → Reauthenticate
+        registry.mark_auth_revoked("auth-plugin");
+        let avail = registry.get("auth-plugin").unwrap().auth_availability();
+        assert_eq!(avail.action_hint, AuthActionHint::Reauthenticate);
+        assert!(avail.can_authenticate);
+    }
+
+    // ---- Task 3.2: Tests for direct client-started auth flow behavior ----
+
+    #[test]
+    fn test_begin_auth_flow_success() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        let request = registry.begin_auth_flow("auth-plugin").unwrap();
+        assert_eq!(request.plugin_id, "auth-plugin");
+        assert_eq!(request.provider, "github");
+        assert_eq!(request.scopes, vec!["repo"]);
+        assert!(request.authorization_url.contains("github"));
+        assert!(request.request_id.starts_with("auth-auth-plugin-"));
+
+        // State should be Authenticating.
+        let state = registry.get("auth-plugin").unwrap();
+        assert_eq!(state.auth_state, AuthState::Authenticating);
+    }
+
+    #[test]
+    fn test_begin_auth_flow_already_authenticating() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        registry.start_authentication("auth-plugin").unwrap();
+        let result = registry.begin_auth_flow("auth-plugin");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already in progress"));
+    }
+
+    #[test]
+    fn test_begin_auth_flow_already_authenticated() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        registry.set_credentials(
+            "auth-plugin",
+            CredentialBinding {
+                plugin_id: "auth-plugin".to_string(),
+                provider: "github".to_string(),
+                access_token: "tok".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                scopes: vec![],
+            },
+        );
+
+        let result = registry.begin_auth_flow("auth-plugin");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Already authenticated"));
+    }
+
+    #[test]
+    fn test_begin_auth_flow_plugin_not_found() {
+        let registry = PluginRegistry::new();
+        let result = registry.begin_auth_flow("nonexistent");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn test_begin_auth_flow_no_auth_required() {
+        let registry = PluginRegistry::new();
+        registry.register(create_test_config("no-auth"));
+        registry.update_health("no-auth", PluginHealth::Healthy);
+        registry.set_manifest("no-auth", create_test_manifest(vec![make_tool("t1", None)]));
+
+        let result = registry.begin_auth_flow("no-auth");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("does not require authentication"));
+    }
+
+    #[test]
+    fn test_complete_auth_flow_success() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        let request = registry.begin_auth_flow("auth-plugin").unwrap();
+
+        let response = crate::plugin::auth::AuthInteractionResponse {
+            request_id: request.request_id,
+            result: crate::plugin::auth::AuthInteractionResult::Success {
+                code: "auth-code-123".to_string(),
+                state: None,
+            },
+        };
+
+        let transition = registry
+            .complete_auth_flow("auth-plugin", response)
+            .unwrap();
+        assert_eq!(transition.auth_id, "auth-plugin");
+        assert_eq!(transition.previous_state, AuthState::Authenticating);
+        assert_eq!(transition.new_state, AuthState::Authenticated);
+
+        // Verify credentials were stored.
+        let state = registry.get("auth-plugin").unwrap();
+        assert_eq!(state.auth_state, AuthState::Authenticated);
+        assert!(state.credentials.is_some());
+    }
+
+    #[test]
+    fn test_complete_auth_flow_denied() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        registry.begin_auth_flow("auth-plugin").unwrap();
+
+        let response = crate::plugin::auth::AuthInteractionResponse {
+            request_id: "test".to_string(),
+            result: crate::plugin::auth::AuthInteractionResult::Denied {
+                reason: "User refused".to_string(),
+            },
+        };
+
+        let transition = registry
+            .complete_auth_flow("auth-plugin", response)
+            .unwrap();
+        assert_eq!(transition.previous_state, AuthState::Authenticating);
+        assert_eq!(transition.new_state, AuthState::Unauthenticated);
+    }
+
+    #[test]
+    fn test_complete_auth_flow_cancelled() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        registry.begin_auth_flow("auth-plugin").unwrap();
+
+        let response = crate::plugin::auth::AuthInteractionResponse {
+            request_id: "test".to_string(),
+            result: crate::plugin::auth::AuthInteractionResult::Cancelled,
+        };
+
+        let transition = registry
+            .complete_auth_flow("auth-plugin", response)
+            .unwrap();
+        assert_eq!(transition.previous_state, AuthState::Authenticating);
+        assert_eq!(transition.new_state, AuthState::Unauthenticated);
+    }
+
+    #[test]
+    fn test_complete_auth_flow_not_in_authenticating_state() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        // Try to complete without starting.
+        let response = crate::plugin::auth::AuthInteractionResponse {
+            request_id: "test".to_string(),
+            result: crate::plugin::auth::AuthInteractionResult::Success {
+                code: "code".to_string(),
+                state: None,
+            },
+        };
+
+        let result = registry.complete_auth_flow("auth-plugin", response);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not in authenticating state"));
+    }
+
+    // ---- Task 3.3: Tests confirming plugin availability updates after
+    //      auth transitions ----
+
+    #[test]
+    fn test_availability_updates_after_auth_success() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        // Before auth: gated tool is unavailable.
+        let summary = registry.recompute_availability("auth-plugin").unwrap();
+        assert_eq!(summary.available_tools, 0);
+        assert!(!summary.authenticated);
+
+        // Complete auth flow successfully.
+        registry.begin_auth_flow("auth-plugin").unwrap();
+        let response = crate::plugin::auth::AuthInteractionResponse {
+            request_id: "test".to_string(),
+            result: crate::plugin::auth::AuthInteractionResult::Success {
+                code: "code".to_string(),
+                state: None,
+            },
+        };
+        registry
+            .complete_auth_flow("auth-plugin", response)
+            .unwrap();
+
+        // After auth: gated tool should now be available.
+        let summary = registry.recompute_availability("auth-plugin").unwrap();
+        assert_eq!(summary.available_tools, 1);
+        assert!(summary.authenticated);
+        assert!(summary.per_tool[0].available);
+    }
+
+    #[test]
+    fn test_availability_updates_after_auth_denied() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        // Before auth: gated tool is unavailable.
+        let summary = registry.recompute_availability("auth-plugin").unwrap();
+        assert_eq!(summary.available_tools, 0);
+
+        // Complete auth flow with denial.
+        registry.begin_auth_flow("auth-plugin").unwrap();
+        let response = crate::plugin::auth::AuthInteractionResponse {
+            request_id: "test".to_string(),
+            result: crate::plugin::auth::AuthInteractionResult::Denied {
+                reason: "refused".to_string(),
+            },
+        };
+        registry
+            .complete_auth_flow("auth-plugin", response)
+            .unwrap();
+
+        // After denial: tool still unavailable.
+        let summary = registry.recompute_availability("auth-plugin").unwrap();
+        assert_eq!(summary.available_tools, 0);
+        assert!(!summary.authenticated);
+    }
+
+    #[test]
+    fn test_availability_updates_after_credential_clear() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        // Authenticate first.
+        registry.set_credentials(
+            "auth-plugin",
+            CredentialBinding {
+                plugin_id: "auth-plugin".to_string(),
+                provider: "github".to_string(),
+                access_token: "tok".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                scopes: vec![],
+            },
+        );
+        let summary = registry.recompute_availability("auth-plugin").unwrap();
+        assert_eq!(summary.available_tools, 1);
+
+        // Clear credentials → tool becomes unavailable again.
+        registry.clear_credentials("auth-plugin");
+        let summary = registry.recompute_availability("auth-plugin").unwrap();
+        assert_eq!(summary.available_tools, 0);
+        assert!(!summary.authenticated);
+    }
+
+    #[test]
+    fn test_availability_updates_after_auth_expiry() {
+        let registry = PluginRegistry::new();
+        setup_auth_plugin(&registry, "auth-plugin");
+
+        // Authenticate first.
+        registry.set_credentials(
+            "auth-plugin",
+            CredentialBinding {
+                plugin_id: "auth-plugin".to_string(),
+                provider: "github".to_string(),
+                access_token: "tok".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                scopes: vec![],
+            },
+        );
+        assert_eq!(
+            registry
+                .recompute_availability("auth-plugin")
+                .unwrap()
+                .available_tools,
+            1
+        );
+
+        // Expire auth → tool becomes unavailable.
+        registry.mark_auth_expired("auth-plugin");
+        let summary = registry.recompute_availability("auth-plugin").unwrap();
+        assert_eq!(summary.available_tools, 0);
+        assert!(!summary.authenticated);
     }
 }

@@ -66,6 +66,11 @@ impl Session {
         });
     }
 
+    pub fn add_system_structured_message<S: Into<String>>(&mut self, kind: S, payload: Value) {
+        self.messages
+            .push(Message::system_structured(kind, payload));
+    }
+
     pub fn last_message(&self) -> Option<&Message> {
         self.messages.last()
     }

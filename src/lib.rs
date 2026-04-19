@@ -282,7 +282,8 @@ pub use mcp::{
 pub use plugin::{
     auth::{
         AuthActionHint, AuthAvailability, AuthInteractionRequest, AuthInteractionResponse,
-        AuthInteractionResult, AuthState, CredentialBinding, OAuthProvider, OAuthRequirements,
+        AuthInteractionResult, AuthPrompt, AuthState, AuthStatusTransition, CredentialBinding,
+        OAuthProvider, OAuthRequirements,
     },
     config::{Checksum, ChecksumAlgorithm, PluginConfig as PluginSourceConfig, PluginSource},
     effective_tools::{
@@ -306,7 +307,13 @@ pub use iron_providers::{
 };
 
 #[allow(deprecated)]
-pub use events::{PendingCallInfo, TurnEvent, TurnId, TurnOutcome, TurnStatus};
+pub use events::{
+    ApprovalCallInfo, ApprovalDecision, ApprovalInteractionInfo, ApprovalInteractionResolution,
+    ApprovalVerdict, ChoiceInteractionInfo, ChoiceInteractionResolution, ChoiceItem,
+    ChoiceResolutionItem, ChoiceResolutionRecord, ChoiceResolutionStatus, ChoiceSelectionMode,
+    InteractionResolution, InteractionSource, PendingCallInfo, PendingInteractionInfo,
+    PendingInteractionPayload, TurnEvent, TurnId, TurnOutcome, TurnStatus,
+};
 #[allow(deprecated)]
 pub use turn::{TurnEvents, TurnHandle};
 
@@ -314,12 +321,16 @@ pub use turn::{TurnEvents, TurnHandle};
 pub mod prelude {
     #[allow(deprecated)]
     pub use crate::{
-        AgentConnection, AgentEvent, AgentLoop, AgentSession, ApprovalStrategy, Config,
-        ConfigSource, ContentBlock, ContextWindowPolicy, FacadeToolStatus, GenerationConfig,
-        IronAgent, LoopError, LoopResult, Message, OpenAiConfig, OpenAiConfigSource,
-        OpenAiProvider, PendingCallInfo, PermissionVerdict, PromptOutcome, Provider,
-        RuntimeConfigSource, Session, SessionHandle, SessionId, SessionRuntime, StreamEvent, Tool,
-        ToolDefinition, ToolPolicy, ToolRegistry, Transcript, TurnEvent, TurnEvents, TurnHandle,
-        TurnId, TurnOutcome, TurnStatus,
+        AgentConnection, AgentEvent, AgentLoop, AgentSession, ApprovalCallInfo,
+        ApprovalDecision, ApprovalInteractionInfo, ApprovalInteractionResolution,
+        ApprovalStrategy, ApprovalVerdict, ChoiceInteractionInfo, ChoiceInteractionResolution,
+        ChoiceItem, ChoiceResolutionItem, ChoiceResolutionRecord, ChoiceResolutionStatus,
+        ChoiceSelectionMode, Config, ConfigSource, ContentBlock, ContextWindowPolicy,
+        FacadeToolStatus, GenerationConfig, InteractionResolution, InteractionSource, IronAgent,
+        LoopError, LoopResult, Message, OpenAiConfig, OpenAiConfigSource, OpenAiProvider,
+        PendingCallInfo, PendingInteractionInfo, PendingInteractionPayload, PermissionVerdict,
+        PromptOutcome, Provider, RuntimeConfigSource, Session, SessionHandle, SessionId,
+        SessionRuntime, StreamEvent, Tool, ToolDefinition, ToolPolicy, ToolRegistry, Transcript,
+        TurnEvent, TurnEvents, TurnHandle, TurnId, TurnOutcome, TurnStatus,
     };
 }

@@ -2,9 +2,9 @@
 use futures::stream::{self, BoxStream};
 use futures::StreamExt;
 use iron_core::{
-    tool::FunctionTool, Config, LoopError, PendingCallInfo, Provider, ProviderEvent, Session,
-    SessionHandle, SessionRuntime, ToolDefinition, ToolRegistry, TurnEvent, TurnEvents,
-    TurnOutcome, TurnStatus,
+    tool::FunctionTool, Config, InteractionSource, LoopError, PendingInteractionPayload,
+    Provider, ProviderEvent, Session, SessionHandle, SessionRuntime, ToolDefinition,
+    ToolRegistry, TurnEvent, TurnEvents, TurnOutcome, TurnStatus,
 };
 use iron_providers::{InferenceRequest, ToolCall};
 use serde_json::json;
@@ -224,16 +224,22 @@ async fn approval_flow_approve_tool() {
         collected.push(event.clone());
         if let TurnEvent::ApprovalRequired { call_id, .. } = &event {
             assert_eq!(call_id, "c1");
-            assert_eq!(
-                th.status(),
-                TurnStatus::WaitingForApproval {
-                    pending: vec![PendingCallInfo {
-                        call_id: "c1".into(),
-                        tool_name: "danger".into(),
-                        arguments: json!({"path": "/etc"}),
-                    }]
+            // Verify the turn is waiting for an interaction with an approval payload
+            let status = th.status();
+            match &status {
+                TurnStatus::WaitingForInteraction { pending } => {
+                    assert_eq!(pending.source, InteractionSource::Runtime);
+                    match &pending.payload {
+                        PendingInteractionPayload::Approval(approval) => {
+                            assert_eq!(approval.calls.len(), 1);
+                            assert_eq!(approval.calls[0].call_id, "c1");
+                            assert_eq!(approval.calls[0].tool_name, "danger");
+                        }
+                        other => panic!("Expected approval payload, got {:?}", other),
+                    }
                 }
-            );
+                other => panic!("Expected WaitingForInteraction, got {:?}", other),
+            }
             th.approve("c1").unwrap();
         }
         if matches!(event, TurnEvent::Finished { .. }) {

@@ -54,6 +54,22 @@ pub enum LoopError {
     #[error("No pending approval for call_id: {call_id}")]
     ApprovalNotFound { call_id: String },
 
+    /// Interaction command issued while turn is not waiting
+    #[error("Turn is not waiting for an interaction")]
+    NotWaitingForInteraction,
+
+    /// Interaction command referenced an unknown interaction_id
+    #[error("No pending interaction for interaction_id: {interaction_id}")]
+    InteractionNotFound { interaction_id: String },
+
+    /// Interaction resolution kind does not match the pending interaction kind
+    #[error("Interaction resolution kind mismatch for interaction_id: {interaction_id}")]
+    InteractionKindMismatch { interaction_id: String },
+
+    /// Interaction resolution is invalid (e.g. bad option IDs, wrong selection count)
+    #[error("Invalid interaction resolution: {message}")]
+    InvalidInteractionResolution { message: String },
+
     /// The session has been closed
     #[error("Session has been closed")]
     SessionClosed,

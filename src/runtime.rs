@@ -7,7 +7,7 @@ use crate::{
     ephemeral::EphemeralTurn,
     error::RuntimeError,
     mcp::{McpConnectionManager, McpServerRegistry, ReconnectConfig, SessionToolCatalog},
-    plugin::auth::CredentialBinding,
+    plugin::auth::{AuthInteractionRequest, AuthInteractionResponse, AuthStatusTransition, CredentialBinding},
     plugin::effective_tools::{EffectivePluginToolView, SessionPluginToolSummary},
     plugin::registry::{PluginAvailabilitySummary, PluginRegistry},
     plugin::status::{PluginInfo, PluginStatus},
@@ -672,6 +672,14 @@ impl IronRuntime {
             .collect()
     }
 
+    /// Get auth prompts for all plugins that require authentication.
+    ///
+    /// Returns a list of [`AuthPrompt`](crate::plugin::auth::AuthPrompt)
+    /// values for every registered plugin that declares OAuth requirements.
+    pub fn get_auth_prompts(&self) -> Vec<crate::plugin::auth::AuthPrompt> {
+        self.inner.plugin_registry.read().unwrap().get_auth_prompts()
+    }
+
     /// Get the runtime status of a single plugin.
     ///
     /// Returns `None` if the plugin is not registered.
@@ -699,6 +707,52 @@ impl IronRuntime {
             .write()
             .unwrap()
             .clear_credentials(plugin_id);
+    }
+
+    /// Start a direct client-initiated auth flow for a plugin.
+    ///
+    /// Validates that the plugin exists, requires auth, and is in a state
+    /// that allows starting authentication.  Returns an
+    /// [`AuthInteractionRequest`] that the client should act on (e.g. open
+    /// a browser to the authorization URL).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plugin is not found, does not require auth,
+    /// is already authenticating, or is already authenticated.
+    pub fn begin_plugin_auth_flow(
+        &self,
+        plugin_id: &str,
+    ) -> Result<AuthInteractionRequest, String> {
+        self.inner
+            .plugin_registry
+            .write()
+            .unwrap()
+            .begin_auth_flow(plugin_id)
+    }
+
+    /// Complete a direct client-initiated auth flow for a plugin.
+    ///
+    /// Processes the client's [`AuthInteractionResponse`].  On success,
+    /// stores credentials and transitions to `Authenticated`.  On denial,
+    /// failure, or cancellation, transitions back to `Unauthenticated`.
+    ///
+    /// Returns the [`AuthStatusTransition`] describing the state change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plugin is not found or is not in the
+    /// `Authenticating` state.
+    pub fn complete_plugin_auth_flow(
+        &self,
+        plugin_id: &str,
+        response: AuthInteractionResponse,
+    ) -> Result<AuthStatusTransition, String> {
+        self.inner
+            .plugin_registry
+            .write()
+            .unwrap()
+            .complete_auth_flow(plugin_id, response)
     }
 
     /// Get a session-scoped summary of plugin tool availability.

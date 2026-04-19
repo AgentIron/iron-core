@@ -318,6 +318,19 @@ impl AgentLoop {
                         session.add_tool_result(call.call_id, call.tool_name, error_result);
                     }
                 }
+                ProviderEvent::ChoiceRequest { request } => {
+                    events.push(StreamEvent::error(format!(
+                        "Legacy AgentLoop does not support model-originated choice prompts yet: {}",
+                        request.prompt
+                    )));
+                    if !assistant_output.is_empty() {
+                        session.add_assistant_message(assistant_output);
+                    }
+                    return Ok(ProviderStep {
+                        turn_complete: true,
+                        tool_calls: Vec::new(),
+                    });
+                }
                 ProviderEvent::Complete => {
                     turn_complete = true;
                 }

@@ -84,12 +84,24 @@ The runtime SHALL provide concrete transport support for configured MCP servers 
 - **THEN** the runtime correlates the server response to the initiating MCP request sufficiently to avoid accepting unrelated stream events as a successful response
 
 ### Requirement: Client-visible MCP inspection and session control APIs
-The system SHALL provide client-visible APIs to inspect runtime MCP inventory and to enable or disable configured MCP servers for a session. The system SHALL expose enough state for clients to distinguish runtime server health from session enablement intent.
+The system SHALL provide client-visible APIs to inspect runtime MCP inventory and to enable or disable configured MCP servers for a session. The system SHALL expose enough state for clients to distinguish runtime server health from session enablement intent. When the runtime renders prompt/runtime context for a model request, the displayed working directory and workspace roots SHALL reflect the configured builtin tool roots when such roots are available, rather than the process current directory alone.
 
 #### Scenario: Public effective-tool inspection matches execution-visible tools
 - **WHEN** a client requests the effective tools visible for a session
 - **THEN** the returned tool definitions come from the same session-effective runtime tool surface used by prompt construction and tool execution
 - **THEN** the inspection API does not diverge from actual MCP prompt visibility for that session
+
+#### Scenario: Prompt runtime context uses configured primary root as working directory
+- **WHEN** builtin tool roots are configured
+- **THEN** the runtime context displays the first configured root as the working directory
+
+#### Scenario: Prompt runtime context exposes all configured roots as workspace roots
+- **WHEN** multiple builtin tool roots are configured
+- **THEN** the runtime context includes all configured roots in its workspace root list
+
+#### Scenario: Prompt runtime context falls back to process current directory when no roots are configured
+- **WHEN** no builtin tool roots are configured
+- **THEN** the runtime context uses the process current directory as the displayed working directory
 
 ### Requirement: MCP state is excluded from handoff portability
 Handoff export and import SHALL exclude runtime MCP inventory and session MCP enablement state. Importing a handoff bundle SHALL NOT automatically enable, disable, configure, or assume availability of MCP servers on the destination runtime.
@@ -117,4 +129,3 @@ Publicly exposed MCP helper types and APIs SHALL either execute through the real
 - **WHEN** a caller uses a public MCP helper type that is not wired to the runtime-owned execution path
 - **THEN** the helper is either not publicly exposed for execution or returns a clear unsupported error
 - **THEN** the helper does not return a fabricated tool result that could be mistaken for a real MCP server response
-

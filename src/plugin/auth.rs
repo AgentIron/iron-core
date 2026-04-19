@@ -141,6 +141,60 @@ pub struct AuthInteractionRequest {
     pub code_verifier: Option<String>,
 }
 
+/// Structured auth prompt exposed to clients for rendering.
+///
+/// The runtime produces this from plugin auth requirements and current state
+/// so that clients can present a consistent auth UX without routing through
+/// the model.  The `auth_id` is the plugin identifier; `state` reflects the
+/// current auth lifecycle position; `title` and `description` give the client
+/// enough context to render a meaningful prompt.
+///
+/// # Example
+///
+/// ```json
+/// {
+///   "auth_id": "plugin:github",
+///   "state": "unauthenticated",
+///   "title": "Connect GitHub",
+///   "description": "This plugin needs GitHub access before it can continue."
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuthPrompt {
+    /// Plugin identifier that requires authentication.
+    pub auth_id: String,
+    /// Current authentication state.
+    pub state: AuthState,
+    /// Human-readable title for the auth prompt (e.g. "Connect GitHub").
+    pub title: String,
+    /// Explanation of why authentication is needed.
+    pub description: String,
+}
+
+/// Notification that an auth state transition occurred.
+///
+/// Emitted by the runtime whenever a plugin's auth state changes so that
+/// clients and sessions can observe the transition without polling.
+///
+/// # Example
+///
+/// ```json
+/// {
+///   "auth_id": "plugin:github",
+///   "previous_state": "unauthenticated",
+///   "new_state": "authenticated"
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuthStatusTransition {
+    /// Plugin identifier whose auth state changed.
+    pub auth_id: String,
+    /// Auth state before the transition.
+    pub previous_state: AuthState,
+    /// Auth state after the transition.
+    pub new_state: AuthState,
+}
+
 /// Client-auth interaction response
 ///
 /// Clients send this back to the runtime after user interaction.

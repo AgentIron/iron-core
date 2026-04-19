@@ -17,10 +17,16 @@ use futures::stream::{self, BoxStream};
 use futures::StreamExt;
 use iron_core::{
     config::ApprovalStrategy,
-    facade::{AgentEvent, FacadeToolStatus, PermissionVerdict, PromptOutcome},
+    facade::{
+        AgentEvent, FacadeToolStatus, PermissionVerdict, PromptEvent, PromptOutcome,
+        ToolResultStatus,
+    },
     tool::{FunctionTool, ToolDefinition},
-    Config, ConnectionId, ContentBlock, DurableSession, EphemeralTurn, IronAgent, IronRuntime,
-    Provider, ProviderEvent, SessionId, ToolRecordStatus, ToolTerminalOutcome, TurnPhase,
+    AuthInteractionResponse, AuthInteractionResult, AuthState, Config, ConnectionId, ContentBlock,
+    DurableSession, EphemeralTurn, IronAgent, IronRuntime, OAuthRequirements, PluginHealth,
+    PluginIdentity, PluginManifest, PluginPublisher, PluginSource, PluginSourceConfig,
+    PresentationMetadata, Provider, ProviderEvent, SessionId,
+    ToolAuthRequirements, ToolRecordStatus, ToolTerminalOutcome, TurnPhase,
 };
 use iron_providers::{InferenceRequest, ToolCall};
 use serde_json::json;
@@ -96,6 +102,62 @@ where
         .expect("failed to build current_thread runtime");
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt, future)
+}
+
+fn register_test_auth_plugin(agent: &IronAgent, plugin_id: &str) {
+    agent.register_plugin(PluginSourceConfig {
+        id: plugin_id.to_string(),
+        source: PluginSource::LocalPath {
+            path: "/dev/null".into(),
+        },
+        enabled_by_default: true,
+    });
+
+    let registry = agent.plugin_registry();
+    registry.update_health(plugin_id, PluginHealth::Healthy);
+    registry.set_manifest(
+        plugin_id,
+        PluginManifest {
+            identity: PluginIdentity {
+                id: format!("com.test.{plugin_id}"),
+                name: "Auth Test Plugin".to_string(),
+                version: "1.0.0".to_string(),
+            },
+            publisher: PluginPublisher {
+                name: "Test".to_string(),
+                url: None,
+                contact: None,
+            },
+            presentation: PresentationMetadata {
+                description: "Auth test plugin".to_string(),
+                long_description: None,
+                icon: None,
+                category: None,
+                keywords: vec![],
+            },
+            network_policy: iron_core::PluginNetworkPolicy::Wildcard,
+            auth: Some(OAuthRequirements {
+                provider: "github".to_string(),
+                provider_name: "GitHub".to_string(),
+                scopes: vec!["repo".to_string()],
+                authorization_endpoint: Some(
+                    "https://github.com/login/oauth/authorize".to_string(),
+                ),
+                token_endpoint: None,
+            }),
+            tools: vec![iron_core::ExportedTool {
+                name: "gated_tool".to_string(),
+                description: "Gated tool".to_string(),
+                input_schema: json!({"type":"object"}),
+                requires_approval: false,
+                auth_requirements: Some(ToolAuthRequirements {
+                    scopes: vec![],
+                    available_unauthenticated: false,
+                }),
+            }],
+            api_version: "1.0".to_string(),
+        },
+    );
 }
 
 // ===================================================================
@@ -1950,7 +2012,7 @@ fn unit_schema_validate_bad_schema() {
 // 11. Stream-first facade tests (Task 4.3)
 // ===================================================================
 
-use iron_core::{PromptEvent, PromptStatus, ToolResultStatus};
+use iron_core::PromptStatus;
 
 #[test]
 fn stream_prompt_emits_ordered_events() {
@@ -2191,6 +2253,142 @@ fn stream_approval_approve_executes_tool() {
             has_completed_result,
             "approved tool should produce ToolResult(Completed)"
         );
+    });
+}
+
+#[test]
+fn session_auth_flow_emits_auth_state_change_events() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new("auth_hold", "risky", json!({})),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![ProviderEvent::Complete],
+        ]);
+        let agent = IronAgent::new(
+            Config::default().with_approval_strategy(ApprovalStrategy::PerTool),
+            provider,
+        );
+        agent.register_tool(FunctionTool::new(
+            ToolDefinition::new("risky", "risky", json!({})).with_approval(true),
+            |_| Ok(json!("ok")),
+        ));
+        register_test_auth_plugin(&agent, "auth-plugin");
+
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        let (handle, mut events) = session.prompt_stream("go");
+        let mut collected = Vec::new();
+        let mut auth_started = false;
+
+        while let Some(event) = events.next().await {
+            collected.push(event.clone());
+            if let PromptEvent::ApprovalRequest { ref call_id, .. } = event {
+                if !auth_started {
+                    let request = session.start_auth_flow("auth-plugin").unwrap();
+                    assert_eq!(request.plugin_id, "auth-plugin");
+                    assert_eq!(request.provider, "github");
+
+                    let transition = session
+                        .complete_auth_flow(
+                            "auth-plugin",
+                            AuthInteractionResponse {
+                                request_id: request.request_id,
+                                result: AuthInteractionResult::Success {
+                                    code: "auth-code-123".to_string(),
+                                    state: None,
+                                },
+                            },
+                        )
+                        .unwrap();
+                    assert_eq!(transition.previous_state, AuthState::Authenticating);
+                    assert_eq!(transition.new_state, AuthState::Authenticated);
+
+                    handle.approve(call_id).unwrap();
+                    auth_started = true;
+                }
+            }
+            if matches!(event, PromptEvent::Complete { .. }) {
+                break;
+            }
+        }
+
+        assert!(collected.iter().any(|event| {
+            matches!(
+                event,
+                PromptEvent::AuthStateChange {
+                    auth_id,
+                    previous_state: AuthState::Unauthenticated,
+                    new_state: AuthState::Authenticating,
+                } if auth_id == "auth-plugin"
+            )
+        }));
+        assert!(collected.iter().any(|event| {
+            matches!(
+                event,
+                PromptEvent::AuthStateChange {
+                    auth_id,
+                    previous_state: AuthState::Authenticating,
+                    new_state: AuthState::Authenticated,
+                } if auth_id == "auth-plugin"
+            )
+        }));
+    });
+}
+
+#[test]
+fn session_auth_flow_updates_client_visible_availability() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![ProviderEvent::Complete]]);
+        let agent = IronAgent::new(Config::default(), provider);
+        register_test_auth_plugin(&agent, "auth-plugin");
+
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        let prompts = session.get_auth_prompts();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].state, AuthState::Unauthenticated);
+
+        let request = session.start_auth_flow("auth-plugin").unwrap();
+        let prompts = session.get_auth_prompts();
+        assert_eq!(prompts[0].state, AuthState::Authenticating);
+
+        session
+            .complete_auth_flow(
+                "auth-plugin",
+                AuthInteractionResponse {
+                    request_id: request.request_id,
+                    result: AuthInteractionResult::Success {
+                        code: "auth-code-456".to_string(),
+                        state: None,
+                    },
+                },
+            )
+            .unwrap();
+
+        let prompts = session.get_auth_prompts();
+        assert_eq!(prompts[0].state, AuthState::Authenticated);
+
+        let availability = agent.get_plugin_availability("auth-plugin").unwrap();
+        assert!(availability.authenticated);
+        assert_eq!(availability.available_tools, 1);
+
+        let status = agent.get_plugin_status("auth-plugin").unwrap();
+        assert_eq!(status.auth.state, AuthState::Authenticated);
+
+        let stored_credentials = agent
+            .plugin_registry()
+            .get("auth-plugin")
+            .and_then(|state| state.credentials)
+            .unwrap();
+        assert_eq!(stored_credentials.provider, "github");
+        assert_eq!(stored_credentials.scopes, vec!["repo".to_string()]);
+        assert_eq!(stored_credentials.access_token, "auth-code-456");
     });
 }
 

@@ -283,6 +283,9 @@ fn render_provider_message(msg: &Message) -> String {
         Message::Tool {
             tool_name, result, ..
         } => format!("tool_result {}: {}", tool_name, result),
+        Message::SystemStructured { kind, payload } => {
+            format!("runtime {}: {}", kind, payload)
+        }
     }
 }
 

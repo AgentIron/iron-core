@@ -243,6 +243,14 @@ impl PromptRunner {
                 ProviderEvent::Status { message } => {
                     trace!(%message, "Provider status");
                 }
+                ProviderEvent::ChoiceRequest { request } => {
+                    trace!(prompt = %request.prompt, "Choice requests are not supported by prompt runner");
+                    if !assistant_output.is_empty() {
+                        let mut session = durable.lock().unwrap();
+                        session.add_agent_text(&assistant_output);
+                    }
+                    return Err(agent_client_protocol::StopReason::EndTurn);
+                }
                 ProviderEvent::Complete => {}
                 ProviderEvent::Error { message: _ } => {
                     if !assistant_output.is_empty() {

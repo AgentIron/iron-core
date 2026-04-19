@@ -223,6 +223,19 @@ pub enum PromptEvent {
         /// Additional details about the activity.
         detail: Option<serde_json::Value>,
     },
+    /// An authentication state transition occurred for a plugin.
+    ///
+    /// Emitted when a plugin's auth state changes (e.g. from `Unauthenticated`
+    /// to `Authenticating`, or from `Authenticating` to `Authenticated`).
+    /// Clients can use this to update their auth UX without polling.
+    AuthStateChange {
+        /// The plugin whose auth state changed.
+        auth_id: String,
+        /// Previous auth state.
+        previous_state: crate::plugin::auth::AuthState,
+        /// New auth state.
+        new_state: crate::plugin::auth::AuthState,
+    },
     /// The prompt has completed.
     Complete {
         /// The final outcome of the prompt.
@@ -596,6 +609,16 @@ impl IronAgent {
         self.runtime.get_plugin_inventory()
     }
 
+    /// Get auth prompts for all plugins that require authentication.
+    ///
+    /// Returns a list of [`AuthPrompt`](crate::plugin::auth::AuthPrompt)
+    /// values for every registered plugin that declares OAuth requirements.
+    /// Clients can use this to render auth UX without polling individual
+    /// plugin statuses.
+    pub fn get_auth_prompts(&self) -> Vec<crate::plugin::auth::AuthPrompt> {
+        self.runtime.get_auth_prompts()
+    }
+
     /// Get the runtime status of a single plugin.
     ///
     /// Returns `None` if the plugin is not registered.
@@ -618,6 +641,43 @@ impl IronAgent {
     /// Clear credentials for a plugin and reset its auth state.
     pub fn clear_plugin_credentials(&self, plugin_id: &str) {
         self.runtime.clear_plugin_credentials(plugin_id);
+    }
+
+    /// Start a direct client-initiated auth flow for a plugin.
+    ///
+    /// Returns an [`AuthInteractionRequest`](crate::plugin::auth::AuthInteractionRequest)
+    /// that the client should act on (e.g. open a browser to the authorization URL).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plugin is not found, does not require auth,
+    /// is already authenticating, or is already authenticated.
+    pub fn start_auth_flow(
+        &self,
+        plugin_id: &str,
+    ) -> Result<crate::plugin::auth::AuthInteractionRequest, String> {
+        self.runtime.begin_plugin_auth_flow(plugin_id)
+    }
+
+    /// Complete a direct client-initiated auth flow for a plugin.
+    ///
+    /// Processes the client's response.  On success, stores credentials and
+    /// transitions to `Authenticated`.  On denial, failure, or cancellation,
+    /// transitions back to `Unauthenticated`.
+    ///
+    /// Returns the [`AuthStatusTransition`](crate::plugin::auth::AuthStatusTransition)
+    /// describing the state change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plugin is not found or is not in the
+    /// `Authenticating` state.
+    pub fn complete_auth_flow(
+        &self,
+        plugin_id: &str,
+        response: crate::plugin::auth::AuthInteractionResponse,
+    ) -> Result<crate::plugin::auth::AuthStatusTransition, String> {
+        self.runtime.complete_plugin_auth_flow(plugin_id, response)
     }
 
     /// Get a recomputed availability summary for a single plugin.
@@ -710,6 +770,22 @@ pub struct AgentConnection {
 }
 
 impl AgentConnection {
+    fn emit_auth_transition_to_all_streams(
+        &self,
+        auth_id: &str,
+        previous_state: crate::plugin::auth::AuthState,
+        new_state: crate::plugin::auth::AuthState,
+    ) {
+        let streams = self.active_streams.borrow();
+        for (_, state) in streams.iter() {
+            let _ = state.event_tx.send(PromptEvent::AuthStateChange {
+                auth_id: auth_id.to_string(),
+                previous_state,
+                new_state,
+            });
+        }
+    }
+
     fn new(runtime: IronRuntime) -> Self {
         let inner = Rc::new(IronConnection::new(runtime));
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -801,6 +877,73 @@ impl AgentConnection {
         self.inner
             .runtime()
             .sessions_for_connection(self.inner.id())
+    }
+
+    /// Start a direct client-initiated auth flow for a plugin.
+    ///
+    /// Returns an [`AuthInteractionRequest`](crate::plugin::auth::AuthInteractionRequest)
+    /// that the client should act on (e.g. open a browser to the authorization URL).
+    /// This does not require model mediation — the client triggers the flow directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plugin is not found, does not require auth,
+    /// is already authenticating, or is already authenticated.
+    pub fn start_auth_flow(
+        &self,
+        plugin_id: &str,
+    ) -> Result<crate::plugin::auth::AuthInteractionRequest, String> {
+        let previous_state = self
+            .inner
+            .runtime()
+            .get_plugin_status(plugin_id)
+            .map(|status| status.auth.state)
+            .unwrap_or(crate::plugin::auth::AuthState::Unauthenticated);
+        let request = self.inner.runtime().begin_plugin_auth_flow(plugin_id)?;
+        self.emit_auth_transition_to_all_streams(
+            plugin_id,
+            previous_state,
+            crate::plugin::auth::AuthState::Authenticating,
+        );
+        Ok(request)
+    }
+
+    /// Complete a direct client-initiated auth flow for a plugin.
+    ///
+    /// Processes the client's response.  On success, stores credentials and
+    /// transitions to `Authenticated`.  On denial, failure, or cancellation,
+    /// transitions back to `Unauthenticated`.
+    ///
+    /// Returns the [`AuthStatusTransition`](crate::plugin::auth::AuthStatusTransition)
+    /// describing the state change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plugin is not found or is not in the
+    /// `Authenticating` state.
+    pub fn complete_auth_flow(
+        &self,
+        plugin_id: &str,
+        response: crate::plugin::auth::AuthInteractionResponse,
+    ) -> Result<crate::plugin::auth::AuthStatusTransition, String> {
+        let transition = self
+            .inner
+            .runtime()
+            .complete_plugin_auth_flow(plugin_id, response)?;
+        self.emit_auth_transition_to_all_streams(
+            &transition.auth_id,
+            transition.previous_state,
+            transition.new_state,
+        );
+        Ok(transition)
+    }
+
+    /// Get auth prompts for all plugins that require authentication.
+    ///
+    /// Returns a list of [`AuthPrompt`](crate::plugin::auth::AuthPrompt)
+    /// values for every registered plugin that declares OAuth requirements.
+    pub fn get_auth_prompts(&self) -> Vec<crate::plugin::auth::AuthPrompt> {
+        self.inner.runtime().get_auth_prompts()
     }
 
     /// Create a new session from a handoff bundle.
@@ -1196,6 +1339,23 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
+    fn emit_auth_transition_to_stream(
+        &self,
+        auth_id: &str,
+        previous_state: crate::plugin::auth::AuthState,
+        new_state: crate::plugin::auth::AuthState,
+    ) {
+        let session_key = self.id.to_string();
+        let streams = self.active_streams.borrow();
+        if let Some(state) = streams.get(&session_key) {
+            let _ = state.event_tx.send(PromptEvent::AuthStateChange {
+                auth_id: auth_id.to_string(),
+                previous_state,
+                new_state,
+            });
+        }
+    }
+
     /// Get the unique identifier for this session.
     pub fn id(&self) -> SessionId {
         self.id
@@ -1613,6 +1773,67 @@ impl AgentSession {
             .lock()
             .map(|s| s.list_enabled_plugins())
             .unwrap_or_default()
+    }
+
+    /// Start a direct client-initiated auth flow for a plugin.
+    ///
+    /// Convenience wrapper that delegates to the connection's
+    /// [`AgentConnection::start_auth_flow`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plugin is not found, does not require auth,
+    /// is already authenticating, or is already authenticated.
+    pub fn start_auth_flow(
+        &self,
+        plugin_id: &str,
+    ) -> Result<crate::plugin::auth::AuthInteractionRequest, String> {
+        let previous_state = self
+            .connection
+            .runtime()
+            .get_plugin_status(plugin_id)
+            .map(|status| status.auth.state)
+            .unwrap_or(crate::plugin::auth::AuthState::Unauthenticated);
+        let request = self.connection.runtime().begin_plugin_auth_flow(plugin_id)?;
+        self.emit_auth_transition_to_stream(
+            plugin_id,
+            previous_state,
+            crate::plugin::auth::AuthState::Authenticating,
+        );
+        Ok(request)
+    }
+
+    /// Complete a direct client-initiated auth flow for a plugin.
+    ///
+    /// Convenience wrapper that delegates to the connection's
+    /// [`AgentConnection::complete_auth_flow`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plugin is not found or is not in the
+    /// `Authenticating` state.
+    pub fn complete_auth_flow(
+        &self,
+        plugin_id: &str,
+        response: crate::plugin::auth::AuthInteractionResponse,
+    ) -> Result<crate::plugin::auth::AuthStatusTransition, String> {
+        let transition = self
+            .connection
+            .runtime()
+            .complete_plugin_auth_flow(plugin_id, response)?;
+        self.emit_auth_transition_to_stream(
+            &transition.auth_id,
+            transition.previous_state,
+            transition.new_state,
+        );
+        Ok(transition)
+    }
+
+    /// Get auth prompts for all plugins that require authentication.
+    ///
+    /// Convenience wrapper that delegates to the runtime.
+    pub fn get_auth_prompts(&self) -> Vec<crate::plugin::auth::AuthPrompt> {
+        self.connection.runtime().get_auth_prompts()
     }
 
     /// Get a session-scoped summary of plugin tool availability.
