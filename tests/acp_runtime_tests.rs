@@ -1256,11 +1256,11 @@ fn keep_recent_parity_between_legacy_and_acp() {
     );
     assert!(result.is_ok());
     let request = result.unwrap();
-        assert_eq!(
-            request.context.transcript.messages.len(),
-            3,
-            "builder should prune to 3 messages"
-        );
+    assert_eq!(
+        request.context.transcript.messages.len(),
+        3,
+        "builder should prune to 3 messages"
+    );
 }
 
 // ===================================================================

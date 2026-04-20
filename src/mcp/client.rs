@@ -627,6 +627,7 @@ pub struct HttpMcpClient {
     url: String,
     headers: Option<HashMap<String, String>>,
     client: reqwest::Client,
+    bootstrap_mode: AtomicBool,
     connected: AtomicBool,
     request_counter: Arc<Mutex<u64>>,
 }
@@ -639,6 +640,7 @@ impl HttpMcpClient {
             url: config.url,
             headers: config.headers,
             client: reqwest::Client::new(),
+            bootstrap_mode: AtomicBool::new(true),
             connected: AtomicBool::new(false),
             request_counter: Arc::new(Mutex::new(0)),
         }
@@ -674,7 +676,9 @@ impl HttpMcpClient {
             // successful response with a null or absent `id`. Accept it only
             // when the response is unambiguous: no error, has a result, and
             // there is no conflicting ID present.
-            if rpc_response.id.is_none()
+            if method == "initialize"
+                && self.bootstrap_mode.load(Ordering::SeqCst)
+                && rpc_response.id.is_none()
                 && rpc_response.error.is_none()
                 && rpc_response.result.is_some()
             {
@@ -720,6 +724,7 @@ impl McpTransportClient for HttpMcpClient {
             .send_request("initialize", serde_json::to_value(request).unwrap())
             .await?;
 
+        self.bootstrap_mode.store(false, Ordering::SeqCst);
         self.connected.store(true, Ordering::SeqCst);
         Ok(result)
     }
@@ -1143,11 +1148,15 @@ pub fn create_transport_client(
             let client = StdioMcpClient::new(server_id.to_string(), config.clone())?;
             Ok(Box::new(client))
         }
-        McpTransport::Http { config: http_config } => Ok(Box::new(HttpMcpClient::new(
+        McpTransport::Http {
+            config: http_config,
+        } => Ok(Box::new(HttpMcpClient::new(
             server_id.to_string(),
             http_config.clone(),
         ))),
-        McpTransport::HttpSse { config: http_config } => Ok(Box::new(HttpSseMcpClient::new(
+        McpTransport::HttpSse {
+            config: http_config,
+        } => Ok(Box::new(HttpSseMcpClient::new(
             server_id.to_string(),
             http_config.clone(),
         ))),

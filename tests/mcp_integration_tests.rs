@@ -894,10 +894,7 @@ async fn read_http_request_with_body(
             break;
         }
         if let Some((key, value)) = line.split_once(':') {
-            headers.insert(
-                key.trim().to_ascii_lowercase(),
-                value.trim().to_string(),
-            );
+            headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
         }
     }
 
@@ -919,15 +916,11 @@ async fn read_http_request_with_body(
 }
 
 /// Start a fake HTTP server that captures request headers and responds to MCP initialize.
-async fn start_header_capture_http_server() -> (
-    u16,
-    Arc<tokio::sync::Mutex<Vec<HashMap<String, String>>>>,
-) {
+async fn start_header_capture_http_server(
+) -> (u16, Arc<tokio::sync::Mutex<Vec<HashMap<String, String>>>>) {
     use tokio::io::AsyncWriteExt;
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let captured_headers: Arc<tokio::sync::Mutex<Vec<HashMap<String, String>>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -974,6 +967,188 @@ async fn start_header_capture_http_server() -> (
     (port, captured_headers)
 }
 
+#[derive(Clone, Copy)]
+enum HttpResponseIdMode {
+    MatchRequest,
+    Null,
+    Absent,
+}
+
+async fn start_bootstrap_tolerance_http_server(
+    initialize_id_mode: HttpResponseIdMode,
+    tools_list_id_mode: HttpResponseIdMode,
+) -> u16 {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            tokio::spawn(async move {
+                let (_request_line, _headers, body) =
+                    read_http_request_with_body(&mut socket).await;
+
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let method = request
+                    .get("method")
+                    .and_then(|value| value.as_str())
+                    .expect("request should include method");
+                let request_id = request.get("id").and_then(|value| value.as_u64());
+
+                let response = match method {
+                    "initialize" => {
+                        let mut response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "result": {
+                                "protocolVersion": "2024-11-05",
+                                "capabilities": {},
+                                "serverInfo": {"name": "http-bootstrap", "version": "1.0"}
+                            }
+                        });
+                        match initialize_id_mode {
+                            HttpResponseIdMode::MatchRequest => {
+                                response["id"] = serde_json::json!(request_id)
+                            }
+                            HttpResponseIdMode::Null => response["id"] = serde_json::Value::Null,
+                            HttpResponseIdMode::Absent => {}
+                        }
+                        response
+                    }
+                    "tools/list" => {
+                        let mut response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "result": {
+                                "tools": [{
+                                    "name": "http_tool",
+                                    "description": "HTTP tool",
+                                    "inputSchema": {"type": "object", "properties": {}}
+                                }]
+                            }
+                        });
+                        match tools_list_id_mode {
+                            HttpResponseIdMode::MatchRequest => {
+                                response["id"] = serde_json::json!(request_id)
+                            }
+                            HttpResponseIdMode::Null => response["id"] = serde_json::Value::Null,
+                            HttpResponseIdMode::Absent => {}
+                        }
+                        response
+                    }
+                    other => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {"code": -32601, "message": format!("unknown method: {}", other)}
+                    }),
+                };
+
+                let response_body = serde_json::to_string(&response).unwrap();
+                let http_response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                let _ = socket.write_all(http_response.as_bytes()).await;
+            });
+        }
+    });
+
+    port
+}
+
+#[tokio::test]
+async fn test_http_mcp_client_initialize_accepts_absent_response_id() {
+    let port = start_bootstrap_tolerance_http_server(
+        HttpResponseIdMode::Absent,
+        HttpResponseIdMode::MatchRequest,
+    )
+    .await;
+
+    let config = McpServerConfig {
+        id: "http-absent-init-id".to_string(),
+        label: "HTTP absent initialize id".to_string(),
+        transport: McpTransport::Http {
+            config: HttpConfig::new(format!("http://127.0.0.1:{}", port)),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    };
+
+    let client = iron_core::mcp::create_transport_client("http-absent-init-id", &config)
+        .expect("client creation");
+
+    let result = client.initialize().await;
+    assert!(result.is_ok(), "initialize should succeed: {:?}", result);
+}
+
+#[tokio::test]
+async fn test_http_mcp_client_initialize_accepts_explicit_null_response_id() {
+    let port = start_bootstrap_tolerance_http_server(
+        HttpResponseIdMode::Null,
+        HttpResponseIdMode::MatchRequest,
+    )
+    .await;
+
+    let config = McpServerConfig {
+        id: "http-null-init-id".to_string(),
+        label: "HTTP null initialize id".to_string(),
+        transport: McpTransport::Http {
+            config: HttpConfig::new(format!("http://127.0.0.1:{}", port)),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    };
+
+    let client = iron_core::mcp::create_transport_client("http-null-init-id", &config)
+        .expect("client creation");
+
+    let result = client.initialize().await;
+    assert!(result.is_ok(), "initialize should succeed: {:?}", result);
+}
+
+#[tokio::test]
+async fn test_http_mcp_client_rejects_post_bootstrap_id_less_response() {
+    let port = start_bootstrap_tolerance_http_server(
+        HttpResponseIdMode::MatchRequest,
+        HttpResponseIdMode::Absent,
+    )
+    .await;
+
+    let config = McpServerConfig {
+        id: "http-post-bootstrap-idless".to_string(),
+        label: "HTTP post-bootstrap id-less response".to_string(),
+        transport: McpTransport::Http {
+            config: HttpConfig::new(format!("http://127.0.0.1:{}", port)),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    };
+
+    let client = iron_core::mcp::create_transport_client("http-post-bootstrap-idless", &config)
+        .expect("client creation");
+
+    let initialize = client.initialize().await;
+    assert!(
+        initialize.is_ok(),
+        "initialize should succeed before tools/list: {:?}",
+        initialize
+    );
+
+    let error = client
+        .list_tools()
+        .await
+        .expect_err("id-less post-bootstrap tools/list should be rejected");
+    assert!(
+        error.contains("Response ID mismatch"),
+        "expected ID mismatch error, got: {}",
+        error
+    );
+}
+
 #[tokio::test]
 async fn test_http_mcp_client_sends_accept_header() {
     let (port, captured_headers) = start_header_capture_http_server().await;
@@ -995,7 +1170,10 @@ async fn test_http_mcp_client_sends_accept_header() {
 
     // Verify the Accept header was sent
     let headers = captured_headers.lock().await;
-    assert!(!headers.is_empty(), "should have captured at least one request");
+    assert!(
+        !headers.is_empty(),
+        "should have captured at least one request"
+    );
     let request_headers = &headers[0];
     let accept = request_headers
         .get("accept")
@@ -1034,7 +1212,10 @@ async fn test_http_mcp_client_sends_custom_headers() {
 
     // Verify both Accept and custom headers were sent
     let headers = captured_headers.lock().await;
-    assert!(!headers.is_empty(), "should have captured at least one request");
+    assert!(
+        !headers.is_empty(),
+        "should have captured at least one request"
+    );
     let request_headers = &headers[0];
 
     let accept = request_headers

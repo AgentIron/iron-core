@@ -296,7 +296,8 @@ async fn execute_powershell(config: &BuiltinToolConfig, args: Value) -> RuntimeR
 }
 
 fn which_exists(cmd: &str) -> bool {
-    std::process::Command::new("which")
+    let lookup_cmd = if cfg!(windows) { "where" } else { "which" };
+    std::process::Command::new(lookup_cmd)
         .arg(cmd)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

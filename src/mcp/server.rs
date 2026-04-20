@@ -22,10 +22,7 @@ pub struct HttpConfig {
 impl HttpConfig {
     /// Create a new `HttpConfig` with the given URL and no custom headers.
     pub fn new(url: String) -> Self {
-        Self {
-            url,
-            headers: None,
-        }
+        Self { url, headers: None }
     }
 }
 
@@ -182,7 +179,10 @@ impl McpServerRegistry {
         let mut servers = self.servers.write();
         if let Some(state) = servers.get_mut(server_id) {
             if matches!(health, McpServerHealth::Connecting)
-                && matches!(state.health, McpServerHealth::Connected | McpServerHealth::Error)
+                && matches!(
+                    state.health,
+                    McpServerHealth::Connected | McpServerHealth::Error
+                )
             {
                 return;
             }

@@ -1,7 +1,9 @@
 //! Tests for MCP (Model Context Protocol) session-scoped support
 
 use futures::StreamExt;
-use iron_core::{config::McpConfig, Config, HttpConfig, IronAgent, McpServerConfig, McpTransport, SessionId};
+use iron_core::{
+    config::McpConfig, Config, HttpConfig, IronAgent, McpServerConfig, McpTransport, SessionId,
+};
 use iron_providers::{Provider, ProviderEvent};
 
 // Mock provider for testing
