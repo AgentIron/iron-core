@@ -19,6 +19,7 @@ pub mod lifecycle;
 pub mod manifest;
 pub mod network;
 pub mod registry;
+pub mod rich_output;
 pub mod session;
 pub mod status;
 pub mod wasm_host;

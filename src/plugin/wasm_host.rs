@@ -39,6 +39,7 @@
 
 use crate::plugin::lifecycle::PluginLoader;
 use crate::plugin::manifest::PluginManifest;
+use crate::plugin::rich_output::normalize_plugin_tool_result;
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -252,7 +253,8 @@ impl WasmHost {
                     return Err(WasmError::ExecutionFailed(msg.to_string()));
                 }
 
-                Ok(response.get("ok").cloned().unwrap_or(Value::Null))
+                let result = response.get("ok").cloned().unwrap_or(Value::Null);
+                normalize_plugin_tool_result(&plugin_id, &tool_name, result)
             })
             .await;
 
@@ -312,7 +314,8 @@ impl WasmHost {
             return Err(WasmError::ExecutionFailed(msg.to_string()));
         }
 
-        Ok(response.get("ok").cloned().unwrap_or(Value::Null))
+        let result = response.get("ok").cloned().unwrap_or(Value::Null);
+        normalize_plugin_tool_result(plugin_id, tool_name, result)
     }
 
     /// Check if a plugin is loaded in the WASM host.
