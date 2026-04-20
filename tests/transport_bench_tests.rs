@@ -34,9 +34,9 @@ impl Client for NopClient {
 
 fn make_runtime() -> IronRuntime {
     let config = Config::new().with_model("test-model");
-    let provider = OpenAiProvider::new(
-        OpenAiConfig::new("test-key".into()).with_model("test-model".to_string()),
-    );
+    let provider =
+        OpenAiProvider::new(OpenAiConfig::new("test-key".into()))
+            .expect("test provider config should be valid");
     IronRuntime::new(config, provider)
 }
 

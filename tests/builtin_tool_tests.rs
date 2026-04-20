@@ -542,7 +542,8 @@ fn smoke_test_register_all_builtin_tools_via_agent() {
     let config = iron_core::Config::default();
     let provider = iron_providers::OpenAiProvider::new(iron_providers::OpenAiConfig::new(
         "test-key".to_string(),
-    ));
+    ))
+    .expect("test provider config should be valid");
     let agent = iron_core::IronAgent::new(config, provider);
 
     let tmp = TempDir::new().unwrap();

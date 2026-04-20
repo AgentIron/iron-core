@@ -99,9 +99,6 @@ impl ActiveContextAccountant {
                     Message::Tool {
                         tool_name, result, ..
                     } => format!("{}: {}", tool_name, result),
-                    Message::SystemStructured { kind, payload } => {
-                        format!("runtime {}: {}", kind, payload)
-                    }
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -160,9 +157,6 @@ impl ActiveContextAccountant {
                 Message::Tool {
                     tool_name, result, ..
                 } => format!("{}: {}", tool_name, result),
-                Message::SystemStructured { kind, payload } => {
-                    format!("runtime {}: {}", kind, payload)
-                }
             })
             .collect::<Vec<_>>()
             .join("\n");

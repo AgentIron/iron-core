@@ -153,8 +153,8 @@ impl CompactionEngine {
         for event in events {
             match event {
                 ProviderEvent::Output { content } => output.push_str(&content),
-                ProviderEvent::Error { message } => {
-                    return Err(format!("Compaction provider error: {}", message));
+                ProviderEvent::Error { source } => {
+                    return Err(format!("Compaction provider error: {}", source));
                 }
                 _ => {}
             }
@@ -283,9 +283,6 @@ fn render_provider_message(msg: &Message) -> String {
         Message::Tool {
             tool_name, result, ..
         } => format!("tool_result {}: {}", tool_name, result),
-        Message::SystemStructured { kind, payload } => {
-            format!("runtime {}: {}", kind, payload)
-        }
     }
 }
 

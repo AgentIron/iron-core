@@ -10,12 +10,12 @@ readme = "README.md"
 repository = "https://github.com/AgentIron/iron-core"
 
 [dependencies]
-iron-providers = { path = "../iron-providers" }
+iron-providers = "0.1.3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "1"
+thiserror = "2"
 tracing = "0.1"
 futures = "0.3"
 pin-project = "1"
@@ -27,17 +27,17 @@ async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 # Schema validation
-jsonschema = "0.29"
+jsonschema = "0.46"
 
 # Plugin dependencies
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 extism = "1.21"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Built-in tool dependencies
 regex = "1"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 url = "2"
 
 # Ripgrep ecosystem — embedded search engine for glob/grep tools.
@@ -60,7 +60,7 @@ grep-regex = "0.1"
 # there, because crates.io rejects manifests containing git dependencies.
 #
 # Bump `rev` deliberately after verifying against the iron-core test suite.
-monty = { git = "https://github.com/pydantic/monty", rev = "2e9df4b508e8a9ac80f3a6a26ed680242d1f460d", optional = true }
+monty = { git = "https://github.com/pydantic/monty", tag = "v0.0.16", optional = true }
 num-bigint = { version = "0.4", optional = true }
 num-traits = { version = "0.2", optional = true }
 

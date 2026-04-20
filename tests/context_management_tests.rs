@@ -700,15 +700,15 @@ fn request_builder_keeps_compacted_context_when_recent_tail_is_pruned() {
     )
     .unwrap();
 
-    assert_eq!(request.transcript.messages.len(), 2);
+    assert_eq!(request.context.transcript.messages.len(), 2);
     assert!(matches!(
-        &request.transcript.messages[0],
+        &request.context.transcript.messages[0],
         Message::Assistant { content }
             if content.contains("[Compacted session context]")
                 && content.contains("Carry this forward")
     ));
     assert!(matches!(
-        &request.transcript.messages[1],
+        &request.context.transcript.messages[1],
         Message::User { content } if content == "latest"
     ));
 }
@@ -891,7 +891,7 @@ fn compaction_execute_handles_provider_error() {
 
         let provider =
             MockProvider::with_infer_responses(vec![vec![iron_providers::ProviderEvent::Error {
-                message: "Provider unavailable".into(),
+                source: iron_providers::ProviderError::general("Provider unavailable"),
             }]]);
 
         let result = CompactionEngine::execute(input, &provider, "gpt-4o").await;
@@ -1260,7 +1260,7 @@ fn tool_heavy_post_turn_compaction_shapes_future_requests() {
 
         let requests = provider.requests();
         let second_prompt_request = &requests[3];
-        let transcript = &second_prompt_request.transcript.messages;
+        let transcript = &second_prompt_request.context.transcript.messages;
 
         assert!(matches!(
             &transcript[0],
@@ -1342,7 +1342,7 @@ fn tool_heavy_hard_fit_compaction_shapes_future_request() {
 
         let requests = provider.requests();
         let second_prompt_request = &requests[3];
-        let transcript = &second_prompt_request.transcript.messages;
+        let transcript = &second_prompt_request.context.transcript.messages;
 
         assert!(matches!(
             &transcript[0],

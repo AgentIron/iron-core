@@ -289,7 +289,7 @@ impl PromptRunner {
                     return Err(agent_client_protocol::StopReason::EndTurn);
                 }
                 ProviderEvent::Complete => {}
-                ProviderEvent::Error { message: _ } => {
+                ProviderEvent::Error { source: _ } => {
                     if !assistant_output.is_empty() {
                         let mut session = durable.lock();
                         session.add_agent_text(&assistant_output);

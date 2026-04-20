@@ -1204,7 +1204,7 @@ fn keep_recent_prunes_acp_native_transcript() {
         let requests = provider.requests();
         assert!(!requests.is_empty());
         let last_request = requests.last().unwrap();
-        let msg_count = last_request.transcript.messages.len();
+        let msg_count = last_request.context.transcript.messages.len();
         assert!(
             msg_count <= 2,
             "expected at most 2 messages after KeepRecent(2), got {}",
@@ -1256,11 +1256,11 @@ fn keep_recent_parity_between_legacy_and_acp() {
     );
     assert!(result.is_ok());
     let request = result.unwrap();
-    assert_eq!(
-        request.transcript.messages.len(),
-        3,
-        "builder should prune to 3 messages"
-    );
+        assert_eq!(
+            request.context.transcript.messages.len(),
+            3,
+            "builder should prune to 3 messages"
+        );
 }
 
 // ===================================================================
@@ -1438,7 +1438,7 @@ fn denied_tool_call_replayed_in_subsequent_prompt_transcript() {
         let requests = provider.requests();
         assert!(requests.len() >= 2);
         let second_request = &requests[requests.len() - 1];
-        let transcript = &second_request.transcript;
+        let transcript = &second_request.context.transcript;
         let has_denied_call = transcript.messages.iter().any(|m| {
             matches!(m, iron_providers::Message::AssistantToolCall { call_id, tool_name, .. }
                 if call_id == "deny1" && tool_name == "risky_op")
@@ -1503,7 +1503,7 @@ fn cancelled_tool_call_replayed_in_subsequent_prompt_transcript() {
         let requests = provider.requests();
         assert!(requests.len() >= 2);
         let second_request = &requests[requests.len() - 1];
-        let transcript = &second_request.transcript;
+        let transcript = &second_request.context.transcript;
         let has_cancelled_call = transcript.messages.iter().any(|m| {
             matches!(m, iron_providers::Message::AssistantToolCall { call_id, .. } if call_id == "cancel1")
         });
@@ -1805,7 +1805,7 @@ fn schema_validation_failure_is_replayable() {
         let requests = provider.requests();
         assert!(requests.len() >= 2);
         let last_request = requests.last().unwrap();
-        let transcript = &last_request.transcript;
+        let transcript = &last_request.context.transcript;
         let has_failed_call = transcript.messages.iter().any(|m| {
             matches!(m, iron_providers::Message::AssistantToolCall { call_id, .. } if call_id == "sv4")
         });

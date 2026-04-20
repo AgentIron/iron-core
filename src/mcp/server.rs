@@ -154,6 +154,12 @@ impl McpServerRegistry {
     pub fn update_health(&self, server_id: &str, health: McpServerHealth) {
         let mut servers = self.servers.write();
         if let Some(state) = servers.get_mut(server_id) {
+            if matches!(health, McpServerHealth::Connecting)
+                && matches!(state.health, McpServerHealth::Connected | McpServerHealth::Error)
+            {
+                return;
+            }
+
             state.health = health;
             if health.is_usable() {
                 state.last_error = None;
