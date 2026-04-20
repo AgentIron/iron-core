@@ -3,7 +3,6 @@
 debug
 target
 llm_files
-.opencode
 
 *.pdb
 
