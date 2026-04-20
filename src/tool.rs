@@ -2,7 +2,7 @@
 //!
 //! Tool registration, execution, and approval management.
 
-use crate::error::LoopResult;
+use crate::error::RuntimeResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 /// Type alias for a tool execution future.
-pub type ToolFuture = Pin<Box<dyn Future<Output = LoopResult<Value>> + Send>>;
+pub type ToolFuture = Pin<Box<dyn Future<Output = RuntimeResult<Value>> + Send>>;
 
 /// Executable tool trait.
 ///
@@ -184,7 +184,7 @@ impl ToolRegistry {
 /// so they do not block the async orchestration runtime.
 pub struct FunctionTool {
     definition: ToolDefinition,
-    handler: Arc<dyn Fn(Value) -> LoopResult<Value> + Send + Sync>,
+    handler: Arc<dyn Fn(Value) -> RuntimeResult<Value> + Send + Sync>,
 }
 
 impl std::fmt::Debug for FunctionTool {
@@ -199,7 +199,7 @@ impl FunctionTool {
     /// Create a new function-backed tool.
     pub fn new<F>(definition: ToolDefinition, handler: F) -> Self
     where
-        F: Fn(Value) -> LoopResult<Value> + Send + Sync + 'static,
+        F: Fn(Value) -> RuntimeResult<Value> + Send + Sync + 'static,
     {
         Self {
             definition,
@@ -212,7 +212,7 @@ impl FunctionTool {
     where
         S1: Into<String>,
         S2: Into<String>,
-        F: Fn(Value) -> LoopResult<Value> + Send + Sync + 'static,
+        F: Fn(Value) -> RuntimeResult<Value> + Send + Sync + 'static,
     {
         let schema = serde_json::json!({
             "type": "object",
@@ -234,7 +234,7 @@ impl Tool for FunctionTool {
         Box::pin(async move {
             match tokio::task::spawn_blocking(move || handler(arguments)).await {
                 Ok(result) => result,
-                Err(e) => Err(crate::error::LoopError::tool_execution(e.to_string())),
+                Err(e) => Err(crate::error::RuntimeError::tool_execution(e.to_string())),
             }
         })
     }

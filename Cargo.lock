@@ -1953,6 +1953,7 @@ dependencies = [
  "monty",
  "num-bigint",
  "num-traits",
+ "parking_lot",
  "pin-project",
  "regex",
  "reqwest",
@@ -2316,7 +2317,7 @@ dependencies = [
 [[package]]
 name = "monty"
 version = "0.0.11"
-source = "git+https://github.com/pydantic/monty?branch=main#2e9df4b508e8a9ac80f3a6a26ed680242d1f460d"
+source = "git+https://github.com/pydantic/monty?rev=2e9df4b508e8a9ac80f3a6a26ed680242d1f460d#2e9df4b508e8a9ac80f3a6a26ed680242d1f460d"
 dependencies = [
  "ahash",
  "bytemuck",

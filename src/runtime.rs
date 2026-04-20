@@ -7,7 +7,9 @@ use crate::{
     ephemeral::EphemeralTurn,
     error::RuntimeError,
     mcp::{McpConnectionManager, McpServerRegistry, ReconnectConfig, SessionToolCatalog},
-    plugin::auth::{AuthInteractionRequest, AuthInteractionResponse, AuthStatusTransition, CredentialBinding},
+    plugin::auth::{
+        AuthInteractionRequest, AuthInteractionResponse, AuthStatusTransition, CredentialBinding,
+    },
     plugin::effective_tools::{EffectivePluginToolView, SessionPluginToolSummary},
     plugin::registry::{PluginAvailabilitySummary, PluginRegistry},
     plugin::status::{PluginInfo, PluginStatus},
@@ -15,10 +17,11 @@ use crate::{
     tool::ToolRegistry,
 };
 use iron_providers::Provider;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex, RwLock,
+    Arc,
 };
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -42,7 +45,7 @@ struct RuntimeInner {
 }
 
 struct ActivePrompt {
-    ephemeral: Arc<std::sync::Mutex<EphemeralTurn>>,
+    ephemeral: Arc<Mutex<EphemeralTurn>>,
 }
 
 struct RuntimeSession {
@@ -130,14 +133,13 @@ impl IronRuntime {
         }
 
         let runtime_default = self.inner.config.mcp.enabled_by_default;
-        let sessions = self.inner.sessions.read().unwrap();
+        let sessions = self.inner.sessions.read();
         for runtime_session in sessions.values() {
-            if let Ok(mut session) = runtime_session.session.lock() {
-                session
-                    .mcp_server_enablement
-                    .entry(server_id.to_string())
-                    .or_insert(runtime_default);
-            }
+            let mut session = runtime_session.session.lock();
+            session
+                .mcp_server_enablement
+                .entry(server_id.to_string())
+                .or_insert(runtime_default);
         }
     }
 
@@ -149,12 +151,11 @@ impl IronRuntime {
         }
 
         let runtime_default = self.inner.config.plugins.enabled_by_default;
-        let sessions = self.inner.sessions.read().unwrap();
+        let sessions = self.inner.sessions.read();
         for runtime_session in sessions.values() {
-            if let Ok(mut session) = runtime_session.session.lock() {
-                if session.is_plugin_enabled(plugin_id).is_none() {
-                    session.set_plugin_enabled(plugin_id, runtime_default);
-                }
+            let mut session = runtime_session.session.lock();
+            if session.is_plugin_enabled(plugin_id).is_none() {
+                session.set_plugin_enabled(plugin_id, runtime_default);
             }
         }
     }
@@ -169,6 +170,7 @@ impl IronRuntime {
         let (shutdown_tx, _) = watch::channel(false);
         let mcp_registry = McpServerRegistry::new();
         let mcp_connection_manager = Arc::new(McpConnectionManager::new(mcp_registry.clone()));
+        let plugin_max_memory = config.plugins.max_memory_bytes;
 
         let inner = RuntimeInner {
             config,
@@ -178,7 +180,7 @@ impl IronRuntime {
             mcp_registry: RwLock::new(mcp_registry),
             mcp_connection_manager,
             plugin_registry: RwLock::new(PluginRegistry::new()),
-            wasm_host: RwLock::new(WasmHost::new()),
+            wasm_host: RwLock::new(WasmHost::with_max_memory_bytes(plugin_max_memory)),
             sessions: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
             tokio_handle: handle,
@@ -211,6 +213,7 @@ impl IronRuntime {
         let (shutdown_tx, _) = watch::channel(false);
         let mcp_registry = McpServerRegistry::new();
         let mcp_connection_manager = Arc::new(McpConnectionManager::new(mcp_registry.clone()));
+        let plugin_max_memory = config.plugins.max_memory_bytes;
 
         let inner = RuntimeInner {
             config,
@@ -220,7 +223,7 @@ impl IronRuntime {
             mcp_registry: RwLock::new(mcp_registry),
             mcp_connection_manager,
             plugin_registry: RwLock::new(PluginRegistry::new()),
-            wasm_host: RwLock::new(WasmHost::new()),
+            wasm_host: RwLock::new(WasmHost::with_max_memory_bytes(plugin_max_memory)),
             sessions: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
             tokio_handle: handle,
@@ -256,18 +259,18 @@ impl IronRuntime {
     }
 
     /// Borrow the tool registry.
-    pub fn tool_registry(&self) -> std::sync::RwLockReadGuard<'_, ToolRegistry> {
-        self.inner.tool_registry.read().unwrap()
+    pub fn tool_registry(&self) -> parking_lot::RwLockReadGuard<'_, ToolRegistry> {
+        self.inner.tool_registry.read()
     }
 
     /// Register a custom tool with the runtime.
     pub fn register_tool<T: crate::tool::Tool + 'static>(&self, tool: T) {
-        self.inner.tool_registry.write().unwrap().register(tool);
+        self.inner.tool_registry.write().register(tool);
     }
 
     /// Register the built-in tool set using the supplied configuration.
     pub fn register_builtin_tools(&self, config: &crate::builtin::BuiltinToolConfig) {
-        let mut registry = self.inner.tool_registry.write().unwrap();
+        let mut registry = self.inner.tool_registry.write();
         crate::builtin::register_builtin_tools(&mut registry, config);
     }
 
@@ -278,17 +281,13 @@ impl IronRuntime {
     }
 
     /// Borrow the capability registry.
-    pub fn capabilities(&self) -> std::sync::RwLockReadGuard<'_, CapabilityRegistry> {
-        self.inner.capabilities.read().unwrap()
+    pub fn capabilities(&self) -> parking_lot::RwLockReadGuard<'_, CapabilityRegistry> {
+        self.inner.capabilities.read()
     }
 
     /// Register a capability descriptor.
     pub fn register_capability(&self, descriptor: CapabilityDescriptor) {
-        self.inner
-            .capabilities
-            .write()
-            .unwrap()
-            .register(descriptor);
+        self.inner.capabilities.write().register(descriptor);
     }
 
     /// Override the backend used for a capability.
@@ -297,25 +296,21 @@ impl IronRuntime {
         capability_id: crate::capability::CapabilityId,
         backend: CapabilityBackend,
     ) {
-        let mut caps = self.inner.capabilities.write().unwrap();
+        let mut caps = self.inner.capabilities.write();
         if let Some(desc) = caps.get_mut(capability_id) {
             desc.backend = backend;
         }
     }
 
     /// Borrow the MCP server registry.
-    pub fn mcp_registry(&self) -> std::sync::RwLockReadGuard<'_, McpServerRegistry> {
-        self.inner.mcp_registry.read().unwrap()
+    pub fn mcp_registry(&self) -> parking_lot::RwLockReadGuard<'_, McpServerRegistry> {
+        self.inner.mcp_registry.read()
     }
 
     /// Register an MCP server configuration.
     pub fn register_mcp_server(&self, config: crate::mcp::McpServerConfig) {
         let server_id = config.id.clone();
-        self.inner
-            .mcp_registry
-            .write()
-            .unwrap()
-            .register_server(config);
+        self.inner.mcp_registry.write().register_server(config);
         self.initialize_existing_sessions_for_new_mcp_server(&server_id);
 
         if self.inner.config.mcp.enabled {
@@ -331,14 +326,14 @@ impl IronRuntime {
     }
 
     /// Borrow the plugin registry.
-    pub fn plugin_registry(&self) -> std::sync::RwLockReadGuard<'_, PluginRegistry> {
-        self.inner.plugin_registry.read().unwrap()
+    pub fn plugin_registry(&self) -> parking_lot::RwLockReadGuard<'_, PluginRegistry> {
+        self.inner.plugin_registry.read()
     }
 
     /// Register a plugin configuration.
     pub fn register_plugin(&self, config: crate::plugin::config::PluginConfig) {
         let plugin_id = config.id.clone();
-        self.inner.plugin_registry.write().unwrap().register(config);
+        self.inner.plugin_registry.write().register(config);
         self.initialize_existing_sessions_for_new_plugin(&plugin_id);
     }
 
@@ -366,7 +361,7 @@ impl IronRuntime {
             return false;
         }
         let handle = self.inner.tokio_handle.spawn(future);
-        self.inner.active_tasks.lock().unwrap().push(handle);
+        self.inner.active_tasks.lock().push(handle);
         true
     }
 
@@ -374,19 +369,19 @@ impl IronRuntime {
         let conn = Arc::new(RuntimeConnection {
             active: AtomicBool::new(true),
         });
-        self.inner.connections.write().unwrap().insert(id, conn);
+        self.inner.connections.write().insert(id, conn);
     }
 
     pub fn close_connection(&self, id: ConnectionId) {
-        if let Some(conn) = self.inner.connections.write().unwrap().get(&id) {
+        if let Some(conn) = self.inner.connections.write().get(&id) {
             conn.active.store(false, Ordering::SeqCst);
         }
-        self.inner.connections.write().unwrap().remove(&id);
+        self.inner.connections.write().remove(&id);
         self.close_sessions_for_connection(id);
     }
 
     pub fn connection_count(&self) -> usize {
-        self.inner.connections.read().unwrap().len()
+        self.inner.connections.read().len()
     }
 
     pub fn create_session(
@@ -435,7 +430,6 @@ impl IronRuntime {
         self.inner
             .sessions
             .write()
-            .unwrap()
             .insert(session_id, Arc::new(runtime_session));
 
         Ok((session_id, session))
@@ -459,7 +453,6 @@ impl IronRuntime {
         self.inner
             .sessions
             .write()
-            .unwrap()
             .insert(session_id, Arc::new(runtime_session));
         Ok(())
     }
@@ -468,7 +461,6 @@ impl IronRuntime {
         self.inner
             .sessions
             .read()
-            .unwrap()
             .get(&id)
             .map(|rs| rs.session.clone())
     }
@@ -477,17 +469,16 @@ impl IronRuntime {
         self.inner
             .sessions
             .read()
-            .unwrap()
             .get(&id)
             .map(|rs| rs.connection_id)
     }
 
     pub fn close_session(&self, id: SessionId) {
-        self.inner.sessions.write().unwrap().remove(&id);
+        self.inner.sessions.write().remove(&id);
     }
 
     pub fn close_sessions_for_connection(&self, connection_id: ConnectionId) {
-        let mut sessions = self.inner.sessions.write().unwrap();
+        let mut sessions = self.inner.sessions.write();
         let to_remove: Vec<SessionId> = sessions
             .iter()
             .filter(|(_, rs)| rs.connection_id == connection_id)
@@ -502,19 +493,19 @@ impl IronRuntime {
     pub fn try_start_prompt(
         &self,
         session_id: SessionId,
-    ) -> Result<Arc<std::sync::Mutex<EphemeralTurn>>, RuntimeError> {
-        let sessions = self.inner.sessions.read().unwrap();
+    ) -> Result<Arc<Mutex<EphemeralTurn>>, RuntimeError> {
+        let sessions = self.inner.sessions.read();
         let rs = sessions
             .get(&session_id)
             .ok_or_else(|| RuntimeError::SessionNotFound(session_id.to_string()))?;
-        let mut active = rs.active_prompt.lock().unwrap();
+        let mut active = rs.active_prompt.lock();
         if active.is_some() {
             return Err(RuntimeError::Turn(
                 "session already has an active prompt".into(),
             ));
         }
-        let ephemeral = Arc::new(std::sync::Mutex::new(EphemeralTurn::new(session_id)));
-        ephemeral.lock().unwrap().start();
+        let ephemeral = Arc::new(Mutex::new(EphemeralTurn::new(session_id)));
+        ephemeral.lock().start();
         *active = Some(ActivePrompt {
             ephemeral: ephemeral.clone(),
         });
@@ -522,19 +513,19 @@ impl IronRuntime {
     }
 
     pub fn finish_prompt(&self, session_id: SessionId) {
-        let sessions = self.inner.sessions.read().unwrap();
+        let sessions = self.inner.sessions.read();
         if let Some(rs) = sessions.get(&session_id) {
-            let mut active = rs.active_prompt.lock().unwrap();
+            let mut active = rs.active_prompt.lock();
             *active = None;
         }
     }
 
     pub fn cancel_active_prompt(&self, session_id: SessionId) -> bool {
-        let sessions = self.inner.sessions.read().unwrap();
+        let sessions = self.inner.sessions.read();
         if let Some(rs) = sessions.get(&session_id) {
-            let active = rs.active_prompt.lock().unwrap();
+            let active = rs.active_prompt.lock();
             if let Some(prompt) = active.as_ref() {
-                prompt.ephemeral.lock().unwrap().cancel();
+                prompt.ephemeral.lock().cancel();
                 return true;
             }
         }
@@ -542,36 +533,34 @@ impl IronRuntime {
     }
 
     pub fn has_active_prompt(&self, session_id: SessionId) -> bool {
-        let sessions = self.inner.sessions.read().unwrap();
+        let sessions = self.inner.sessions.read();
         sessions
             .get(&session_id)
-            .map(|rs| rs.active_prompt.lock().unwrap().is_some())
+            .map(|rs| rs.active_prompt.lock().is_some())
             .unwrap_or(false)
     }
 
     pub fn get_active_prompt_ephemeral(
         &self,
         session_id: SessionId,
-    ) -> Option<Arc<std::sync::Mutex<EphemeralTurn>>> {
-        let sessions = self.inner.sessions.read().unwrap();
+    ) -> Option<Arc<Mutex<EphemeralTurn>>> {
+        let sessions = self.inner.sessions.read();
         sessions.get(&session_id).and_then(|rs| {
             rs.active_prompt
                 .lock()
-                .unwrap()
                 .as_ref()
                 .map(|p| p.ephemeral.clone())
         })
     }
 
     pub fn session_count(&self) -> usize {
-        self.inner.sessions.read().unwrap().len()
+        self.inner.sessions.read().len()
     }
 
     pub fn sessions_for_connection(&self, connection_id: ConnectionId) -> Vec<SessionId> {
         self.inner
             .sessions
             .read()
-            .unwrap()
             .iter()
             .filter(|(_, rs)| rs.connection_id == connection_id)
             .map(|(id, _)| *id)
@@ -587,13 +576,13 @@ impl IronRuntime {
         self.inner.is_shutdown.store(true, Ordering::SeqCst);
         let _ = self.inner.shutdown_tx.send(true);
 
-        let tasks = std::mem::take(&mut *self.inner.active_tasks.lock().unwrap());
+        let tasks = std::mem::take(&mut *self.inner.active_tasks.lock());
         for handle in tasks {
             handle.abort();
         }
 
-        self.inner.sessions.write().unwrap().clear();
-        self.inner.connections.write().unwrap().clear();
+        self.inner.sessions.write().clear();
+        self.inner.connections.write().clear();
     }
 
     /// Get the session-effective tool definitions exposed by the runtime.
@@ -613,17 +602,17 @@ impl IronRuntime {
     /// Get a session-effective tool catalog that can be used for both
     /// provider request building and tool execution.
     pub fn get_session_tool_catalog(&self, session_id: SessionId) -> Option<SessionToolCatalog> {
-        let runtime_session = self.inner.sessions.read().unwrap().get(&session_id).cloned()?;
-        let session_guard = runtime_session.session.lock().ok()?;
+        let runtime_session = self.inner.sessions.read().get(&session_id).cloned()?;
+        let session_guard = runtime_session.session.lock();
 
-        let tool_registry_version = self.inner.tool_registry.read().ok()?.version();
-        let mcp_registry_snapshot = self.inner.mcp_registry.read().ok()?.clone();
+        let tool_registry_version = self.inner.tool_registry.read().version();
+        let mcp_registry_snapshot = self.inner.mcp_registry.read().clone();
         let mcp_registry_version = mcp_registry_snapshot.version();
-        let plugin_registry_snapshot = self.inner.plugin_registry.read().ok()?.clone();
+        let plugin_registry_snapshot = self.inner.plugin_registry.read().clone();
         let plugin_registry_version = plugin_registry_snapshot.version();
 
         {
-            let cache_guard = runtime_session.tool_catalog_cache.lock().ok()?;
+            let cache_guard = runtime_session.tool_catalog_cache.lock();
             if let Some(cached) = cache_guard.as_ref() {
                 if cached.tool_registry_version == tool_registry_version
                     && cached.mcp_registry_version == mcp_registry_version
@@ -636,10 +625,10 @@ impl IronRuntime {
             }
         }
 
-        let local_registry = Arc::new(self.inner.tool_registry.read().ok()?.clone());
+        let local_registry = Arc::new(self.inner.tool_registry.read().clone());
         let mcp_registry = Arc::new(mcp_registry_snapshot);
         let plugin_registry = Arc::new(plugin_registry_snapshot);
-        let wasm_host = Arc::new(self.inner.wasm_host.read().ok()?.clone());
+        let wasm_host = Arc::new(self.inner.wasm_host.read().clone());
         let connection_manager = self.mcp_connection_manager();
 
         let catalog = Arc::new(SessionToolCatalog::new(
@@ -652,7 +641,7 @@ impl IronRuntime {
         ));
 
         {
-            let mut cache_guard = runtime_session.tool_catalog_cache.lock().ok()?;
+            let mut cache_guard = runtime_session.tool_catalog_cache.lock();
             *cache_guard = Some(CachedSessionToolCatalog {
                 tool_registry_version,
                 mcp_registry_version,
@@ -683,9 +672,7 @@ impl IronRuntime {
         let session = self
             .get_session(session_id)
             .ok_or_else(|| RuntimeError::SessionNotFound(session_id.to_string()))?;
-        let mut guard = session
-            .lock()
-            .map_err(|_| RuntimeError::Connection(session_id.to_string()))?;
+        let mut guard = session.lock();
         guard.set_plugin_enabled(plugin_id, enabled);
         Ok(())
     }
@@ -700,7 +687,7 @@ impl IronRuntime {
         plugin_id: &str,
     ) -> Option<bool> {
         let session = self.get_session(session_id)?;
-        let guard = session.lock().ok()?;
+        let guard = session.lock();
         guard.is_plugin_enabled(plugin_id)
     }
 
@@ -722,7 +709,7 @@ impl IronRuntime {
     /// Returns a list of [`AuthPrompt`](crate::plugin::auth::AuthPrompt)
     /// values for every registered plugin that declares OAuth requirements.
     pub fn get_auth_prompts(&self) -> Vec<crate::plugin::auth::AuthPrompt> {
-        self.inner.plugin_registry.read().unwrap().get_auth_prompts()
+        self.inner.plugin_registry.read().get_auth_prompts()
     }
 
     /// Get the runtime status of a single plugin.
@@ -739,7 +726,6 @@ impl IronRuntime {
         self.inner
             .plugin_registry
             .write()
-            .unwrap()
             .set_credentials(plugin_id, credentials);
     }
 
@@ -750,7 +736,6 @@ impl IronRuntime {
         self.inner
             .plugin_registry
             .write()
-            .unwrap()
             .clear_credentials(plugin_id);
     }
 
@@ -772,7 +757,6 @@ impl IronRuntime {
         self.inner
             .plugin_registry
             .write()
-            .unwrap()
             .begin_auth_flow(plugin_id)
     }
 
@@ -796,7 +780,6 @@ impl IronRuntime {
         self.inner
             .plugin_registry
             .write()
-            .unwrap()
             .complete_auth_flow(plugin_id, response)
     }
 
@@ -812,9 +795,9 @@ impl IronRuntime {
         session_id: SessionId,
     ) -> Option<SessionPluginToolSummary> {
         let session = self.get_session(session_id)?;
-        let guard = session.lock().ok()?;
+        let guard = session.lock();
         let plugin_registry = Arc::new((*self.plugin_registry()).clone());
-        let wasm_host = Arc::new((*self.inner.wasm_host.read().ok()?).clone());
+        let wasm_host = Arc::new((*self.inner.wasm_host.read()).clone());
         let view = EffectivePluginToolView::new(plugin_registry, wasm_host);
         Some(view.get_session_summary(&guard, &guard.plugin_enablement))
     }
@@ -826,7 +809,6 @@ impl IronRuntime {
         self.inner
             .plugin_registry
             .read()
-            .unwrap()
             .recompute_availability(plugin_id)
     }
 
@@ -839,7 +821,7 @@ impl IronRuntime {
     ) -> Option<Vec<crate::mcp::session_catalog::ToolDiagnostic>> {
         let catalog = self.get_session_tool_catalog(session_id)?;
         let session = self.get_session(session_id)?;
-        let guard = session.lock().ok()?;
+        let guard = session.lock();
         Some(catalog.inspect_tools(&guard))
     }
 }
@@ -854,7 +836,7 @@ impl Clone for IronRuntime {
 
 impl Drop for RuntimeInner {
     fn drop(&mut self) {
-        let tasks = std::mem::take(&mut *self.active_tasks.lock().unwrap());
+        let tasks = std::mem::take(&mut *self.active_tasks.lock());
         for handle in tasks {
             handle.abort();
         }

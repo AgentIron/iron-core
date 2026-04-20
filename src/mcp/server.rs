@@ -1,9 +1,10 @@
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc, RwLock,
+    Arc,
 };
 use tracing::{info, warn};
 
@@ -116,7 +117,7 @@ impl McpServerRegistry {
 
     /// Register a new MCP server configuration
     pub fn register_server(&self, config: McpServerConfig) {
-        let mut servers = self.servers.write().unwrap();
+        let mut servers = self.servers.write();
         let id = config.id.clone();
         let state = McpServerState::new(config);
         servers.insert(id.clone(), state);
@@ -127,7 +128,7 @@ impl McpServerRegistry {
 
     /// Remove a server from the registry
     pub fn unregister_server(&self, server_id: &str) -> Option<McpServerState> {
-        let mut servers = self.servers.write().unwrap();
+        let mut servers = self.servers.write();
         let removed = servers.remove(server_id);
         drop(servers);
         if removed.is_some() {
@@ -139,19 +140,19 @@ impl McpServerRegistry {
 
     /// Get all configured servers
     pub fn list_servers(&self) -> Vec<McpServerState> {
-        let servers = self.servers.read().unwrap();
+        let servers = self.servers.read();
         servers.values().cloned().collect()
     }
 
     /// Get a specific server by ID
     pub fn get_server(&self, server_id: &str) -> Option<McpServerState> {
-        let servers = self.servers.read().unwrap();
+        let servers = self.servers.read();
         servers.get(server_id).cloned()
     }
 
     /// Update server health state
     pub fn update_health(&self, server_id: &str, health: McpServerHealth) {
-        let mut servers = self.servers.write().unwrap();
+        let mut servers = self.servers.write();
         if let Some(state) = servers.get_mut(server_id) {
             state.health = health;
             if health.is_usable() {
@@ -164,7 +165,7 @@ impl McpServerRegistry {
 
     /// Update server health to error state with message
     pub fn set_error(&self, server_id: &str, error: String) {
-        let mut servers = self.servers.write().unwrap();
+        let mut servers = self.servers.write();
         if let Some(state) = servers.get_mut(server_id) {
             let log_message = error.clone();
             state.health = McpServerHealth::Error;
@@ -180,7 +181,7 @@ impl McpServerRegistry {
 
     /// Update discovered tools for a server
     pub fn update_discovered_tools(&self, server_id: &str, tools: Vec<McpToolInfo>) {
-        let mut servers = self.servers.write().unwrap();
+        let mut servers = self.servers.write();
         if let Some(state) = servers.get_mut(server_id) {
             state.discovered_tools = tools;
             let tool_count = state.discovered_tools.len();
@@ -188,15 +189,14 @@ impl McpServerRegistry {
             self.bump_version();
             info!(
                 "Updated MCP server {} with {} discovered tools",
-                server_id,
-                tool_count
+                server_id, tool_count
             );
         }
     }
 
     /// Check if a server is currently usable
     pub fn is_server_usable(&self, server_id: &str) -> bool {
-        let servers = self.servers.read().unwrap();
+        let servers = self.servers.read();
         servers
             .get(server_id)
             .map(|s| s.health.is_usable())
@@ -205,7 +205,7 @@ impl McpServerRegistry {
 
     /// Get all tools from all usable servers
     pub fn get_all_usable_tools(&self) -> Vec<(String, McpToolInfo)> {
-        let servers = self.servers.read().unwrap();
+        let servers = self.servers.read();
         let mut all_tools = Vec::new();
         for (server_id, state) in servers.iter() {
             if state.health.is_usable() {

@@ -1,6 +1,7 @@
+use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::policy::{BuiltinToolPolicy, ShellAvailability};
@@ -105,15 +106,10 @@ impl BuiltinToolConfig {
     }
 
     pub fn record_read(&self, path: &Path) {
-        if let Ok(mut guard) = self.read_tracking.lock() {
-            guard.insert(path.to_path_buf());
-        }
+        self.read_tracking.lock().insert(path.to_path_buf());
     }
 
     pub fn has_read(&self, path: &Path) -> bool {
-        self.read_tracking
-            .lock()
-            .map(|guard| guard.contains(path))
-            .unwrap_or(false)
+        self.read_tracking.lock().contains(path)
     }
 }

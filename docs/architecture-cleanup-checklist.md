@@ -105,3 +105,4 @@ Exit criteria:
 - Treat legacy tests as compatibility protection, not proof that the legacy path should keep growing.
 - Do not remove compatibility surface until downstream usage and migration timing are understood.
 - Keep behavior changes and surface-area removals in separate pull requests where possible.
+- The `AgentEvent`/`FacadeToolStatus`/`drain_events` residue on the facade has been removed; the streaming `PromptEvent` / `PromptEvents` path is the single event contract.

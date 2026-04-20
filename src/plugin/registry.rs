@@ -6,12 +6,13 @@ use crate::plugin::effective_tools::compute_tool_availability;
 use crate::plugin::manifest::PluginManifest;
 use crate::plugin::status::{PerToolAvailability, PluginHealth, PluginInfo, PluginStatus};
 use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc, RwLock,
+    Arc,
 };
 use tracing::{info, warn};
 
@@ -234,7 +235,7 @@ impl PluginRegistry {
 
     /// Register a new plugin configuration
     pub fn register(&self, config: PluginConfig) {
-        let mut plugins = self.plugins.write().unwrap();
+        let mut plugins = self.plugins.write();
         let id = config.id.clone();
         let state = PluginState::new(config);
         plugins.insert(id.clone(), state);
@@ -245,7 +246,7 @@ impl PluginRegistry {
 
     /// Unregister a plugin
     pub fn unregister(&self, plugin_id: &str) -> Option<PluginState> {
-        let mut plugins = self.plugins.write().unwrap();
+        let mut plugins = self.plugins.write();
         let removed = plugins.remove(plugin_id);
         drop(plugins);
         if removed.is_some() {
@@ -257,19 +258,19 @@ impl PluginRegistry {
 
     /// Get a plugin by ID
     pub fn get(&self, plugin_id: &str) -> Option<PluginState> {
-        let plugins = self.plugins.read().unwrap();
+        let plugins = self.plugins.read();
         plugins.get(plugin_id).cloned()
     }
 
     /// List all registered plugins
     pub fn list(&self) -> Vec<PluginState> {
-        let plugins = self.plugins.read().unwrap();
+        let plugins = self.plugins.read();
         plugins.values().cloned().collect()
     }
 
     /// Update plugin health
     pub fn update_health(&self, plugin_id: &str, health: PluginHealth) {
-        let mut plugins = self.plugins.write().unwrap();
+        let mut plugins = self.plugins.write();
         if let Some(state) = plugins.get_mut(plugin_id) {
             state.health = health;
             if health.is_healthy() {
@@ -282,7 +283,7 @@ impl PluginRegistry {
 
     /// Set plugin error state
     pub fn set_error(&self, plugin_id: &str, error: String) {
-        let mut plugins = self.plugins.write().unwrap();
+        let mut plugins = self.plugins.write();
         if let Some(state) = plugins.get_mut(plugin_id) {
             state.health = PluginHealth::Error;
             state.last_error = Some(error.clone());
@@ -294,7 +295,7 @@ impl PluginRegistry {
 
     /// Update plugin manifest after successful load
     pub fn set_manifest(&self, plugin_id: &str, manifest: PluginManifest) {
-        let mut plugins = self.plugins.write().unwrap();
+        let mut plugins = self.plugins.write();
         if let Some(state) = plugins.get_mut(plugin_id) {
             state.manifest = Some(manifest);
             drop(plugins);
@@ -304,7 +305,7 @@ impl PluginRegistry {
 
     /// Update plugin artifact path
     pub fn set_artifact_path(&self, plugin_id: &str, path: PathBuf) {
-        let mut plugins = self.plugins.write().unwrap();
+        let mut plugins = self.plugins.write();
         if let Some(state) = plugins.get_mut(plugin_id) {
             state.artifact_path = Some(path);
             drop(plugins);
@@ -314,7 +315,7 @@ impl PluginRegistry {
 
     /// Record trusted install metadata for a plugin.
     pub fn set_install_metadata(&self, plugin_id: &str, metadata: InstallMetadata) {
-        let mut plugins = self.plugins.write().unwrap();
+        let mut plugins = self.plugins.write();
         if let Some(state) = plugins.get_mut(plugin_id) {
             state.install_metadata = Some(metadata);
             drop(plugins);
@@ -324,7 +325,7 @@ impl PluginRegistry {
 
     /// Update plugin auth state
     pub fn update_auth_state(&self, plugin_id: &str, auth_state: AuthState) {
-        let mut plugins = self.plugins.write().unwrap();
+        let mut plugins = self.plugins.write();
         if let Some(state) = plugins.get_mut(plugin_id) {
             state.auth_state = auth_state;
             drop(plugins);
@@ -336,7 +337,7 @@ impl PluginRegistry {
     pub fn set_credentials(&self, plugin_id: &str, credentials: CredentialBinding) {
         let mut mutated = false;
         {
-            let mut plugins = self.plugins.write().unwrap();
+            let mut plugins = self.plugins.write();
             if let Some(state) = plugins.get_mut(plugin_id) {
                 state.credentials = Some(credentials);
                 state.auth_state = AuthState::Authenticated;
@@ -360,7 +361,7 @@ impl PluginRegistry {
     pub fn clear_credentials(&self, plugin_id: &str) {
         let mut mutated = false;
         {
-            let mut plugins = self.plugins.write().unwrap();
+            let mut plugins = self.plugins.write();
             if let Some(state) = plugins.get_mut(plugin_id) {
                 state.credentials = None;
                 state.auth_state = AuthState::Unauthenticated;
@@ -384,7 +385,7 @@ impl PluginRegistry {
     pub fn mark_auth_expired(&self, plugin_id: &str) {
         let mut mutated = false;
         {
-            let mut plugins = self.plugins.write().unwrap();
+            let mut plugins = self.plugins.write();
             if let Some(state) = plugins.get_mut(plugin_id) {
                 if state.auth_state.is_authenticated() {
                     state.auth_state = AuthState::Expired;
@@ -409,7 +410,7 @@ impl PluginRegistry {
     pub fn mark_auth_revoked(&self, plugin_id: &str) {
         let mut mutated = false;
         {
-            let mut plugins = self.plugins.write().unwrap();
+            let mut plugins = self.plugins.write();
             if let Some(state) = plugins.get_mut(plugin_id) {
                 state.credentials = None;
                 state.auth_state = AuthState::Revoked;
@@ -431,7 +432,7 @@ impl PluginRegistry {
 
     /// Start authentication flow
     pub fn start_authentication(&self, plugin_id: &str) -> Result<(), String> {
-        let mut plugins = self.plugins.write().unwrap();
+        let mut plugins = self.plugins.write();
         if let Some(state) = plugins.get_mut(plugin_id) {
             match state.auth_state {
                 AuthState::Authenticating => Err("Authentication already in progress".to_string()),
@@ -448,7 +449,7 @@ impl PluginRegistry {
         }
     }
 
-    /// Start an auth flow and produce an [`AuthInteractionRequest`] for the client.
+    /// Start an auth flow and produce an [`crate::plugin::auth::AuthInteractionRequest`] for the client.
     ///
     /// Validates that the plugin exists, requires auth, and is in a state that
     /// allows starting authentication.  Transitions the plugin to
@@ -463,7 +464,7 @@ impl PluginRegistry {
         &self,
         plugin_id: &str,
     ) -> Result<crate::plugin::auth::AuthInteractionRequest, String> {
-        let mut plugins = self.plugins.write().unwrap();
+        let mut plugins = self.plugins.write();
         let state = plugins
             .get_mut(plugin_id)
             .ok_or_else(|| format!("Plugin '{}' not found", plugin_id))?;
@@ -524,7 +525,7 @@ impl PluginRegistry {
     /// `Authenticated`.  On denial, failure, or cancellation, transitions
     /// back to `Unauthenticated`.
     ///
-    /// Returns the resulting [`AuthStatusTransition`] so callers can
+    /// Returns the resulting [`crate::plugin::auth::AuthStatusTransition`] so callers can
     /// observe the state change.
     ///
     /// # Errors
@@ -539,7 +540,7 @@ impl PluginRegistry {
         use crate::plugin::auth::AuthInteractionResult;
 
         let (previous_state, provider, scopes) = {
-            let plugins = self.plugins.read().unwrap();
+            let plugins = self.plugins.read();
             let state = plugins
                 .get(plugin_id)
                 .ok_or_else(|| format!("Plugin '{}' not found", plugin_id))?;
@@ -590,7 +591,7 @@ impl PluginRegistry {
                 // Reset to unauthenticated on failure/denial/cancel.
                 let mut mutated = false;
                 {
-                    let mut plugins = self.plugins.write().unwrap();
+                    let mut plugins = self.plugins.write();
                     if let Some(state) = plugins.get_mut(plugin_id) {
                         state.auth_state = AuthState::Unauthenticated;
                         mutated = true;
@@ -603,7 +604,7 @@ impl PluginRegistry {
         }
 
         let new_state = {
-            let plugins = self.plugins.read().unwrap();
+            let plugins = self.plugins.read();
             plugins
                 .get(plugin_id)
                 .map(|s| s.auth_state)
@@ -623,7 +624,7 @@ impl PluginRegistry {
     /// Used during install rollback so a failed reinstall does not leave
     /// stale manifest or artifact references from a prior successful install.
     pub fn clear_runtime_state(&self, plugin_id: &str) {
-        let mut plugins = self.plugins.write().unwrap();
+        let mut plugins = self.plugins.write();
         if let Some(state) = plugins.get_mut(plugin_id) {
             state.manifest = None;
             state.artifact_path = None;
@@ -638,7 +639,7 @@ impl PluginRegistry {
 
     /// Get plugin status for client consumption
     pub fn get_status(&self, plugin_id: &str) -> Option<PluginStatus> {
-        let plugins = self.plugins.read().unwrap();
+        let plugins = self.plugins.read();
         let state = plugins.get(plugin_id)?;
 
         let auth = state.auth_availability();
@@ -674,7 +675,7 @@ impl PluginRegistry {
 
     /// Get all plugin statuses
     pub fn get_all_statuses(&self) -> Vec<PluginStatus> {
-        let plugins = self.plugins.read().unwrap();
+        let plugins = self.plugins.read();
         plugins
             .keys()
             .filter_map(|id| self.get_status(id))
@@ -706,7 +707,7 @@ impl PluginRegistry {
     /// cleared, expired, revoked) so that callers and logs can observe the
     /// effect on tool availability.
     pub fn recompute_availability(&self, plugin_id: &str) -> Option<PluginAvailabilitySummary> {
-        let plugins = self.plugins.read().unwrap();
+        let plugins = self.plugins.read();
         let state = plugins.get(plugin_id)?;
 
         let manifest = match &state.manifest {
@@ -775,7 +776,7 @@ impl PluginRegistry {
 
     /// Get per-tool availability for a plugin
     pub fn get_tool_availability(&self, plugin_id: &str) -> Vec<(String, bool, Option<String>)> {
-        let plugins = self.plugins.read().unwrap();
+        let plugins = self.plugins.read();
         let state = match plugins.get(plugin_id) {
             Some(s) => s,
             None => return Vec::new(),
@@ -802,7 +803,7 @@ impl PluginRegistry {
     /// Returns a single serialization-friendly snapshot that combines trusted
     /// runtime metadata with validated (but plugin-declared) manifest metadata.
     pub fn get_plugin_info(&self, plugin_id: &str) -> Option<PluginInfo> {
-        let plugins = self.plugins.read().unwrap();
+        let plugins = self.plugins.read();
         let state = plugins.get(plugin_id)?;
 
         let auth = state.auth_availability();
@@ -883,12 +884,12 @@ impl PluginRegistry {
 
     /// Get auth prompts for all plugins that require authentication.
     ///
-    /// Returns a list of [`AuthPrompt`](crate::plugin::auth::AuthPrompt)
+    /// Returns a list of [`crate::plugin::auth::AuthPrompt`]
     /// values for every registered plugin that declares OAuth requirements.
     /// Clients can use this to render auth UX without polling individual
     /// plugin statuses.
     pub fn get_auth_prompts(&self) -> Vec<crate::plugin::auth::AuthPrompt> {
-        let plugins = self.plugins.read().unwrap();
+        let plugins = self.plugins.read();
         plugins
             .values()
             .filter_map(|state| state.auth_prompt())
@@ -940,6 +941,7 @@ mod tests {
             network_policy: NetworkPolicy::Wildcard,
             auth: None,
             tools,
+            max_memory_bytes: None,
             api_version: "1.0".to_string(),
         }
     }
@@ -1276,6 +1278,7 @@ mod tests {
                     available_unauthenticated: false,
                 }),
             )],
+            max_memory_bytes: None,
             api_version: "1.0".to_string(),
         }
     }

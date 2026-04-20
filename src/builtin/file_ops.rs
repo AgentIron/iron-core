@@ -7,7 +7,7 @@ use crate::builtin::helpers::BuiltinMeta;
 use crate::builtin::render::{
     render_directory_entries, render_mutation_summary, render_truncation_footer,
 };
-use crate::error::LoopResult;
+use crate::error::RuntimeResult;
 use crate::tool::{Tool, ToolDefinition, ToolFuture};
 use serde_json::Value;
 
@@ -62,7 +62,7 @@ impl Tool for ReadTool {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || execute_read(&config, arguments))
                 .await
-                .map_err(|e| crate::error::LoopError::tool_execution(e.to_string()))?
+                .map_err(|e| crate::error::RuntimeError::tool_execution(e.to_string()))?
         })
     }
 
@@ -71,27 +71,30 @@ impl Tool for ReadTool {
     }
 }
 
-fn execute_read(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
+fn execute_read(config: &BuiltinToolConfig, args: Value) -> RuntimeResult<Value> {
     let path_str = args
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BuiltinToolError::invalid_input("missing 'path' argument"))
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
 
     let path = PathBuf::from(path_str);
     let canonical = config
         .policy
         .validate_path(&path, &config.allowed_roots)
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
 
     if !canonical.exists() {
-        return Err(crate::error::LoopError::from(
+        return Err(crate::error::RuntimeError::from(
             BuiltinToolError::path_not_found(format!("file not found: {}", path.display())),
         ));
     }
 
     let metadata = std::fs::metadata(&canonical).map_err(|e| {
-        crate::error::LoopError::from(BuiltinToolError::io(format!("cannot read metadata: {}", e)))
+        crate::error::RuntimeError::from(BuiltinToolError::io(format!(
+            "cannot read metadata: {}",
+            e
+        )))
     })?;
 
     if metadata.is_dir() {
@@ -100,7 +103,10 @@ fn execute_read(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
     }
 
     let bytes = std::fs::read(&canonical).map_err(|e| {
-        crate::error::LoopError::from(BuiltinToolError::io(format!("failed to read file: {}", e)))
+        crate::error::RuntimeError::from(BuiltinToolError::io(format!(
+            "failed to read file: {}",
+            e
+        )))
     })?;
 
     config.record_read(&canonical);
@@ -237,7 +243,7 @@ impl Tool for WriteTool {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || execute_write(&config, arguments))
                 .await
-                .map_err(|e| crate::error::LoopError::tool_execution(e.to_string()))?
+                .map_err(|e| crate::error::RuntimeError::tool_execution(e.to_string()))?
         })
     }
 
@@ -246,28 +252,28 @@ impl Tool for WriteTool {
     }
 }
 
-fn execute_write(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
+fn execute_write(config: &BuiltinToolConfig, args: Value) -> RuntimeResult<Value> {
     let path_str = args
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BuiltinToolError::invalid_input("missing 'path' argument"))
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
 
     let content = args
         .get("content")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BuiltinToolError::invalid_input("missing 'content' argument"))
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
 
     let path = PathBuf::from(path_str);
-    let resolved =
-        resolve_write_path(&path, &config.allowed_roots).map_err(crate::error::LoopError::from)?;
+    let resolved = resolve_write_path(&path, &config.allowed_roots)
+        .map_err(crate::error::RuntimeError::from)?;
 
     if let Some(parent) = resolved.parent() {
         if !parent.exists() {
             validate_no_path_conflict(parent, &config.allowed_roots)?;
             std::fs::create_dir_all(parent).map_err(|e| {
-                crate::error::LoopError::from(BuiltinToolError::io(format!(
+                crate::error::RuntimeError::from(BuiltinToolError::io(format!(
                     "failed to create parent directories: {}",
                     e
                 )))
@@ -277,7 +283,10 @@ fn execute_write(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
 
     let existed = resolved.exists();
     std::fs::write(&resolved, content).map_err(|e| {
-        crate::error::LoopError::from(BuiltinToolError::io(format!("failed to write file: {}", e)))
+        crate::error::RuntimeError::from(BuiltinToolError::io(format!(
+            "failed to write file: {}",
+            e
+        )))
     })?;
 
     let summary = if existed {
@@ -405,7 +414,7 @@ impl Tool for EditTool {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || execute_edit(&config, arguments))
                 .await
-                .map_err(|e| crate::error::LoopError::tool_execution(e.to_string()))?
+                .map_err(|e| crate::error::RuntimeError::tool_execution(e.to_string()))?
         })
     }
 
@@ -414,24 +423,24 @@ impl Tool for EditTool {
     }
 }
 
-fn execute_edit(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
+fn execute_edit(config: &BuiltinToolConfig, args: Value) -> RuntimeResult<Value> {
     let path_str = args
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BuiltinToolError::invalid_input("missing 'path' argument"))
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
 
     let old_string = args
         .get("old_string")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BuiltinToolError::invalid_input("missing 'old_string' argument"))
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
 
     let new_string = args
         .get("new_string")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BuiltinToolError::invalid_input("missing 'new_string' argument"))
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
 
     let replace_all = args
         .get("replace_all")
@@ -439,7 +448,7 @@ fn execute_edit(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
         .unwrap_or(false);
 
     if old_string == new_string {
-        return Err(crate::error::LoopError::from(
+        return Err(crate::error::RuntimeError::from(
             BuiltinToolError::invalid_input("old_string and new_string are identical"),
         ));
     }
@@ -448,32 +457,35 @@ fn execute_edit(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
     let canonical = config
         .policy
         .validate_path(&path, &config.allowed_roots)
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
 
     if !canonical.exists() {
-        return Err(crate::error::LoopError::from(
+        return Err(crate::error::RuntimeError::from(
             BuiltinToolError::path_not_found(format!("file not found: {}", path.display())),
         ));
     }
 
     if !config.has_read(&canonical) {
-        return Err(crate::error::LoopError::from(BuiltinToolError::invalid_input(
-            "file must be read before editing",
-        )));
+        return Err(crate::error::RuntimeError::from(
+            BuiltinToolError::invalid_input("file must be read before editing"),
+        ));
     }
 
     let content = std::fs::read_to_string(&canonical).map_err(|e| {
-        crate::error::LoopError::from(BuiltinToolError::io(format!("failed to read file: {}", e)))
+        crate::error::RuntimeError::from(BuiltinToolError::io(format!(
+            "failed to read file: {}",
+            e
+        )))
     })?;
 
     let match_count = content.matches(old_string).count();
     if match_count == 0 {
-        return Err(crate::error::LoopError::from(
+        return Err(crate::error::RuntimeError::from(
             BuiltinToolError::edit_mismatch("old_string not found in file"),
         ));
     }
     if !replace_all && match_count > 1 {
-        return Err(crate::error::LoopError::from(
+        return Err(crate::error::RuntimeError::from(
             BuiltinToolError::edit_ambiguous(format!(
                 "old_string matched {} locations; provide more context to make it unique or use replace_all",
                 match_count
@@ -488,7 +500,10 @@ fn execute_edit(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
     };
     let replacements = if replace_all { match_count } else { 1 };
     std::fs::write(&canonical, &new_content).map_err(|e| {
-        crate::error::LoopError::from(BuiltinToolError::io(format!("failed to write file: {}", e)))
+        crate::error::RuntimeError::from(BuiltinToolError::io(format!(
+            "failed to write file: {}",
+            e
+        )))
     })?;
 
     Ok(serde_json::json!({
@@ -556,7 +571,7 @@ impl Tool for MultieditTool {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || execute_multiedit(&config, arguments))
                 .await
-                .map_err(|e| crate::error::LoopError::tool_execution(e.to_string()))?
+                .map_err(|e| crate::error::RuntimeError::tool_execution(e.to_string()))?
         })
     }
 
@@ -565,21 +580,21 @@ impl Tool for MultieditTool {
     }
 }
 
-fn execute_multiedit(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
+fn execute_multiedit(config: &BuiltinToolConfig, args: Value) -> RuntimeResult<Value> {
     let path_str = args
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BuiltinToolError::invalid_input("missing 'path' argument"))
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
 
     let edits = args
         .get("edits")
         .and_then(|v| v.as_array())
         .ok_or_else(|| BuiltinToolError::invalid_input("missing 'edits' argument"))
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
 
     if edits.is_empty() {
-        return Err(crate::error::LoopError::from(
+        return Err(crate::error::RuntimeError::from(
             BuiltinToolError::invalid_input("edits array must not be empty"),
         ));
     }
@@ -588,22 +603,25 @@ fn execute_multiedit(config: &BuiltinToolConfig, args: Value) -> LoopResult<Valu
     let canonical = config
         .policy
         .validate_path(&path, &config.allowed_roots)
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
 
     if !canonical.exists() {
-        return Err(crate::error::LoopError::from(
+        return Err(crate::error::RuntimeError::from(
             BuiltinToolError::path_not_found(format!("file not found: {}", path.display())),
         ));
     }
 
     if !config.has_read(&canonical) {
-        return Err(crate::error::LoopError::from(BuiltinToolError::invalid_input(
-            "file must be read before editing",
-        )));
+        return Err(crate::error::RuntimeError::from(
+            BuiltinToolError::invalid_input("file must be read before editing"),
+        ));
     }
 
     let mut content = std::fs::read_to_string(&canonical).map_err(|e| {
-        crate::error::LoopError::from(BuiltinToolError::io(format!("failed to read file: {}", e)))
+        crate::error::RuntimeError::from(BuiltinToolError::io(format!(
+            "failed to read file: {}",
+            e
+        )))
     })?;
 
     let mut total_replacements = 0usize;
@@ -615,7 +633,7 @@ fn execute_multiedit(config: &BuiltinToolConfig, args: Value) -> LoopResult<Valu
             .get("old_string")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                crate::error::LoopError::from(BuiltinToolError::invalid_input(format!(
+                crate::error::RuntimeError::from(BuiltinToolError::invalid_input(format!(
                     "edit {}: missing 'old_string'",
                     i + 1
                 )))
@@ -625,7 +643,7 @@ fn execute_multiedit(config: &BuiltinToolConfig, args: Value) -> LoopResult<Valu
             .get("new_string")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                crate::error::LoopError::from(BuiltinToolError::invalid_input(format!(
+                crate::error::RuntimeError::from(BuiltinToolError::invalid_input(format!(
                     "edit {}: missing 'new_string'",
                     i + 1
                 )))
@@ -637,7 +655,7 @@ fn execute_multiedit(config: &BuiltinToolConfig, args: Value) -> LoopResult<Valu
             .unwrap_or(false);
 
         if old_string == new_string {
-            return Err(crate::error::LoopError::from(
+            return Err(crate::error::RuntimeError::from(
                 BuiltinToolError::invalid_input(format!(
                     "edit {}: old_string and new_string are identical",
                     i + 1
@@ -647,7 +665,7 @@ fn execute_multiedit(config: &BuiltinToolConfig, args: Value) -> LoopResult<Valu
 
         let match_count = content.matches(old_string).count();
         if match_count == 0 {
-            return Err(crate::error::LoopError::from(
+            return Err(crate::error::RuntimeError::from(
                 BuiltinToolError::edit_mismatch(format!(
                     "edit {}: old_string not found in file; no changes were applied",
                     i + 1
@@ -655,7 +673,7 @@ fn execute_multiedit(config: &BuiltinToolConfig, args: Value) -> LoopResult<Valu
             ));
         }
         if !replace_all && match_count > 1 {
-            return Err(crate::error::LoopError::from(
+            return Err(crate::error::RuntimeError::from(
                 BuiltinToolError::edit_ambiguous(format!(
                     "edit {}: old_string matched {} locations; provide more context or use replace_all; no changes were applied",
                     i + 1, match_count
@@ -674,7 +692,10 @@ fn execute_multiedit(config: &BuiltinToolConfig, args: Value) -> LoopResult<Valu
 
     // All edits validated and applied in memory; write the result.
     std::fs::write(&canonical, &content).map_err(|e| {
-        crate::error::LoopError::from(BuiltinToolError::io(format!("failed to write file: {}", e)))
+        crate::error::RuntimeError::from(BuiltinToolError::io(format!(
+            "failed to write file: {}",
+            e
+        )))
     })?;
 
     Ok(serde_json::json!({
@@ -700,11 +721,11 @@ fn execute_multiedit(config: &BuiltinToolConfig, args: Value) -> LoopResult<Valu
 fn render_directory_listing(
     dir: &std::path::Path,
     _roots: &[std::path::PathBuf],
-) -> LoopResult<Value> {
+) -> RuntimeResult<Value> {
     let mut entries: Vec<String> = Vec::new();
 
     let read_dir = std::fs::read_dir(dir).map_err(|e| {
-        crate::error::LoopError::from(BuiltinToolError::io(format!(
+        crate::error::RuntimeError::from(BuiltinToolError::io(format!(
             "failed to read directory: {}",
             e
         )))
@@ -712,7 +733,7 @@ fn render_directory_listing(
 
     for entry in read_dir {
         let entry = entry.map_err(|e| {
-            crate::error::LoopError::from(BuiltinToolError::io(format!(
+            crate::error::RuntimeError::from(BuiltinToolError::io(format!(
                 "directory entry error: {}",
                 e
             )))
@@ -726,10 +747,7 @@ fn render_directory_listing(
             continue;
         }
 
-        let is_dir = entry
-            .file_type()
-            .map(|ft| ft.is_dir())
-            .unwrap_or(false);
+        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
 
         if is_dir {
             entries.push(format!("{}/", name));

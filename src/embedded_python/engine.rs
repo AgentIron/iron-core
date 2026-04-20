@@ -9,9 +9,10 @@ use monty::{
     ExcType, ExtFunctionResult, FunctionCall, LimitedTracker, MontyException, MontyObject,
     MontyRun, NameLookupResult, PrintWriter, ResourceLimits, RunProgress,
 };
+use parking_lot::Mutex;
 use serde_json::{Map, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub type ToolExecutorFn =
@@ -285,7 +286,7 @@ impl ScriptRun {
             Some(e) => e,
             None => {
                 let error = serde_json::json!({"error": "no tool executor configured"});
-                self.child_outcomes.lock().unwrap().push(ChildCallOutcome {
+                self.child_outcomes.lock().push(ChildCallOutcome {
                     call_id: call_id.to_string(),
                     tool_name: tool_name.to_string(),
                     status: ChildCallStatus::Failed,
@@ -296,7 +297,7 @@ impl ScriptRun {
         };
 
         let (status, result) = executor(call_id, tool_name, args);
-        self.child_outcomes.lock().unwrap().push(ChildCallOutcome {
+        self.child_outcomes.lock().push(ChildCallOutcome {
             call_id: call_id.to_string(),
             tool_name: tool_name.to_string(),
             status,
@@ -306,7 +307,7 @@ impl ScriptRun {
     }
 
     fn take_child_outcomes(&self) -> Vec<ChildCallOutcome> {
-        std::mem::take(&mut *self.child_outcomes.lock().unwrap())
+        std::mem::take(&mut *self.child_outcomes.lock())
     }
 
     fn resolve_function_call<T: monty::ResourceTracker>(

@@ -80,7 +80,7 @@ impl Tool for PluginTool {
                     host.execute_tool(&plugin_id, &tool_name, arguments)
                         .await
                         .map_err(|e| {
-                            crate::error::LoopError::tool_execution(format!(
+                            crate::error::RuntimeError::tool_execution(format!(
                                 "Plugin tool call failed for plugin_{}_{}: {}",
                                 plugin_id, tool_name, e
                             ))
@@ -452,6 +452,7 @@ mod tests {
             network_policy: NetworkPolicy::Wildcard,
             auth: None,
             tools: vec![],
+            max_memory_bytes: None,
             api_version: "1.0".to_string(),
         });
 
@@ -800,6 +801,7 @@ mod tests {
                 network_policy: NetworkPolicy::Wildcard,
                 auth: None,
                 tools: vec![make_tool_named("read"), make_tool_named("write")],
+                max_memory_bytes: None,
                 api_version: "1.0".to_string(),
             },
         );
@@ -982,6 +984,7 @@ mod tests {
                     }),
                 ),
             ],
+            max_memory_bytes: None,
             api_version: "1.0".to_string(),
         });
         state

@@ -1,138 +1,62 @@
-//! Loop error types
-//!
-//! Errors that can occur during runtime and prompt execution.
+//! Runtime error types.
 
 use thiserror::Error;
 
-/// Result type alias for loop operations
-pub type LoopResult<T> = Result<T, LoopError>;
+pub type RuntimeResult<T> = Result<T, RuntimeError>;
 
-/// Errors that can occur during loop execution
 #[derive(Error, Debug, Clone, PartialEq)]
-pub enum LoopError {
-    /// Provider error during inference
+pub enum RuntimeError {
     #[error("Provider error: {0}")]
     Provider(String),
 
-    /// Maximum iterations exceeded
     #[error("Maximum iterations ({max}) exceeded")]
     MaxIterationsExceeded { max: u32 },
 
-    /// Tool execution error
     #[error("Tool execution error: {message}")]
     ToolExecution { message: String },
 
-    /// Tool not found
     #[error("Tool not found: {name}")]
     ToolNotFound { name: String },
 
-    /// Invalid configuration
     #[error("Invalid configuration: {message}")]
     InvalidConfig { message: String },
 
-    /// Session error
     #[error("Session error: {message}")]
     Session { message: String },
 
-    /// Approval required but not provided
     #[error("Approval required for tool: {tool_name}")]
     ApprovalRequired { tool_name: String },
 
-    /// A turn is already active on this session
     #[error("Turn already active (turn_id: {turn_id})")]
     TurnAlreadyActive { turn_id: u64 },
 
-    /// Operation attempted on a finished turn
     #[error("Turn has already finished")]
     TurnFinished,
 
-    /// Approval command issued while turn is not waiting
     #[error("Turn is not waiting for approval")]
     NotWaitingForApproval,
 
-    /// Approval command referenced an unknown call_id
     #[error("No pending approval for call_id: {call_id}")]
     ApprovalNotFound { call_id: String },
 
-    /// Interaction command issued while turn is not waiting
     #[error("Turn is not waiting for an interaction")]
     NotWaitingForInteraction,
 
-    /// Interaction command referenced an unknown interaction_id
     #[error("No pending interaction for interaction_id: {interaction_id}")]
     InteractionNotFound { interaction_id: String },
 
-    /// Interaction resolution kind does not match the pending interaction kind
     #[error("Interaction resolution kind mismatch for interaction_id: {interaction_id}")]
     InteractionKindMismatch { interaction_id: String },
 
-    /// Interaction resolution is invalid (e.g. bad option IDs, wrong selection count)
     #[error("Invalid interaction resolution: {message}")]
     InvalidInteractionResolution { message: String },
 
-    /// The session has been closed
     #[error("Session has been closed")]
     SessionClosed,
 
-    /// The session runtime has been shut down
     #[error("Session runtime has been shut down")]
     RuntimeShutdown,
-}
 
-impl LoopError {
-    /// Create a provider error
-    pub fn provider<S: Into<String>>(message: S) -> Self {
-        Self::Provider(message.into())
-    }
-
-    /// Create a max iterations error
-    pub fn max_iterations(max: u32) -> Self {
-        Self::MaxIterationsExceeded { max }
-    }
-
-    /// Create a tool execution error
-    pub fn tool_execution<S: Into<String>>(message: S) -> Self {
-        Self::ToolExecution {
-            message: message.into(),
-        }
-    }
-
-    /// Create a tool not found error
-    pub fn tool_not_found<S: Into<String>>(name: S) -> Self {
-        Self::ToolNotFound { name: name.into() }
-    }
-
-    /// Create an invalid config error
-    pub fn invalid_config<S: Into<String>>(message: S) -> Self {
-        Self::InvalidConfig {
-            message: message.into(),
-        }
-    }
-
-    /// Create a session error
-    pub fn session<S: Into<String>>(message: S) -> Self {
-        Self::Session {
-            message: message.into(),
-        }
-    }
-
-    /// Create an approval required error
-    pub fn approval_required<S: Into<String>>(tool_name: S) -> Self {
-        Self::ApprovalRequired {
-            tool_name: tool_name.into(),
-        }
-    }
-
-    /// Check if this is a max iterations error
-    pub fn is_max_iterations(&self) -> bool {
-        matches!(self, Self::MaxIterationsExceeded { .. })
-    }
-}
-
-pub type RuntimeResult<T> = Result<T, RuntimeError>;
-
-#[derive(Error, Debug)]
-pub enum RuntimeError {
     #[error("Transport error: {0}")]
     Transport(String),
 
@@ -145,9 +69,6 @@ pub enum RuntimeError {
     #[error("Capability error: {0}")]
     Capability(String),
 
-    #[error("Provider error: {0}")]
-    Provider(String),
-
     #[error("Turn error: {0}")]
     Turn(String),
 
@@ -156,6 +77,42 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
+    pub fn provider<S: Into<String>>(message: S) -> Self {
+        Self::Provider(message.into())
+    }
+
+    pub fn max_iterations(max: u32) -> Self {
+        Self::MaxIterationsExceeded { max }
+    }
+
+    pub fn tool_execution<S: Into<String>>(message: S) -> Self {
+        Self::ToolExecution {
+            message: message.into(),
+        }
+    }
+
+    pub fn tool_not_found<S: Into<String>>(name: S) -> Self {
+        Self::ToolNotFound { name: name.into() }
+    }
+
+    pub fn invalid_config<S: Into<String>>(message: S) -> Self {
+        Self::InvalidConfig {
+            message: message.into(),
+        }
+    }
+
+    pub fn session<S: Into<String>>(message: S) -> Self {
+        Self::Session {
+            message: message.into(),
+        }
+    }
+
+    pub fn approval_required<S: Into<String>>(tool_name: S) -> Self {
+        Self::ApprovalRequired {
+            tool_name: tool_name.into(),
+        }
+    }
+
     pub fn transport<S: Into<String>>(msg: S) -> Self {
         Self::Transport(msg.into())
     }
@@ -172,7 +129,7 @@ impl RuntimeError {
         Self::Capability(msg.into())
     }
 
-    pub fn provider<S: Into<String>>(msg: S) -> Self {
-        Self::Provider(msg.into())
+    pub fn is_max_iterations(&self) -> bool {
+        matches!(self, Self::MaxIterationsExceeded { .. })
     }
 }

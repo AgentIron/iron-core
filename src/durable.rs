@@ -548,25 +548,74 @@ impl DurableSession {
     pub fn cancel_tool_call(&mut self, call_id: &str) {
         let idx = self.tool_records.iter().position(|r| r.call_id == call_id);
         if let Some(i) = idx {
-            let record = &mut self.tool_records[i];
-            record.status = ToolRecordStatus::Cancelled;
-            record.result = Some(serde_json::json!({"error": "cancelled"}));
-            let timeline_index = self.timeline.len() as u64;
-            record.timeline_terminal_index = Some(timeline_index);
-
-            let call_id_owned = record.call_id.clone();
-            let tool_name_owned = record.tool_name.clone();
-            self.timeline.push(TimelineEntry::ToolCallTerminal {
-                index: timeline_index,
-                call_id: call_id_owned,
-                tool_name: tool_name_owned,
-                outcome: ToolTerminalOutcome::Cancelled,
-                tool_record_index: i,
-            });
-
-            self.uncompacted_tokens +=
-                estimate_tool_result_tokens(&record.tool_name, record.result.as_ref().unwrap());
+            self.cancel_record_at(i, "cancelled");
         }
+    }
+
+    /// Transition every non-terminal tool record (`Running` or
+    /// `PendingApproval`) to `Cancelled` atomically under the durable mutex.
+    ///
+    /// Why: the cancel path previously exited without tying off records whose
+    /// tool futures were still in flight, so a subsequent resume or status
+    /// query would observe a permanently-`Running` record. Because this method
+    /// does not await, holding the durable mutex for its duration is safe and
+    /// makes the transition atomic with respect to other session writes.
+    ///
+    /// Returns the list of `call_id`s that were transitioned, for logging.
+    pub fn cancel_running_tool_calls(&mut self, reason: &str) -> Vec<String> {
+        let indices: Vec<usize> = self
+            .tool_records
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| {
+                if matches!(
+                    r.status,
+                    ToolRecordStatus::Running | ToolRecordStatus::PendingApproval
+                ) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut cancelled = Vec::with_capacity(indices.len());
+        for i in indices {
+            let call_id = self.tool_records[i].call_id.clone();
+            self.cancel_record_at(i, reason);
+            cancelled.push(call_id);
+        }
+        cancelled
+    }
+
+    fn cancel_record_at(&mut self, i: usize, reason: &str) {
+        let record = &mut self.tool_records[i];
+        if matches!(
+            record.status,
+            ToolRecordStatus::Completed
+                | ToolRecordStatus::Failed
+                | ToolRecordStatus::Denied
+                | ToolRecordStatus::Cancelled
+        ) {
+            return;
+        }
+        record.status = ToolRecordStatus::Cancelled;
+        record.result = Some(serde_json::json!({"error": reason}));
+        let timeline_index = self.timeline.len() as u64;
+        record.timeline_terminal_index = Some(timeline_index);
+
+        let call_id_owned = record.call_id.clone();
+        let tool_name_owned = record.tool_name.clone();
+        self.timeline.push(TimelineEntry::ToolCallTerminal {
+            index: timeline_index,
+            call_id: call_id_owned,
+            tool_name: tool_name_owned,
+            outcome: ToolTerminalOutcome::Cancelled,
+            tool_record_index: i,
+        });
+
+        self.uncompacted_tokens +=
+            estimate_tool_result_tokens(&record.tool_name, record.result.as_ref().unwrap());
     }
 
     pub fn apply_compaction(
@@ -895,4 +944,75 @@ impl DurableSession {
     }
 }
 
-pub type SharedDurableSession = std::sync::Arc<std::sync::Mutex<DurableSession>>;
+pub type SharedDurableSession = std::sync::Arc<parking_lot::Mutex<DurableSession>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_session() -> DurableSession {
+        DurableSession::new(SessionId(1))
+    }
+
+    #[test]
+    fn cancel_running_transitions_running_and_pending() {
+        let mut s = fresh_session();
+        s.start_tool_call("a", "tool_a", serde_json::json!({}));
+        s.start_tool_call("b", "tool_b", serde_json::json!({}));
+        // Flip b to PendingApproval via request_tool_approval if exposed,
+        // otherwise set directly for the test.
+        s.tool_records[1].status = ToolRecordStatus::PendingApproval;
+
+        let cancelled = s.cancel_running_tool_calls("cancelled");
+        assert_eq!(cancelled.len(), 2);
+        assert!(cancelled.contains(&"a".to_string()));
+        assert!(cancelled.contains(&"b".to_string()));
+
+        for record in &s.tool_records {
+            assert!(matches!(record.status, ToolRecordStatus::Cancelled));
+            assert!(record.timeline_terminal_index.is_some());
+        }
+    }
+
+    #[test]
+    fn cancel_running_skips_already_terminal_records() {
+        let mut s = fresh_session();
+        s.start_tool_call("done", "t", serde_json::json!({}));
+        s.complete_tool_call("done", serde_json::json!({"ok": true}));
+
+        s.start_tool_call("running", "t", serde_json::json!({}));
+
+        let cancelled = s.cancel_running_tool_calls("cancelled");
+        assert_eq!(cancelled, vec!["running".to_string()]);
+
+        // Completed record unchanged.
+        let done = s.tool_records.iter().find(|r| r.call_id == "done").unwrap();
+        assert!(matches!(done.status, ToolRecordStatus::Completed));
+    }
+
+    #[test]
+    fn cancel_running_with_no_running_is_noop() {
+        let mut s = fresh_session();
+        let cancelled = s.cancel_running_tool_calls("cancelled");
+        assert!(cancelled.is_empty());
+    }
+
+    #[test]
+    fn cancel_running_leaves_no_running_records_after() {
+        let mut s = fresh_session();
+        for i in 0..5 {
+            s.start_tool_call(format!("c{}", i), "t", serde_json::json!({}));
+        }
+        s.cancel_running_tool_calls("cancelled");
+        for record in &s.tool_records {
+            assert!(
+                !matches!(
+                    record.status,
+                    ToolRecordStatus::Running | ToolRecordStatus::PendingApproval
+                ),
+                "record {} left in non-terminal state after cancel",
+                record.call_id
+            );
+        }
+    }
+}

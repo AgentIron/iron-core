@@ -9,6 +9,7 @@ use crate::prompt_lifecycle::{
 use crate::runtime::IronRuntime;
 use futures::StreamExt;
 use iron_providers::ProviderEvent;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use tracing::{info, trace, warn};
 
@@ -28,6 +29,22 @@ fn limit_result_size(result: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Transition any still-running or pending-approval tool records to
+/// `Cancelled` under a single durable-mutex hold. Called from every cancel
+/// exit point in the prompt loop so no record is left with a non-terminal
+/// status after the run returns `Cancelled`.
+fn tie_off_cancelled(durable: &Arc<Mutex<DurableSession>>) {
+    let mut session = durable.lock();
+    let cancelled = session.cancel_running_tool_calls("cancelled");
+    if !cancelled.is_empty() {
+        trace!(
+            count = cancelled.len(),
+            call_ids = ?cancelled,
+            "Cancelled in-flight tool records on prompt cancel"
+        );
+    }
+}
+
 pub(crate) struct PromptRunner {
     runtime: IronRuntime,
 }
@@ -39,8 +56,8 @@ impl PromptRunner {
 
     pub(crate) async fn run(
         &self,
-        durable: &Arc<std::sync::Mutex<DurableSession>>,
-        ephemeral: &Arc<std::sync::Mutex<EphemeralTurn>>,
+        durable: &Arc<Mutex<DurableSession>>,
+        ephemeral: &Arc<Mutex<EphemeralTurn>>,
         sink: &dyn PromptSink,
         config: &Config,
         max_iterations: u32,
@@ -49,8 +66,9 @@ impl PromptRunner {
 
         loop {
             {
-                let turn = ephemeral.lock().unwrap();
+                let turn = ephemeral.lock();
                 if turn.is_cancel_requested() {
+                    tie_off_cancelled(durable);
                     return agent_client_protocol::StopReason::Cancelled;
                 }
             }
@@ -67,7 +85,7 @@ impl PromptRunner {
             }
 
             let session_id = {
-                let session = durable.lock().unwrap();
+                let session = durable.lock();
                 session.id
             };
             let tool_catalog = self
@@ -76,7 +94,7 @@ impl PromptRunner {
                 .map(Arc::new);
 
             let request = {
-                let session = durable.lock().unwrap();
+                let session = durable.lock();
                 let instructions = session.instructions.clone();
                 let compacted_context = session.compacted_context.clone();
                 let repo_payload = session.repo_instruction_payload.clone();
@@ -111,7 +129,7 @@ impl PromptRunner {
                 Err(e) => {
                     warn!(error = %e, "Request building failed");
                     {
-                        let mut session = durable.lock().unwrap();
+                        let mut session = durable.lock();
                         session.add_agent_text(format!("[Request error: {}]", e));
                     }
                     return agent_client_protocol::StopReason::EndTurn;
@@ -123,7 +141,7 @@ impl PromptRunner {
                 Err(e) => {
                     warn!(error = %e, "Provider inference failed");
                     {
-                        let mut session = durable.lock().unwrap();
+                        let mut session = durable.lock();
                         session.add_agent_text(format!("[Provider error: {}]", e));
                     }
                     return agent_client_protocol::StopReason::EndTurn;
@@ -140,11 +158,12 @@ impl PromptRunner {
             }
 
             let cancel_check = || {
-                let turn = ephemeral.lock().unwrap();
+                let turn = ephemeral.lock();
                 turn.is_cancel_requested()
             };
 
             if cancel_check() {
+                tie_off_cancelled(durable);
                 return agent_client_protocol::StopReason::Cancelled;
             }
 
@@ -163,7 +182,7 @@ impl PromptRunner {
             };
 
             let cancel_token = {
-                let turn = ephemeral.lock().unwrap();
+                let turn = ephemeral.lock();
                 turn.cancel_token()
             };
 
@@ -180,7 +199,12 @@ impl PromptRunner {
                     .await
                 {
                     Ok(calls) => calls,
-                    Err(reason) => return reason,
+                    Err(reason) => {
+                        if matches!(reason, agent_client_protocol::StopReason::Cancelled) {
+                            tie_off_cancelled(durable);
+                        }
+                        return reason;
+                    }
                 };
 
                 self.execute_tool_calls(
@@ -208,7 +232,7 @@ impl PromptRunner {
 
     async fn process_provider_stream(
         &self,
-        durable: &Arc<std::sync::Mutex<DurableSession>>,
+        durable: &Arc<Mutex<DurableSession>>,
         sink: &dyn PromptSink,
         mut stream: futures::stream::BoxStream<
             'static,
@@ -223,7 +247,7 @@ impl PromptRunner {
                 Ok(e) => e,
                 Err(_) => {
                     if !assistant_output.is_empty() {
-                        let mut session = durable.lock().unwrap();
+                        let mut session = durable.lock();
                         session.add_agent_text(&assistant_output);
                     }
                     return Err(agent_client_protocol::StopReason::EndTurn);
@@ -238,7 +262,7 @@ impl PromptRunner {
                 }
                 ProviderEvent::ToolCall { call } => {
                     {
-                        let mut session = durable.lock().unwrap();
+                        let mut session = durable.lock();
                         session.propose_tool_call(
                             &call.call_id,
                             &call.tool_name,
@@ -259,7 +283,7 @@ impl PromptRunner {
                 ProviderEvent::ChoiceRequest { request } => {
                     trace!(prompt = %request.prompt, "Choice requests are not supported by prompt runner");
                     if !assistant_output.is_empty() {
-                        let mut session = durable.lock().unwrap();
+                        let mut session = durable.lock();
                         session.add_agent_text(&assistant_output);
                     }
                     return Err(agent_client_protocol::StopReason::EndTurn);
@@ -267,7 +291,7 @@ impl PromptRunner {
                 ProviderEvent::Complete => {}
                 ProviderEvent::Error { message: _ } => {
                     if !assistant_output.is_empty() {
-                        let mut session = durable.lock().unwrap();
+                        let mut session = durable.lock();
                         session.add_agent_text(&assistant_output);
                     }
                     return Err(agent_client_protocol::StopReason::EndTurn);
@@ -276,7 +300,7 @@ impl PromptRunner {
         }
 
         if !assistant_output.is_empty() {
-            let mut session = durable.lock().unwrap();
+            let mut session = durable.lock();
             session.add_agent_text(&assistant_output);
         }
 
@@ -285,8 +309,8 @@ impl PromptRunner {
 
     async fn handle_permission_flow(
         &self,
-        durable: &Arc<std::sync::Mutex<DurableSession>>,
-        ephemeral: &Arc<std::sync::Mutex<EphemeralTurn>>,
+        durable: &Arc<Mutex<DurableSession>>,
+        ephemeral: &Arc<Mutex<EphemeralTurn>>,
         sink: &dyn PromptSink,
         tool_calls: &[iron_providers::ToolCall],
         _config: &Config,
@@ -300,7 +324,7 @@ impl PromptRunner {
                     let error_result =
                         serde_json::json!({"error": "denied - session tool catalog unavailable"});
                     {
-                        let mut session = durable.lock().unwrap();
+                        let mut session = durable.lock();
                         session.deny_tool_call(&call.call_id);
                     }
                     sink.emit(PromptLifecycleEvent::ToolCallUpdate {
@@ -341,7 +365,7 @@ impl PromptRunner {
             match verdict {
                 ApprovalVerdict::Cancelled => {
                     {
-                        let mut session = durable.lock().unwrap();
+                        let mut session = durable.lock();
                         session.cancel_tool_call(&call.call_id);
                     }
                     sink.emit(PromptLifecycleEvent::ToolCallUpdate {
@@ -357,7 +381,7 @@ impl PromptRunner {
                         .skip(1)
                     {
                         {
-                            let mut session = durable.lock().unwrap();
+                            let mut session = durable.lock();
                             session.cancel_tool_call(&remaining.call_id);
                         }
                         sink.emit(PromptLifecycleEvent::ToolCallUpdate {
@@ -376,7 +400,7 @@ impl PromptRunner {
                 ApprovalVerdict::Denied => {
                     let error_result = serde_json::json!({"error": "denied by user"});
                     {
-                        let mut session = durable.lock().unwrap();
+                        let mut session = durable.lock();
                         session.deny_tool_call(&call.call_id);
                     }
                     sink.emit(PromptLifecycleEvent::ToolCallUpdate {
@@ -395,14 +419,14 @@ impl PromptRunner {
 
     async fn request_tool_permission(
         &self,
-        ephemeral: &Arc<std::sync::Mutex<EphemeralTurn>>,
+        ephemeral: &Arc<Mutex<EphemeralTurn>>,
         sink: &dyn PromptSink,
         call_id: &str,
         tool_name: &str,
         arguments: &serde_json::Value,
     ) -> ApprovalVerdict {
         {
-            let mut turn = ephemeral.lock().unwrap();
+            let mut turn = ephemeral.lock();
             turn.request_permission(
                 call_id.to_string(),
                 tool_name.to_string(),
@@ -419,7 +443,7 @@ impl PromptRunner {
             .await;
 
         {
-            let mut turn = ephemeral.lock().unwrap();
+            let mut turn = ephemeral.lock();
             turn.resolve_permission(call_id);
         }
 
@@ -428,8 +452,8 @@ impl PromptRunner {
 
     async fn execute_tool_calls(
         &self,
-        durable: &Arc<std::sync::Mutex<DurableSession>>,
-        ephemeral: &Arc<std::sync::Mutex<EphemeralTurn>>,
+        durable: &Arc<Mutex<DurableSession>>,
+        ephemeral: &Arc<Mutex<EphemeralTurn>>,
         sink: &dyn PromptSink,
         tool_calls: Vec<iron_providers::ToolCall>,
         cancel_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -460,7 +484,7 @@ impl PromptRunner {
 
     async fn validate_and_prepare(
         &self,
-        durable: &Arc<std::sync::Mutex<DurableSession>>,
+        durable: &Arc<Mutex<DurableSession>>,
         sink: &dyn PromptSink,
         call: &iron_providers::ToolCall,
         tool_catalog: &SessionToolCatalog,
@@ -468,7 +492,7 @@ impl PromptRunner {
         let tool_def = tool_catalog.get_definition(&call.tool_name).cloned();
 
         {
-            let mut session = durable.lock().unwrap();
+            let mut session = durable.lock();
             session.start_tool_call(&call.call_id, &call.tool_name, call.arguments.clone());
         }
 
@@ -493,7 +517,7 @@ impl PromptRunner {
                     "validation_errors": errors,
                 });
                 {
-                    let mut session = durable.lock().unwrap();
+                    let mut session = durable.lock();
                     session.fail_tool_call(&call.call_id, error_result.clone());
                 }
                 sink.emit(PromptLifecycleEvent::ToolCallUpdate {
@@ -510,7 +534,7 @@ impl PromptRunner {
                     "error": format!("invalid tool schema: {}", error),
                 });
                 {
-                    let mut session = durable.lock().unwrap();
+                    let mut session = durable.lock();
                     session.fail_tool_call(&call.call_id, error_result.clone());
                 }
                 sink.emit(PromptLifecycleEvent::ToolCallUpdate {
@@ -537,8 +561,8 @@ impl PromptRunner {
 
     async fn execute_single_tool(
         &self,
-        durable: &Arc<std::sync::Mutex<DurableSession>>,
-        _ephemeral: &Arc<std::sync::Mutex<EphemeralTurn>>,
+        durable: &Arc<Mutex<DurableSession>>,
+        _ephemeral: &Arc<Mutex<EphemeralTurn>>,
         sink: &dyn PromptSink,
         call: iron_providers::ToolCall,
         cancel_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -553,7 +577,7 @@ impl PromptRunner {
                 let error_result =
                     serde_json::json!({"error": "Failed to get session tool catalog"});
                 {
-                    let mut session = durable.lock().unwrap();
+                    let mut session = durable.lock();
                     session.fail_tool_call(&call.call_id, error_result.clone());
                 }
                 sink.emit(PromptLifecycleEvent::ToolCallUpdate {
@@ -584,7 +608,7 @@ impl PromptRunner {
                 cancel_token,
                 tool_catalog.clone(),
             )
-                .await;
+            .await;
             return;
         }
 
@@ -594,7 +618,7 @@ impl PromptRunner {
 
     async fn execute_standard_tool(
         &self,
-        durable: &Arc<std::sync::Mutex<DurableSession>>,
+        durable: &Arc<Mutex<DurableSession>>,
         sink: &dyn PromptSink,
         call: iron_providers::ToolCall,
         tool_catalog: &SessionToolCatalog,
@@ -606,7 +630,7 @@ impl PromptRunner {
         let tool_name_owned = call.tool_name.clone();
         let arguments = call.arguments.clone();
         let execute_future = {
-            let session_guard = durable.lock().unwrap();
+            let session_guard = durable.lock();
             tool_catalog.execute(&call_id_owned, &tool_name_owned, arguments, &session_guard)
         };
 
@@ -616,7 +640,7 @@ impl PromptRunner {
             Ok(result) => {
                 let limited_result = limit_result_size(result);
                 {
-                    let mut session = durable.lock().unwrap();
+                    let mut session = durable.lock();
                     session.complete_tool_call(&call_id, limited_result.clone());
                 }
                 sink.emit(PromptLifecycleEvent::ToolCallUpdate {
@@ -630,7 +654,7 @@ impl PromptRunner {
             Err(error) => {
                 let result = serde_json::json!({"error": error.to_string()});
                 {
-                    let mut session = durable.lock().unwrap();
+                    let mut session = durable.lock();
                     session.fail_tool_call(&call_id, result.clone());
                 }
                 sink.emit(PromptLifecycleEvent::ToolCallUpdate {
@@ -646,14 +670,14 @@ impl PromptRunner {
 
     async fn cancel_remaining_tool_calls(
         &self,
-        durable: &Arc<std::sync::Mutex<DurableSession>>,
+        durable: &Arc<Mutex<DurableSession>>,
         sink: &dyn PromptSink,
         first: iron_providers::ToolCall,
         rest: &mut std::iter::Peekable<std::vec::IntoIter<iron_providers::ToolCall>>,
     ) {
         for call in std::iter::once(first).chain(rest) {
             {
-                let mut session = durable.lock().unwrap();
+                let mut session = durable.lock();
                 session.cancel_tool_call(&call.call_id);
             }
             sink.emit(PromptLifecycleEvent::ToolCallUpdate {
@@ -688,8 +712,8 @@ impl PromptRunner {
     #[cfg(feature = "embedded-python")]
     async fn execute_python_script(
         &self,
-        durable: &Arc<std::sync::Mutex<DurableSession>>,
-        ephemeral: &Arc<std::sync::Mutex<EphemeralTurn>>,
+        durable: &Arc<Mutex<DurableSession>>,
+        ephemeral: &Arc<Mutex<EphemeralTurn>>,
         sink: &dyn PromptSink,
         call: &iron_providers::ToolCall,
         cancel_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -706,7 +730,7 @@ impl PromptRunner {
             None => {
                 let error_result = serde_json::json!({"error": "missing 'script' argument"});
                 {
-                    let mut session = durable.lock().unwrap();
+                    let mut session = durable.lock();
                     session.fail_tool_call(&call.call_id, error_result.clone());
                 }
                 sink.emit(PromptLifecycleEvent::ToolCallUpdate {
@@ -728,7 +752,7 @@ impl PromptRunner {
         let script_id = uuid::Uuid::new_v4().to_string();
 
         {
-            let mut session = durable.lock().unwrap();
+            let mut session = durable.lock();
             session.record_script_start(&script_id, &call.call_id, &script, Some(input.clone()));
         }
 
@@ -831,7 +855,7 @@ impl PromptRunner {
 
                     let Some(definition) = tool_def else {
                         {
-                            let mut session = durable.lock().unwrap();
+                            let mut session = durable.lock();
                             session.start_tool_call(&req.call_id, &req.tool_name, req.args.clone());
                             session.link_child_to_script(&script_id, &req.call_id);
                         }
@@ -839,7 +863,7 @@ impl PromptRunner {
                         let req_call_id = req.call_id.clone();
                         let req_tool_name = req.tool_name.clone();
                         let execute_future = {
-                            let session_guard = durable.lock().unwrap();
+                            let session_guard = durable.lock();
                             session_tool_catalog.execute(
                                 &req.call_id,
                                 &req.tool_name,
@@ -852,7 +876,7 @@ impl PromptRunner {
                             Ok(result) => {
                                 let limited = limit_result_size(result);
                                 {
-                                    let mut session = durable.lock().unwrap();
+                                    let mut session = durable.lock();
                                     session.complete_tool_call(&req_call_id, limited.clone());
                                 }
                                 (ChildCallStatus::Completed, Some(limited))
@@ -860,7 +884,7 @@ impl PromptRunner {
                             Err(error) => {
                                 let result = serde_json::json!({"error": error.to_string()});
                                 {
-                                    let mut session = durable.lock().unwrap();
+                                    let mut session = durable.lock();
                                     session.fail_tool_call(&req_call_id, result.clone());
                                 }
                                 (ChildCallStatus::Failed, Some(result))
@@ -887,7 +911,13 @@ impl PromptRunner {
                         })
                         .await;
 
-                        let _ = req.response_tx.send(result);
+                        if let Err(err) = req.response_tx.send(result) {
+                            tracing::debug!(
+                                call_id = %req.call_id,
+                                ?err,
+                                "tool result receiver dropped (tool not found)"
+                            );
+                        }
                         continue;
                     };
 
@@ -901,7 +931,7 @@ impl PromptRunner {
                                 "validation_errors": errors,
                             });
                             {
-                                let mut session = durable.lock().unwrap();
+                                let mut session = durable.lock();
                                 session.start_tool_call(
                                     &req.call_id,
                                     &req.tool_name,
@@ -918,7 +948,7 @@ impl PromptRunner {
                         crate::schema::SchemaValidationOutcome::BadSchema { error } => {
                             let error_result = serde_json::json!({"error": format!("invalid tool schema: {}", error)});
                             {
-                                let mut session = durable.lock().unwrap();
+                                let mut session = durable.lock();
                                 session.start_tool_call(
                                     &req.call_id,
                                     &req.tool_name,
@@ -947,7 +977,7 @@ impl PromptRunner {
                     let requires_permission = approval_strategy.is_approval_required(tool_requires);
                     if requires_permission {
                         {
-                            let mut session = durable.lock().unwrap();
+                            let mut session = durable.lock();
                             session.propose_tool_call(
                                 &req.call_id,
                                 &req.tool_name,
@@ -969,7 +999,7 @@ impl PromptRunner {
                             ApprovalVerdict::AllowOnce => {}
                             ApprovalVerdict::Denied => {
                                 {
-                                    let mut session = durable.lock().unwrap();
+                                    let mut session = durable.lock();
                                     session.deny_tool_call(&req.call_id);
                                 }
                                 sink.emit(PromptLifecycleEvent::ScriptActivity {
@@ -983,12 +1013,20 @@ impl PromptRunner {
                                     })),
                                 })
                                 .await;
-                                let _ = req.response_tx.send((ChildCallStatus::Denied, None));
+                                if let Err(err) =
+                                    req.response_tx.send((ChildCallStatus::Denied, None))
+                                {
+                                    tracing::debug!(
+                                        call_id = %req.call_id,
+                                        ?err,
+                                        "child tool result receiver dropped (denied)"
+                                    );
+                                }
                                 continue;
                             }
                             ApprovalVerdict::Cancelled => {
                                 {
-                                    let mut session = durable.lock().unwrap();
+                                    let mut session = durable.lock();
                                     session.cancel_tool_call(&req.call_id);
                                 }
                                 cancel_token.store(true, Ordering::SeqCst);
@@ -1003,14 +1041,22 @@ impl PromptRunner {
                                     })),
                                 })
                                 .await;
-                                let _ = req.response_tx.send((ChildCallStatus::Cancelled, None));
+                                if let Err(err) =
+                                    req.response_tx.send((ChildCallStatus::Cancelled, None))
+                                {
+                                    tracing::debug!(
+                                        call_id = %req.call_id,
+                                        ?err,
+                                        "child tool result receiver dropped (cancelled)"
+                                    );
+                                }
                                 continue;
                             }
                         }
                     }
 
                     {
-                        let mut session = durable.lock().unwrap();
+                        let mut session = durable.lock();
                         session.start_tool_call(&req.call_id, &req.tool_name, req.args.clone());
                         session.link_child_to_script(&script_id, &req.call_id);
                     }
@@ -1018,7 +1064,7 @@ impl PromptRunner {
                     let req_call_id = req.call_id.clone();
                     let req_tool_name = req.tool_name.clone();
                     let execute_future = {
-                        let session_guard = durable.lock().unwrap();
+                        let session_guard = durable.lock();
                         session_tool_catalog.execute(
                             &req.call_id,
                             &req.tool_name,
@@ -1031,7 +1077,7 @@ impl PromptRunner {
                         Ok(result) => {
                             let limited = limit_result_size(result);
                             {
-                                let mut session = durable.lock().unwrap();
+                                let mut session = durable.lock();
                                 session.complete_tool_call(&req_call_id, limited.clone());
                             }
                             (ChildCallStatus::Completed, Some(limited))
@@ -1039,7 +1085,7 @@ impl PromptRunner {
                         Err(error) => {
                             let result = serde_json::json!({"error": error.to_string()});
                             {
-                                let mut session = durable.lock().unwrap();
+                                let mut session = durable.lock();
                                 session.fail_tool_call(&req_call_id, result.clone());
                             }
                             (ChildCallStatus::Failed, Some(result))
@@ -1065,7 +1111,13 @@ impl PromptRunner {
                     })
                     .await;
 
-                    let _ = req.response_tx.send((status, result));
+                    if let Err(err) = req.response_tx.send((status, result)) {
+                        tracing::debug!(
+                            call_id = %req_call_id,
+                            ?err,
+                            "child tool result receiver dropped after execution"
+                        );
+                    }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -1084,7 +1136,7 @@ impl PromptRunner {
         });
 
         {
-            let mut session = durable.lock().unwrap();
+            let mut session = durable.lock();
             let child_ids: Vec<String> = output
                 .child_outcomes
                 .iter()
@@ -1129,21 +1181,21 @@ impl PromptRunner {
         let acp_status = match output.status {
             ScriptExecStatus::Completed | ScriptExecStatus::CompletedWithFailures => {
                 {
-                    let mut session = durable.lock().unwrap();
+                    let mut session = durable.lock();
                     session.complete_tool_call(&call.call_id, result_json.clone());
                 }
                 ToolUpdateStatus::Completed
             }
             ScriptExecStatus::Failed => {
                 {
-                    let mut session = durable.lock().unwrap();
+                    let mut session = durable.lock();
                     session.fail_tool_call(&call.call_id, result_json.clone());
                 }
                 ToolUpdateStatus::Failed
             }
             ScriptExecStatus::Cancelled => {
                 {
-                    let mut session = durable.lock().unwrap();
+                    let mut session = durable.lock();
                     session.cancel_tool_call(&call.call_id);
                 }
                 ToolUpdateStatus::Failed
@@ -1161,11 +1213,11 @@ impl PromptRunner {
 
     pub(crate) async fn maybe_compact_post_turn(
         &self,
-        durable: &Arc<std::sync::Mutex<DurableSession>>,
+        durable: &Arc<Mutex<DurableSession>>,
         config: &Config,
     ) {
         let should = {
-            let session = durable.lock().unwrap();
+            let session = durable.lock();
             CompactionEngine::should_compact(
                 session.uncompacted_tokens,
                 config.context_management.maintenance_threshold,
@@ -1178,7 +1230,7 @@ impl PromptRunner {
         }
 
         let input = {
-            let session = durable.lock().unwrap();
+            let session = durable.lock();
             CompactionEngine::prepare(
                 &session,
                 &config.context_management.tail_retention,
@@ -1188,7 +1240,7 @@ impl PromptRunner {
 
         match CompactionEngine::execute(input, self.runtime.provider(), &config.model).await {
             Ok((compacted, tail)) => {
-                let mut session = durable.lock().unwrap();
+                let mut session = durable.lock();
                 session.apply_compaction(compacted, tail);
                 info!(
                     session_id = %session.id,
@@ -1202,18 +1254,14 @@ impl PromptRunner {
         }
     }
 
-    async fn maybe_compact_hard_fit(
-        &self,
-        durable: &Arc<std::sync::Mutex<DurableSession>>,
-        config: &Config,
-    ) {
+    async fn maybe_compact_hard_fit(&self, durable: &Arc<Mutex<DurableSession>>, config: &Config) {
         let window = match config.context_management.context_window_hint {
             Some(w) => w,
             None => return,
         };
 
         let needs_compaction = {
-            let session = durable.lock().unwrap();
+            let session = durable.lock();
             if !session.is_idle() {
                 return;
             }
@@ -1239,7 +1287,7 @@ impl PromptRunner {
         }
 
         let input = {
-            let session = durable.lock().unwrap();
+            let session = durable.lock();
             CompactionEngine::prepare(
                 &session,
                 &config.context_management.tail_retention,
@@ -1249,7 +1297,7 @@ impl PromptRunner {
 
         match CompactionEngine::execute(input, self.runtime.provider(), &config.model).await {
             Ok((compacted, tail)) => {
-                let mut session = durable.lock().unwrap();
+                let mut session = durable.lock();
                 session.apply_compaction(compacted, tail);
                 info!(
                     session_id = %session.id,

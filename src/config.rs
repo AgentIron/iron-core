@@ -10,7 +10,7 @@
 //! Projection is a snapshot — later mutations to the caller's config do not
 //! affect already-constructed runtimes or agents.
 
-use crate::error::LoopError;
+use crate::error::RuntimeError;
 use iron_providers::{GenerationConfig, ToolPolicy};
 
 pub use crate::context::config::ContextManagementConfig;
@@ -24,7 +24,7 @@ pub use crate::prompt::config::PromptCompositionConfig;
 /// caller's config object do not affect already-constructed sessions.
 pub trait ConfigSource {
     /// Project a validated `Config` snapshot from this source.
-    fn to_config(&self) -> Result<Config, LoopError>;
+    fn to_config(&self) -> Result<Config, RuntimeError>;
 }
 
 /// Runtime configuration for `iron-core`.
@@ -167,20 +167,20 @@ impl Config {
 
     /// Validate this config, returning an error if required fields are missing
     /// or generation constraints are out of range.
-    pub fn validate(&self) -> Result<(), LoopError> {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
         if self.model.trim().is_empty() {
-            return Err(LoopError::invalid_config(
+            return Err(RuntimeError::invalid_config(
                 "Config model is required but was empty",
             ));
         }
         if self.max_iterations == 0 {
-            return Err(LoopError::invalid_config(
+            return Err(RuntimeError::invalid_config(
                 "Config max_iterations must be greater than 0",
             ));
         }
         if let Some(temp) = self.default_generation.temperature {
             if !(0.0..=2.0).contains(&temp) {
-                return Err(LoopError::invalid_config(format!(
+                return Err(RuntimeError::invalid_config(format!(
                     "Config default temperature must be between 0.0 and 2.0, got {}",
                     temp
                 )));
@@ -188,7 +188,7 @@ impl Config {
         }
         self.context_management
             .validate()
-            .map_err(LoopError::invalid_config)?;
+            .map_err(RuntimeError::invalid_config)?;
         if self.embedded_python.enabled {
             self.embedded_python.validate()?;
         }
@@ -319,24 +319,24 @@ impl EmbeddedPythonConfig {
     }
 
     /// Validate the embedded Python configuration.
-    pub fn validate(&self) -> Result<(), LoopError> {
+    pub fn validate(&self) -> Result<(), RuntimeError> {
         if self.max_script_timeout_secs == 0 {
-            return Err(LoopError::invalid_config(
+            return Err(RuntimeError::invalid_config(
                 "EmbeddedPythonConfig max_script_timeout_secs must be > 0",
             ));
         }
         if self.max_source_bytes == 0 {
-            return Err(LoopError::invalid_config(
+            return Err(RuntimeError::invalid_config(
                 "EmbeddedPythonConfig max_source_bytes must be > 0",
             ));
         }
         if self.max_result_bytes == 0 {
-            return Err(LoopError::invalid_config(
+            return Err(RuntimeError::invalid_config(
                 "EmbeddedPythonConfig max_result_bytes must be > 0",
             ));
         }
         if self.max_child_calls == 0 {
-            return Err(LoopError::invalid_config(
+            return Err(RuntimeError::invalid_config(
                 "EmbeddedPythonConfig max_child_calls must be > 0",
             ));
         }
@@ -396,6 +396,10 @@ pub struct PluginConfig {
     pub enabled_by_default: bool,
     /// Base directory for caching plugin artifacts
     pub artifact_cache_dir: std::path::PathBuf,
+    /// Maximum WASM linear memory per plugin, in bytes. Applied as a ceiling —
+    /// if a plugin's manifest declares a smaller limit, the smaller limit wins.
+    /// Defaults to 128 MB.
+    pub max_memory_bytes: u64,
 }
 
 impl Default for PluginConfig {
@@ -404,6 +408,7 @@ impl Default for PluginConfig {
             enabled: false,
             enabled_by_default: true,
             artifact_cache_dir: std::path::PathBuf::from("./plugin_cache"),
+            max_memory_bytes: crate::plugin::wasm_host::DEFAULT_PLUGIN_MAX_MEMORY_BYTES,
         }
     }
 }
@@ -429,6 +434,12 @@ impl PluginConfig {
     /// Set the artifact cache directory.
     pub fn with_artifact_cache_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.artifact_cache_dir = dir;
+        self
+    }
+
+    /// Set the per-plugin WASM memory ceiling, in bytes.
+    pub fn with_max_memory_bytes(mut self, bytes: u64) -> Self {
+        self.max_memory_bytes = bytes;
         self
     }
 }

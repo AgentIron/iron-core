@@ -658,7 +658,7 @@ async fn test_mcp_unavailable_tool_diagnostics_disabled_server() {
 
     // Disable the server for this session
     {
-        let mut sess = session.lock().unwrap();
+        let mut sess = session.lock();
         sess.set_mcp_server_enabled("diagnostics-server", false);
     }
 
@@ -667,7 +667,7 @@ async fn test_mcp_unavailable_tool_diagnostics_disabled_server() {
 
     // Try to execute a tool from the disabled server
     let execute_future = {
-        let session_guard = session.lock().unwrap();
+        let session_guard = session.lock();
         catalog.execute(
             "call-1",
             "mcp_diagnostics-server_test_tool",
@@ -728,7 +728,7 @@ async fn test_mcp_unavailable_tool_diagnostics_unknown_tool() {
     // Try to execute a non-existent tool from the server
     // This will fail because the server is unhealthy (not connected)
     let execute_future = {
-        let session_guard = session.lock().unwrap();
+        let session_guard = session.lock();
         catalog.execute(
             "call-1",
             "mcp_tools-server_nonexistent_tool",
@@ -771,7 +771,7 @@ async fn test_mcp_unavailable_tool_diagnostics_unconfigured_server() {
 
     // Try to execute a tool from a server that was never configured
     let execute_future = {
-        let session_guard = session.lock().unwrap();
+        let session_guard = session.lock();
         catalog.execute(
             "call-1",
             "mcp_unconfigured-server_some_tool",
@@ -820,7 +820,7 @@ async fn test_mcp_runtime_default_enablement_semantics() {
         .expect("Failed to create session");
 
     // Verify server is disabled (runtime default overrides server default)
-    let sess = session.lock().unwrap();
+    let sess = session.lock();
     let is_enabled = sess.is_mcp_server_enabled("override-server");
     assert_eq!(
         is_enabled,
@@ -855,7 +855,7 @@ async fn test_mcp_runtime_default_enablement_semantics() {
         .expect("Failed to create session");
 
     // Verify server is enabled (runtime default overrides server default)
-    let sess2 = session2.lock().unwrap();
+    let sess2 = session2.lock();
     let is_enabled2 = sess2.is_mcp_server_enabled("override-server2");
     assert_eq!(
         is_enabled2,

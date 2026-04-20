@@ -15,78 +15,19 @@ use crate::{
 use agent_client_protocol::Agent;
 use futures::Stream;
 use iron_providers::Provider;
+use parking_lot::Mutex;
 use std::{
     cell::RefCell,
     collections::HashMap,
     pin::Pin,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::Arc,
     task::{Context, Poll},
 };
 
 // Permission option ID constants to avoid magic strings
 const PERMISSION_ALLOW_ONCE: &str = "allow_once";
 const PERMISSION_REJECT_ONCE: &str = "reject_once";
-
-// ---------------------------------------------------------------------------
-// Legacy event types (preserved for backward compatibility)
-// ---------------------------------------------------------------------------
-
-/// Events emitted during a prompt/turn using the legacy blocking API.
-///
-/// These events are collected by [`AgentSession::drain_events`] after
-/// a call to [`AgentSession::prompt`] completes. For streaming access
-/// to events, use [`AgentSession::prompt_stream`] instead.
-///
-/// # Example
-///
-/// ```ignore
-/// let outcome = session.prompt("Hello").await;
-/// for event in session.drain_events() {
-///     match event {
-///         AgentEvent::TextChunk { text } => println!("{}", text),
-///         AgentEvent::ToolCallStarted { call_id, tool_name } => {
-///             println!("Tool {} started", tool_name);
-///         }
-///         _ => {}
-///     }
-/// }
-/// ```
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    /// A chunk of text output from the model.
-    TextChunk {
-        /// The text content.
-        text: String,
-    },
-    /// A tool call has started executing.
-    ToolCallStarted {
-        /// Unique identifier for this tool call.
-        call_id: String,
-        /// Name of the tool being called.
-        tool_name: String,
-    },
-    /// An update on the status of a tool call.
-    ToolCallUpdate {
-        /// Unique identifier for this tool call.
-        call_id: String,
-        /// Current status of the tool call.
-        status: FacadeToolStatus,
-        /// Optional output from the tool (if available).
-        output: Option<serde_json::Value>,
-    },
-}
-
-/// Status of a tool call in the legacy event API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FacadeToolStatus {
-    /// The tool call is currently in progress.
-    InProgress,
-    /// The tool call completed successfully.
-    Completed,
-    /// The tool call failed.
-    Failed,
-}
 
 /// Outcome of a prompt/turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -577,7 +518,7 @@ impl IronAgent {
     }
 
     /// Get the MCP server registry for inspection.
-    pub fn mcp_registry(&self) -> std::sync::RwLockReadGuard<'_, crate::mcp::McpServerRegistry> {
+    pub fn mcp_registry(&self) -> parking_lot::RwLockReadGuard<'_, crate::mcp::McpServerRegistry> {
         self.runtime.mcp_registry()
     }
 
@@ -592,7 +533,7 @@ impl IronAgent {
     /// Get the plugin registry for inspection.
     pub fn plugin_registry(
         &self,
-    ) -> std::sync::RwLockReadGuard<'_, crate::plugin::registry::PluginRegistry> {
+    ) -> parking_lot::RwLockReadGuard<'_, crate::plugin::registry::PluginRegistry> {
         self.runtime.plugin_registry()
     }
 
@@ -763,7 +704,6 @@ type SyncPermissionHandler = Rc<RefCell<Option<Box<dyn Fn(&str) -> PermissionVer
 /// ```
 pub struct AgentConnection {
     inner: Rc<IronConnection>,
-    events: Rc<RefCell<Vec<AgentEvent>>>,
     permission_handler: SyncPermissionHandler,
     async_permission_handler: Rc<RefCell<Option<AsyncPermissionHandler>>>,
     active_streams: Rc<RefCell<HashMap<String, StreamPromptState>>>,
@@ -788,13 +728,11 @@ impl AgentConnection {
 
     fn new(runtime: IronRuntime) -> Self {
         let inner = Rc::new(IronConnection::new(runtime));
-        let events = Rc::new(RefCell::new(Vec::new()));
         let permission_handler = Rc::new(RefCell::new(None));
         let async_permission_handler = Rc::new(RefCell::new(None));
         let active_streams = Rc::new(RefCell::new(HashMap::new()));
 
         let client: Rc<dyn ClientChannel> = Rc::new(FacadeClientChannel {
-            events: events.clone(),
             permission_handler: permission_handler.clone(),
             async_permission_handler: async_permission_handler.clone(),
             active_streams: active_streams.clone(),
@@ -803,7 +741,6 @@ impl AgentConnection {
 
         Self {
             inner,
-            events,
             permission_handler,
             async_permission_handler,
             active_streams,
@@ -851,7 +788,6 @@ impl AgentConnection {
             id: session_id,
             durable,
             connection: self.inner.clone(),
-            events: self.events.clone(),
             active_streams: self.active_streams.clone(),
         })
     }
@@ -978,7 +914,6 @@ impl AgentConnection {
             id: session_id,
             durable,
             connection: self.inner.clone(),
-            events: self.events.clone(),
             active_streams: self.active_streams.clone(),
         })
     }
@@ -989,7 +924,6 @@ impl AgentConnection {
 // ---------------------------------------------------------------------------
 
 struct FacadeClientChannel {
-    events: Rc<RefCell<Vec<AgentEvent>>>,
     permission_handler: SyncPermissionHandler,
     async_permission_handler: Rc<RefCell<Option<AsyncPermissionHandler>>>,
     active_streams: Rc<RefCell<HashMap<String, StreamPromptState>>>,
@@ -1009,9 +943,6 @@ impl ClientChannel for FacadeClientChannel {
         &self,
         notification: agent_client_protocol::SessionNotification,
     ) -> Pin<Box<dyn std::future::Future<Output = agent_client_protocol::Result<()>>>> {
-        if let Some(event) = convert_notification(&notification) {
-            self.events.borrow_mut().push(event.clone());
-        }
         let session_key = notification.session_id.to_string();
         let streams = self.active_streams.borrow();
         if let Some(state) = streams.get(&session_key) {
@@ -1163,41 +1094,6 @@ fn verdict_to_outcome(
     }
 }
 
-fn convert_notification(
-    notification: &agent_client_protocol::SessionNotification,
-) -> Option<AgentEvent> {
-    match &notification.update {
-        agent_client_protocol::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
-            agent_client_protocol::ContentBlock::Text(tc) => Some(AgentEvent::TextChunk {
-                text: tc.text.clone(),
-            }),
-            _ => None,
-        },
-        agent_client_protocol::SessionUpdate::ToolCall(tc) => Some(AgentEvent::ToolCallStarted {
-            call_id: tc.tool_call_id.to_string(),
-            tool_name: tc.title.clone(),
-        }),
-        agent_client_protocol::SessionUpdate::ToolCallUpdate(update) => {
-            let status = match update.fields.status {
-                Some(agent_client_protocol::ToolCallStatus::InProgress) => {
-                    FacadeToolStatus::InProgress
-                }
-                Some(agent_client_protocol::ToolCallStatus::Completed) => {
-                    FacadeToolStatus::Completed
-                }
-                Some(agent_client_protocol::ToolCallStatus::Failed) => FacadeToolStatus::Failed,
-                _ => return None,
-            };
-            Some(AgentEvent::ToolCallUpdate {
-                call_id: update.tool_call_id.to_string(),
-                status,
-                output: update.fields.raw_output.clone(),
-            })
-        }
-        _ => None,
-    }
-}
-
 fn convert_notification_to_prompt_event_with_index(
     notification: &agent_client_protocol::SessionNotification,
     tool_name_index: &Rc<RefCell<HashMap<String, String>>>,
@@ -1278,11 +1174,7 @@ fn convert_notification_to_prompt_event_with_index(
 ///
 /// # Prompt Methods
 ///
-/// Three methods are available for sending prompts:
-///
-/// - [`prompt`](AgentSession::prompt) - Blocking text-only method that waits
-///   for completion and returns the outcome. Events are collected and can be
-///   retrieved with [`drain_events`](AgentSession::drain_events).
+/// Two streaming methods are available for sending prompts:
 ///
 /// - [`prompt_stream`](AgentSession::prompt_stream) - Streaming text-only
 ///   method. Returns a stream of events and a handle for real-time interaction.
@@ -1298,12 +1190,6 @@ fn convert_notification_to_prompt_event_with_index(
 ///
 /// ```ignore
 /// let session = conn.create_session().unwrap();
-///
-/// // Using the blocking API
-/// let outcome = session.prompt("Hello, world!").await;
-/// for event in session.drain_events() {
-///     println!("{:?}", event);
-/// }
 ///
 /// // Using the streaming API (text-only convenience)
 /// let (handle, mut events) = session.prompt_stream("Hello again");
@@ -1334,7 +1220,6 @@ pub struct AgentSession {
     id: SessionId,
     durable: Arc<Mutex<DurableSession>>,
     connection: Rc<IronConnection>,
-    events: Rc<RefCell<Vec<AgentEvent>>>,
     active_streams: Rc<RefCell<HashMap<String, StreamPromptState>>>,
 }
 
@@ -1361,15 +1246,11 @@ impl AgentSession {
         self.id
     }
 
-    /// Send a prompt to the agent and wait for completion.
+    /// Send a text prompt and await completion.
     ///
-    /// This is the blocking API. The method returns when the turn completes
-    /// or fails. Use [`drain_events`](AgentSession::drain_events) to retrieve
-    /// events that occurred during the prompt.
-    ///
-    /// For streaming access to events, use [`prompt_stream`](AgentSession::prompt_stream).
+    /// Returns the terminal [`PromptOutcome`]. For incremental event access,
+    /// use [`prompt_stream`](AgentSession::prompt_stream).
     pub async fn prompt(&self, text: &str) -> PromptOutcome {
-        self.events.borrow_mut().clear();
         let acp_session_id = agent_client_protocol::SessionId::new(self.id.to_string());
         let request = agent_client_protocol::PromptRequest::new(
             acp_session_id,
@@ -1383,13 +1264,8 @@ impl AgentSession {
         }
     }
 
-    /// Send a prompt with content blocks and wait for completion.
-    ///
-    /// This is similar to [`prompt`](AgentSession::prompt) but accepts
-    /// structured content blocks instead of plain text. Use this for
-    /// multimodal prompts (text + images).
+    /// Send a multimodal prompt and await completion.
     pub async fn prompt_with_blocks(&self, blocks: &[ContentBlock]) -> PromptOutcome {
-        self.events.borrow_mut().clear();
         let acp_session_id = agent_client_protocol::SessionId::new(self.id.to_string());
         let acp_blocks: Vec<_> = blocks.iter().map(to_acp_content_block).collect();
         let request = agent_client_protocol::PromptRequest::new(acp_session_id, acp_blocks);
@@ -1405,7 +1281,7 @@ impl AgentSession {
     /// [`ContentBlock`] and delegates to the shared streaming path used by
     /// [`prompt_stream_with_blocks`](AgentSession::prompt_stream_with_blocks).
     ///
-    /// See [`prompt_stream_with_blocks`] for the full multimodal streaming API.
+    /// See [`prompt_stream_with_blocks`](AgentSession::prompt_stream_with_blocks) for the full multimodal streaming API.
     ///
     /// # Example
     ///
@@ -1434,7 +1310,7 @@ impl AgentSession {
     ///
     /// This is the streaming API for structured content. It accepts a slice of
     /// [`ContentBlock`] values (text, images, resources) and returns the same
-    /// `(PromptHandle, PromptEvents)` contract as [`prompt_stream`].
+    /// `(PromptHandle, PromptEvents)` contract as [`prompt_stream`](AgentSession::prompt_stream).
     ///
     /// Multimodal streaming preserves the same event-ordering guarantees as
     /// text-only streaming: incremental output may arrive before completion,
@@ -1442,7 +1318,7 @@ impl AgentSession {
     /// resolution, and exactly one terminal `Complete` is emitted last.
     ///
     /// An empty slice is accepted and follows the same semantics as
-    /// [`prompt_with_blocks`] for empty input.
+    /// [`prompt_stream_with_blocks`](AgentSession::prompt_stream_with_blocks) for empty input.
     ///
     /// # Example
     ///
@@ -1545,57 +1421,35 @@ impl AgentSession {
         let _ = self.connection.cancel(notification).await;
     }
 
-    /// Drain and return all collected legacy events.
-    ///
-    /// This retrieves events collected by the blocking [`prompt`](AgentSession::prompt)
-    /// method. The event buffer is cleared after draining.
-    pub fn drain_events(&self) -> Vec<AgentEvent> {
-        std::mem::take(&mut *self.events.borrow_mut())
-    }
-
     /// Get the conversation timeline.
     ///
     /// Returns a list of timeline entries representing the conversation history.
     pub fn timeline(&self) -> Vec<TimelineEntry> {
-        self.durable
-            .lock()
-            .map(|session| session.timeline.clone())
-            .unwrap_or_default()
+        self.durable.lock().timeline.clone()
     }
 
     /// Get the conversation messages.
     ///
     /// Returns the structured messages in the conversation.
     pub fn messages(&self) -> Vec<StructuredMessage> {
-        self.durable
-            .lock()
-            .map(|session| session.messages.clone())
-            .unwrap_or_default()
+        self.durable.lock().messages.clone()
     }
 
     /// Get the tool call records.
     ///
     /// Returns a list of all tool calls made during this session.
     pub fn tool_records(&self) -> Vec<DurableToolRecord> {
-        self.durable
-            .lock()
-            .map(|session| session.tool_records.clone())
-            .unwrap_or_default()
+        self.durable.lock().tool_records.clone()
     }
 
     /// Check if the session is empty (has no messages).
     pub fn is_empty(&self) -> bool {
-        self.durable
-            .lock()
-            .map(|session| session.is_empty())
-            .unwrap_or(true)
+        self.durable.lock().is_empty()
     }
 
     /// Set the system instructions for this session.
     pub fn set_instructions(&self, instructions: impl Into<String>) {
-        if let Ok(mut session) = self.durable.lock() {
-            session.set_instructions(instructions);
-        }
+        self.durable.lock().set_instructions(instructions);
     }
 
     /// Get a snapshot of the active context.
@@ -1607,47 +1461,33 @@ impl AgentSession {
         current_prompt: Option<&str>,
         context_window_hint: Option<usize>,
     ) -> crate::context::ActiveContextSnapshot {
-        if let Ok(session) = self.durable.lock() {
-            let tail = session.to_transcript();
-            crate::context::ContextTelemetry::for_session(
-                session.instructions.as_deref(),
-                session.compacted_context.as_ref(),
-                &tail.messages,
-                tool_registry,
-                current_prompt,
-                context_window_hint,
-            )
-        } else {
-            crate::context::ActiveContextSnapshot {
-                total_tokens: 0,
-                context_window_limit: context_window_hint,
-                quality: crate::context::ContextQuality::Unknown,
-                categories: vec![],
-            }
-        }
+        let session = self.durable.lock();
+        let tail = session.to_transcript();
+        crate::context::ContextTelemetry::for_session(
+            session.instructions.as_deref(),
+            session.compacted_context.as_ref(),
+            &tail.messages,
+            tool_registry,
+            current_prompt,
+            context_window_hint,
+        )
     }
 
     /// Check if the session is idle (no active prompts or tool calls).
     pub fn is_idle(&self) -> bool {
-        let durable_idle = self.durable.lock().map(|s| s.is_idle()).unwrap_or(true);
+        let durable_idle = self.durable.lock().is_idle();
         let has_active_prompt = self.connection.runtime().has_active_prompt(self.id);
         durable_idle && !has_active_prompt
     }
 
     /// Get the number of uncompacted tokens in the session.
     pub fn uncompacted_tokens(&self) -> usize {
-        self.durable
-            .lock()
-            .map(|s| s.uncompacted_tokens)
-            .unwrap_or(0)
+        self.durable.lock().uncompacted_tokens
     }
 
     /// Get the compacted context, if any.
     pub fn compacted_context(&self) -> Option<crate::context::models::CompactedContext> {
-        self.durable
-            .lock()
-            .ok()
-            .and_then(|s| s.compacted_context.clone())
+        self.durable.lock().compacted_context.clone()
     }
 
     /// Create a checkpoint by compacting the session context.
@@ -1670,7 +1510,7 @@ impl AgentSession {
         }
 
         let input = {
-            let session = self.durable.lock().map_err(|e| e.to_string())?;
+            let session = self.durable.lock();
             CompactionEngine::prepare(
                 &session,
                 &config.context_management.tail_retention,
@@ -1682,7 +1522,7 @@ impl AgentSession {
         let (compacted, tail) = CompactionEngine::execute(input, provider, &config.model).await?;
 
         {
-            let mut session = self.durable.lock().map_err(|e| e.to_string())?;
+            let mut session = self.durable.lock();
             session.apply_compaction(compacted, tail);
         }
 
@@ -1710,7 +1550,7 @@ impl AgentSession {
         let config = self.connection.runtime().config().clone();
 
         let (compacted, tail) = {
-            let session = self.durable.lock().map_err(|e| e.to_string())?;
+            let session = self.durable.lock();
             let (_older, tail) = CompactionEngine::split_session(
                 &session,
                 &config.context_management.tail_retention,
@@ -1718,7 +1558,7 @@ impl AgentSession {
             (session.compacted_context.clone(), tail)
         };
 
-        let session = self.durable.lock().map_err(|e| e.to_string())?;
+        let session = self.durable.lock();
         HandoffExporter::export(
             &session,
             model,
@@ -1731,48 +1571,34 @@ impl AgentSession {
 
     /// Enable or disable an MCP server for this session.
     pub fn set_mcp_server_enabled(&self, server_id: impl Into<String>, enabled: bool) {
-        if let Ok(mut session) = self.durable.lock() {
-            session.set_mcp_server_enabled(server_id, enabled);
-        }
+        self.durable
+            .lock()
+            .set_mcp_server_enabled(server_id, enabled);
     }
 
     /// Check if an MCP server is enabled for this session.
     pub fn is_mcp_server_enabled(&self, server_id: &str) -> Option<bool> {
-        self.durable
-            .lock()
-            .ok()
-            .and_then(|s| s.is_mcp_server_enabled(server_id))
+        self.durable.lock().is_mcp_server_enabled(server_id)
     }
 
     /// Get list of MCP servers enabled for this session.
     pub fn list_enabled_mcp_servers(&self) -> Vec<String> {
-        self.durable
-            .lock()
-            .map(|s| s.list_enabled_mcp_servers())
-            .unwrap_or_default()
+        self.durable.lock().list_enabled_mcp_servers()
     }
 
     /// Enable or disable a plugin for this session.
     pub fn set_plugin_enabled(&self, plugin_id: impl Into<String>, enabled: bool) {
-        if let Ok(mut session) = self.durable.lock() {
-            session.set_plugin_enabled(plugin_id, enabled);
-        }
+        self.durable.lock().set_plugin_enabled(plugin_id, enabled);
     }
 
     /// Check if a plugin is enabled for this session.
     pub fn is_plugin_enabled(&self, plugin_id: &str) -> Option<bool> {
-        self.durable
-            .lock()
-            .ok()
-            .and_then(|s| s.is_plugin_enabled(plugin_id))
+        self.durable.lock().is_plugin_enabled(plugin_id)
     }
 
     /// Get list of plugins enabled for this session.
     pub fn list_enabled_plugins(&self) -> Vec<String> {
-        self.durable
-            .lock()
-            .map(|s| s.list_enabled_plugins())
-            .unwrap_or_default()
+        self.durable.lock().list_enabled_plugins()
     }
 
     /// Start a direct client-initiated auth flow for a plugin.
@@ -1794,7 +1620,10 @@ impl AgentSession {
             .get_plugin_status(plugin_id)
             .map(|status| status.auth.state)
             .unwrap_or(crate::plugin::auth::AuthState::Unauthenticated);
-        let request = self.connection.runtime().begin_plugin_auth_flow(plugin_id)?;
+        let request = self
+            .connection
+            .runtime()
+            .begin_plugin_auth_flow(plugin_id)?;
         self.emit_auth_transition_to_stream(
             plugin_id,
             previous_state,
@@ -1875,7 +1704,7 @@ impl AgentSession {
                 "Cannot import handoff: session must be empty. Use create_session_from_handoff instead.".into(),
             );
         }
-        let mut session = self.durable.lock().map_err(|e| e.to_string())?;
+        let mut session = self.durable.lock();
         HandoffImporter::hydrate(&mut session, bundle)
     }
 }
@@ -1900,7 +1729,6 @@ impl Clone for AgentSession {
             id: self.id,
             durable: self.durable.clone(),
             connection: self.connection.clone(),
-            events: self.events.clone(),
             active_streams: self.active_streams.clone(),
         }
     }

@@ -297,7 +297,7 @@ impl SessionToolCatalog {
                     if let Some(tool) = local_registry.get(&tool_name) {
                         tool.execute(&call_id_owned, arguments).await
                     } else {
-                        Err(crate::error::LoopError::tool_execution(format!(
+                        Err(crate::error::RuntimeError::tool_execution(format!(
                             "Tool '{}' is registered in the session catalog but could not be found in the tool registry. This may indicate an internal error.",
                             tool_name
                         )))
@@ -315,7 +315,7 @@ impl SessionToolCatalog {
                         .call_tool(&server_id, &tool_name, arguments)
                         .await
                         .map_err(|e| {
-                            crate::error::LoopError::tool_execution(format!(
+                            crate::error::RuntimeError::tool_execution(format!(
                                 "MCP tool call failed: {}",
                                 e
                             ))
@@ -333,7 +333,7 @@ impl SessionToolCatalog {
                     if let Some(plugin) = plugin_registry.get(&plugin_id) {
                         // Check health
                         if !plugin.health.is_healthy() {
-                            return Err(crate::error::LoopError::tool_execution(format!(
+                            return Err(crate::error::RuntimeError::tool_execution(format!(
                                 "Plugin '{}' is not healthy (status: {:?}). Cannot execute tool '{}'.",
                                 plugin_id, plugin.health, tool_name
                             )));
@@ -347,7 +347,7 @@ impl SessionToolCatalog {
                                     if !auth_reqs.available_unauthenticated
                                         && !plugin.auth_state.is_authenticated()
                                     {
-                                        return Err(crate::error::LoopError::tool_execution(format!(
+                                        return Err(crate::error::RuntimeError::tool_execution(format!(
                                             "Tool '{}' from plugin '{}' requires authentication. Please authenticate first.",
                                             tool_name, plugin_id
                                         )));
@@ -361,13 +361,13 @@ impl SessionToolCatalog {
                             .execute_tool(&plugin_id, &tool_name, arguments)
                             .await
                             .map_err(|e| {
-                                crate::error::LoopError::tool_execution(format!(
+                                crate::error::RuntimeError::tool_execution(format!(
                                     "Plugin tool call failed: {}",
                                     e
                                 ))
                             })
                     } else {
-                        Err(crate::error::LoopError::tool_execution(format!(
+                        Err(crate::error::RuntimeError::tool_execution(format!(
                             "Plugin '{}' not found in registry.",
                             plugin_id
                         )))
@@ -402,7 +402,7 @@ impl SessionToolCatalog {
                                 .unwrap_or(false);
 
                             if !is_enabled {
-                                return Err(crate::error::LoopError::tool_execution(format!(
+                                return Err(crate::error::RuntimeError::tool_execution(format!(
                                     "MCP server '{}' is disabled for this session. Enable it to use tool '{}'.",
                                     server_id, tool_name
                                 )));
@@ -410,7 +410,7 @@ impl SessionToolCatalog {
 
                             // Server is enabled - now check health
                             if !server.health.is_usable() {
-                                return Err(crate::error::LoopError::tool_execution(format!(
+                                return Err(crate::error::RuntimeError::tool_execution(format!(
                                     "MCP server '{}' is not healthy (status: {:?}). Cannot execute tool '{}'.",
                                     server_id, server.health, tool_name
                                 )));
@@ -427,7 +427,7 @@ impl SessionToolCatalog {
                                     .iter()
                                     .map(|t| t.name.clone())
                                     .collect();
-                                return Err(crate::error::LoopError::tool_execution(format!(
+                                return Err(crate::error::RuntimeError::tool_execution(format!(
                                     "Tool '{}' not found on MCP server '{}'. Available tools: {}",
                                     tool_name,
                                     server_id,
@@ -441,19 +441,19 @@ impl SessionToolCatalog {
 
                             // Shouldn't reach here if server is enabled, healthy, and tool exists
                             // but tool not in catalog - this is an internal error
-                            Err(crate::error::LoopError::tool_execution(format!(
+                            Err(crate::error::RuntimeError::tool_execution(format!(
                                 "Tool '{}' from MCP server '{}' is unexpectedly unavailable. This may indicate an internal consistency error.",
                                 tool_name, server_id
                             )))
                         } else {
                             // Server doesn't exist
-                            Err(crate::error::LoopError::tool_execution(format!(
+                            Err(crate::error::RuntimeError::tool_execution(format!(
                                 "Tool '{}' references MCP server '{}' which is not configured.",
                                 name_owned, server_id
                             )))
                         }
                     } else if name_owned.starts_with("mcp_") {
-                        Err(crate::error::LoopError::tool_execution(format!(
+                        Err(crate::error::RuntimeError::tool_execution(format!(
                             "Tool '{}' references an unknown or ambiguous MCP server identifier.",
                             name_owned
                         )))
@@ -472,7 +472,7 @@ impl SessionToolCatalog {
                                 .unwrap_or(false);
 
                             if !is_enabled {
-                                return Err(crate::error::LoopError::tool_execution(format!(
+                                return Err(crate::error::RuntimeError::tool_execution(format!(
                                     "Plugin '{}' is disabled for this session. Enable it to use tool '{}'.",
                                     plugin_id, tool_name
                                 )));
@@ -480,7 +480,7 @@ impl SessionToolCatalog {
 
                             // Plugin is enabled - now check health
                             if !plugin.health.is_healthy() {
-                                return Err(crate::error::LoopError::tool_execution(format!(
+                                return Err(crate::error::RuntimeError::tool_execution(format!(
                                     "Plugin '{}' is not healthy (status: {:?}). Cannot execute tool '{}'.",
                                     plugin_id, plugin.health, tool_name
                                 )));
@@ -495,7 +495,7 @@ impl SessionToolCatalog {
                                         if !auth_reqs.available_unauthenticated
                                             && !plugin.auth_state.is_authenticated()
                                         {
-                                            return Err(crate::error::LoopError::tool_execution(format!(
+                                            return Err(crate::error::RuntimeError::tool_execution(format!(
                                                 "Tool '{}' from plugin '{}' requires authentication. Please authenticate first.",
                                                 tool_name, plugin_id
                                             )));
@@ -505,7 +505,8 @@ impl SessionToolCatalog {
                                     // Tool doesn't exist in this plugin
                                     let available_tools: Vec<_> =
                                         manifest.tools.iter().map(|t| t.name.clone()).collect();
-                                    return Err(crate::error::LoopError::tool_execution(format!(
+                                    return Err(crate::error::RuntimeError::tool_execution(
+                                        format!(
                                         "Tool '{}' not found in plugin '{}'. Available tools: {}",
                                         tool_name,
                                         plugin_id,
@@ -514,35 +515,36 @@ impl SessionToolCatalog {
                                         } else {
                                             available_tools.join(", ")
                                         }
-                                    )));
+                                    ),
+                                    ));
                                 }
                             } else {
-                                return Err(crate::error::LoopError::tool_execution(format!(
+                                return Err(crate::error::RuntimeError::tool_execution(format!(
                                     "Plugin '{}' has no manifest loaded. Cannot execute tool '{}'.",
                                     plugin_id, tool_name
                                 )));
                             }
 
                             // Shouldn't reach here if plugin is enabled, healthy, auth satisfied, and tool exists
-                            Err(crate::error::LoopError::tool_execution(format!(
+                            Err(crate::error::RuntimeError::tool_execution(format!(
                                 "Tool '{}' from plugin '{}' is unexpectedly unavailable. This may indicate an internal consistency error.",
                                 tool_name, plugin_id
                             )))
                         } else {
                             // Plugin doesn't exist
-                            Err(crate::error::LoopError::tool_execution(format!(
+                            Err(crate::error::RuntimeError::tool_execution(format!(
                                 "Tool '{}' references plugin '{}' which is not installed.",
                                 name_owned, plugin_id
                             )))
                         }
                     } else if name_owned.starts_with("plugin_") {
-                        Err(crate::error::LoopError::tool_execution(format!(
+                        Err(crate::error::RuntimeError::tool_execution(format!(
                             "Tool '{}' references an unknown or ambiguous plugin identifier.",
                             name_owned
                         )))
                     } else {
                         // Not an MCP tool, not a plugin tool, and not in local registry
-                        Err(crate::error::LoopError::tool_execution(format!(
+                        Err(crate::error::RuntimeError::tool_execution(format!(
                             "Tool '{}' is not available. It may not exist or may not be enabled for this session.",
                             name_owned
                         )))
@@ -850,6 +852,7 @@ mod tests {
             network_policy: NetworkPolicy::Wildcard,
             auth: None,
             tools,
+            max_memory_bytes: None,
             api_version: "1.0".to_string(),
         }
     }

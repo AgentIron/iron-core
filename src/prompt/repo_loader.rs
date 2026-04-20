@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::error::LoopError;
+use crate::error::RuntimeError;
 use crate::prompt::config::{
     AdditionalInstructionFile, RepoInstructionConfig, RepoInstructionFamily,
     RepoInstructionPayload, RepoInstructionSource,
@@ -9,7 +9,7 @@ use crate::prompt::config::{
 pub struct RepoInstructionLoader;
 
 impl RepoInstructionLoader {
-    pub fn resolve(config: &RepoInstructionConfig) -> Result<RepoInstructionPayload, LoopError> {
+    pub fn resolve(config: &RepoInstructionConfig) -> Result<RepoInstructionPayload, RuntimeError> {
         if !config.enabled {
             return Ok(RepoInstructionPayload::default());
         }
@@ -30,10 +30,10 @@ impl RepoInstructionLoader {
     pub fn load_additional_files(
         payload: &mut RepoInstructionPayload,
         files: &[PathBuf],
-    ) -> Result<(), LoopError> {
+    ) -> Result<(), RuntimeError> {
         for path in files {
             let content = std::fs::read_to_string(path).map_err(|e| {
-                LoopError::invalid_config(format!(
+                RuntimeError::invalid_config(format!(
                     "failed to read additional instruction file {}: {}",
                     path.display(),
                     e

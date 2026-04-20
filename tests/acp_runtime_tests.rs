@@ -15,16 +15,13 @@ use futures::stream::{self, BoxStream};
 use futures::StreamExt;
 use iron_core::{
     config::ApprovalStrategy,
-    facade::{
-        AgentEvent, FacadeToolStatus, PermissionVerdict, PromptEvent, PromptOutcome,
-        ToolResultStatus,
-    },
+    facade::{PermissionVerdict, PromptEvent, PromptOutcome, ToolResultStatus},
     tool::{FunctionTool, ToolDefinition},
     AuthInteractionResponse, AuthInteractionResult, AuthState, Config, ConnectionId, ContentBlock,
     DurableSession, EphemeralTurn, IronAgent, IronRuntime, OAuthRequirements, PluginHealth,
     PluginIdentity, PluginManifest, PluginPublisher, PluginSource, PluginSourceConfig,
-    PresentationMetadata, Provider, ProviderEvent, SessionId,
-    ToolAuthRequirements, ToolRecordStatus, ToolTerminalOutcome, TurnPhase,
+    PresentationMetadata, Provider, ProviderEvent, SessionId, ToolAuthRequirements,
+    ToolRecordStatus, ToolTerminalOutcome, TurnPhase,
 };
 use iron_providers::{InferenceRequest, ToolCall};
 use serde_json::json;
@@ -153,6 +150,7 @@ fn register_test_auth_plugin(agent: &IronAgent, plugin_id: &str) {
                     available_unauthenticated: false,
                 }),
             }],
+            max_memory_bytes: None,
             api_version: "1.0".to_string(),
         },
     );
@@ -282,118 +280,6 @@ fn simple_prompt_returns_end_turn() {
 
         let outcome = session.prompt("hi").await;
         assert_eq!(outcome, PromptOutcome::EndTurn);
-    });
-}
-
-#[test]
-fn prompt_captures_text_events_in_order() {
-    run_local(async {
-        let provider = MockProvider::with_infer_responses(vec![vec![
-            ProviderEvent::Output {
-                content: "first ".into(),
-            },
-            ProviderEvent::Output {
-                content: "second".into(),
-            },
-            ProviderEvent::Complete,
-        ]]);
-        let agent = IronAgent::new(Config::default().with_embedded_python_enabled(), provider);
-        let conn = agent.connect();
-        let session = conn.create_session().unwrap();
-
-        let outcome = session.prompt("hi").await;
-        assert_eq!(outcome, PromptOutcome::EndTurn);
-
-        let events = session.drain_events();
-        let texts: Vec<&str> = events
-            .iter()
-            .filter_map(|e| match e {
-                AgentEvent::TextChunk { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(texts, vec!["first ", "second"]);
-    });
-}
-
-#[test]
-fn drain_events_clears_buffer() {
-    run_local(async {
-        let provider = MockProvider::with_infer_responses(vec![vec![
-            ProviderEvent::Output {
-                content: "hello".into(),
-            },
-            ProviderEvent::Complete,
-        ]]);
-        let agent = IronAgent::new(Config::default().with_embedded_python_enabled(), provider);
-        let conn = agent.connect();
-        let session = conn.create_session().unwrap();
-
-        session.prompt("hi").await;
-
-        let first = session.drain_events();
-        assert!(!first.is_empty());
-
-        let second = session.drain_events();
-        assert!(second.is_empty());
-    });
-}
-
-#[test]
-fn tool_call_events_are_emitted_before_update_events() {
-    run_local(async {
-        let provider = MockProvider::with_infer_responses(vec![
-            vec![
-                ProviderEvent::ToolCall {
-                    call: ToolCall::new("c1", "my_tool", json!({"x": 1})),
-                },
-                ProviderEvent::Complete,
-            ],
-            vec![
-                ProviderEvent::Output {
-                    content: "done".into(),
-                },
-                ProviderEvent::Complete,
-            ],
-        ]);
-        let agent = IronAgent::new(Config::default(), provider);
-        agent.register_tool(FunctionTool::simple("my_tool", "my_tool", |_| {
-            Ok(json!(42))
-        }));
-        let conn = agent.connect();
-        let session = conn.create_session().unwrap();
-
-        let outcome = session.prompt("go").await;
-        assert_eq!(outcome, PromptOutcome::EndTurn);
-
-        let events = session.drain_events();
-        // Find the ToolCallStarted and ToolCallUpdate positions
-        let pos_started = events.iter().position(|e| {
-            matches!(
-                e,
-                AgentEvent::ToolCallStarted {
-                    call_id,
-                    tool_name,
-                } if call_id == "c1" && tool_name == "my_tool"
-            )
-        });
-        let pos_completed = events.iter().position(|e| {
-            matches!(
-                e,
-                AgentEvent::ToolCallUpdate {
-                    call_id,
-                    status,
-                    ..
-                } if call_id == "c1" && *status == iron_core::FacadeToolStatus::Completed
-            )
-        });
-        assert!(pos_started.is_some(), "expected ToolCallStarted event");
-        assert!(
-            pos_completed.is_some(),
-            "expected ToolCallUpdate(Completed) event"
-        );
-        // ToolCallStarted must come before ToolCallUpdate(Completed)
-        assert!(pos_started.unwrap() < pos_completed.unwrap());
     });
 }
 
@@ -1825,13 +1711,6 @@ fn invalid_arguments_skip_handler_and_fail_durable() {
             "expected schema validation error, got: {}",
             error_msg
         );
-
-        let events = session.drain_events();
-        let has_failed_update = events.iter().any(|e| {
-            matches!(e, AgentEvent::ToolCallUpdate { call_id, status, .. }
-                if call_id == "sv2" && *status == FacadeToolStatus::Failed)
-        });
-        assert!(has_failed_update, "should emit a Failed tool update event");
     });
 }
 
@@ -3005,12 +2884,12 @@ fn cancel_active_prompt_signals_cancellation() {
     let (sid, _session) = rt.create_session(conn_id).unwrap();
 
     let ephemeral = rt.try_start_prompt(sid).unwrap();
-    assert!(!ephemeral.lock().unwrap().is_cancel_requested());
+    assert!(!ephemeral.lock().is_cancel_requested());
 
     let cancelled = rt.cancel_active_prompt(sid);
     assert!(cancelled, "cancel should return true for active prompt");
     assert!(
-        ephemeral.lock().unwrap().is_cancel_requested(),
+        ephemeral.lock().is_cancel_requested(),
         "ephemeral should reflect cancellation"
     );
 
@@ -3019,98 +2898,6 @@ fn cancel_active_prompt_signals_cancellation() {
         cancelled_again,
         "cancel on still-active prompt should still return true"
     );
-}
-
-#[test]
-fn semantic_event_output_through_lifecycle_boundary() {
-    run_local(async {
-        let provider = MockProvider::with_infer_responses(vec![
-            vec![
-                ProviderEvent::Output {
-                    content: "hello ".into(),
-                },
-                ProviderEvent::Output {
-                    content: "world".into(),
-                },
-                ProviderEvent::ToolCall {
-                    call: ToolCall::new("tc1", "echo", json!({"msg": "hi"})),
-                },
-                ProviderEvent::Complete,
-            ],
-            vec![
-                ProviderEvent::Output {
-                    content: "final".into(),
-                },
-                ProviderEvent::Complete,
-            ],
-        ]);
-        let agent = IronAgent::new(Config::default(), provider);
-        agent.register_tool(FunctionTool::simple("echo", "echo", |args| {
-            Ok(json!({"echo": args.get("msg").unwrap().clone()}))
-        }));
-        let conn = agent.connect();
-
-        let session = conn.create_session().unwrap();
-        let outcome = session.prompt("go").await;
-        assert_eq!(outcome, PromptOutcome::EndTurn);
-
-        let events = session.drain_events();
-        let texts: Vec<String> = events
-            .iter()
-            .filter_map(|e| match e {
-                AgentEvent::TextChunk { text } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(texts, vec!["hello ", "world", "final"]);
-    });
-}
-
-#[test]
-fn semantic_event_tool_lifecycle_events_complete() {
-    run_local(async {
-        let provider = MockProvider::with_infer_responses(vec![
-            vec![
-                ProviderEvent::ToolCall {
-                    call: ToolCall::new("tc1", "calc", json!({"x": 1})),
-                },
-                ProviderEvent::Complete,
-            ],
-            vec![ProviderEvent::Complete],
-        ]);
-        let agent = IronAgent::new(Config::default(), provider);
-        agent.register_tool(FunctionTool::simple("calc", "calc", |_| Ok(json!(42))));
-        let conn = agent.connect();
-
-        let session = conn.create_session().unwrap();
-        let outcome = session.prompt("go").await;
-        assert_eq!(outcome, PromptOutcome::EndTurn);
-
-        let events = session.drain_events();
-        let tool_starts: Vec<&str> = events
-            .iter()
-            .filter_map(|e| match e {
-                AgentEvent::ToolCallStarted { call_id, tool_name } => {
-                    assert_eq!(call_id, "tc1");
-                    Some(tool_name.as_str())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(tool_starts, vec!["calc"]);
-
-        let tool_updates: Vec<FacadeToolStatus> = events
-            .iter()
-            .filter_map(|e| match e {
-                AgentEvent::ToolCallUpdate { status, .. } => Some(*status),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(tool_updates.len(), 2);
-        assert_eq!(tool_updates[0], FacadeToolStatus::InProgress);
-        assert_eq!(tool_updates[1], FacadeToolStatus::Completed);
-    });
 }
 
 #[test]
@@ -3203,7 +2990,9 @@ fn prompt_iteration_uses_one_consistent_tool_snapshot() {
 
         while let Some(event) = events.next().await {
             match event {
-                PromptEvent::ApprovalRequest { call_id, tool_name, .. } => {
+                PromptEvent::ApprovalRequest {
+                    call_id, tool_name, ..
+                } => {
                     assert_eq!(call_id, "swap1");
                     assert_eq!(tool_name, "swap_tool");
                     saw_approval = true;
@@ -3234,13 +3023,22 @@ fn prompt_iteration_uses_one_consistent_tool_snapshot() {
             }
         }
 
-        assert!(saw_approval, "approval should be based on the original snapshot");
+        assert!(
+            saw_approval,
+            "approval should be based on the original snapshot"
+        );
         assert_eq!(final_result, Some(json!("old_result")));
 
         let requests = provider.requests();
-        assert!(!requests.is_empty(), "provider should receive at least one request");
         assert!(
-            requests[0].tools.iter().any(|tool| tool.name == "swap_tool"),
+            !requests.is_empty(),
+            "provider should receive at least one request"
+        );
+        assert!(
+            requests[0]
+                .tools
+                .iter()
+                .any(|tool| tool.name == "swap_tool"),
             "prompt construction should advertise the original tool snapshot"
         );
     });
@@ -3414,11 +3212,15 @@ fn stream_blocks_tool_call_precedes_tool_result() {
 
         let tool_call_pos = collected
             .iter()
-            .position(|e| matches!(e, PromptEvent::ToolCall { call_id, .. } if call_id == "ord_blk"))
+            .position(
+                |e| matches!(e, PromptEvent::ToolCall { call_id, .. } if call_id == "ord_blk"),
+            )
             .unwrap();
         let tool_result_pos = collected
             .iter()
-            .position(|e| matches!(e, PromptEvent::ToolResult { call_id, .. } if call_id == "ord_blk"))
+            .position(
+                |e| matches!(e, PromptEvent::ToolResult { call_id, .. } if call_id == "ord_blk"),
+            )
             .unwrap();
         assert!(
             tool_call_pos < tool_result_pos,

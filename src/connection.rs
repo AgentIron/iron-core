@@ -124,7 +124,10 @@ impl IronConnection {
         &self,
         acp_session_id: &agent_client_protocol::SessionId,
     ) -> Result<
-        (SessionId, std::sync::Arc<std::sync::Mutex<DurableSession>>),
+        (
+            SessionId,
+            std::sync::Arc<parking_lot::Mutex<DurableSession>>,
+        ),
         agent_client_protocol::Error,
     > {
         let session_id_str = acp_session_id.to_string();
@@ -206,7 +209,7 @@ impl agent_client_protocol::Agent for IronConnection {
             .map(crate::durable::ContentBlock::from_acp_content)
             .collect();
         {
-            let mut session = durable.lock().unwrap();
+            let mut session = durable.lock();
             session.add_user_message(user_blocks);
         }
 

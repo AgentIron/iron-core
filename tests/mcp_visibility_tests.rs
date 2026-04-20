@@ -82,9 +82,13 @@ fn disabled_server_tools_are_hidden() {
 
     // Session with MCP disabled
     let session_without = create_test_session_without_mcp();
-    let tools_without = build_catalog(local_registry.clone(), mcp_registry.clone(), &session_without)
-        .definitions()
-        .to_vec();
+    let tools_without = build_catalog(
+        local_registry.clone(),
+        mcp_registry.clone(),
+        &session_without,
+    )
+    .definitions()
+    .to_vec();
 
     // Session with MCP enabled
     let session_with = create_test_session_with_mcp();

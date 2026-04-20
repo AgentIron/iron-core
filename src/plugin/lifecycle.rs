@@ -107,6 +107,19 @@ pub trait PluginLoader: Send + Sync {
     /// return a human-readable error string.
     fn load(&self, plugin_id: &str, artifact_path: &Path) -> Result<(), String>;
 
+    /// Load a plugin with an optional manifest-declared memory ceiling.
+    ///
+    /// The default implementation ignores the declared limit and calls
+    /// [`PluginLoader::load`]. WASM-backed loaders override this to apply the limit.
+    fn load_with_limit(
+        &self,
+        plugin_id: &str,
+        artifact_path: &Path,
+        _plugin_declared_max_bytes: Option<u64>,
+    ) -> Result<(), String> {
+        self.load(plugin_id, artifact_path)
+    }
+
     /// Unload a plugin from the WASM runtime.
     ///
     /// Called during uninstall.  A best-effort operation — failures are logged
@@ -270,6 +283,7 @@ impl PluginLifecycle {
         }
 
         // 7. Update registry with manifest and artifact path.
+        let manifest_max_memory = manifest.max_memory_bytes;
         self.registry.set_manifest(&plugin_id, manifest);
         self.registry
             .set_artifact_path(&plugin_id, artifact_path.clone());
@@ -288,7 +302,7 @@ impl PluginLifecycle {
         self.registry.set_install_metadata(&plugin_id, install_md);
 
         // 8. Hand off to the WASM loader.
-        if let Err(e) = loader.load(&plugin_id, &artifact_path) {
+        if let Err(e) = loader.load_with_limit(&plugin_id, &artifact_path, manifest_max_memory) {
             error!(plugin_id = %plugin_id, error = %e, "WASM host rejected plugin load");
             self.registry
                 .set_error(&plugin_id, format!("Load failed: {}", e));
@@ -688,6 +702,7 @@ mod tests {
                 requires_approval: false,
                 auth_requirements: None,
             }],
+            max_memory_bytes: None,
             api_version: "1.0".to_string(),
         }
     }
@@ -1063,16 +1078,16 @@ mod tests {
     #[tokio::test]
     async fn install_with_loader_called_on_success() {
         struct RecordingLoader {
-            loaded: std::sync::Mutex<Vec<String>>,
-            unloaded: std::sync::Mutex<Vec<String>>,
+            loaded: parking_lot::Mutex<Vec<String>>,
+            unloaded: parking_lot::Mutex<Vec<String>>,
         }
         impl PluginLoader for RecordingLoader {
             fn load(&self, plugin_id: &str, _artifact_path: &Path) -> Result<(), String> {
-                self.loaded.lock().unwrap().push(plugin_id.to_string());
+                self.loaded.lock().push(plugin_id.to_string());
                 Ok(())
             }
             fn unload(&self, plugin_id: &str) {
-                self.unloaded.lock().unwrap().push(plugin_id.to_string());
+                self.unloaded.lock().push(plugin_id.to_string());
             }
         }
 
@@ -1089,17 +1104,17 @@ mod tests {
         let lifecycle = PluginLifecycle::new(registry.clone(), cache_dir);
 
         let loader = RecordingLoader {
-            loaded: std::sync::Mutex::new(Vec::new()),
-            unloaded: std::sync::Mutex::new(Vec::new()),
+            loaded: parking_lot::Mutex::new(Vec::new()),
+            unloaded: parking_lot::Mutex::new(Vec::new()),
         };
 
         let config = local_config("loader-test", &artifact_path.to_string_lossy());
         let result = lifecycle.install_with_loader(config, &loader).await;
         assert!(result.is_success());
 
-        assert_eq!(loader.loaded.lock().unwrap().len(), 1);
-        assert_eq!(loader.loaded.lock().unwrap()[0], "loader-test");
-        assert!(loader.unloaded.lock().unwrap().is_empty());
+        assert_eq!(loader.loaded.lock().len(), 1);
+        assert_eq!(loader.loaded.lock()[0], "loader-test");
+        assert!(loader.unloaded.lock().is_empty());
     }
 
     #[tokio::test]
@@ -1139,14 +1154,14 @@ mod tests {
     #[tokio::test]
     async fn uninstall_with_loader_unloads_from_host() {
         struct RecordingLoader {
-            unloaded: std::sync::Mutex<Vec<String>>,
+            unloaded: parking_lot::Mutex<Vec<String>>,
         }
         impl PluginLoader for RecordingLoader {
             fn load(&self, _plugin_id: &str, _artifact_path: &Path) -> Result<(), String> {
                 Ok(())
             }
             fn unload(&self, plugin_id: &str) {
-                self.unloaded.lock().unwrap().push(plugin_id.to_string());
+                self.unloaded.lock().push(plugin_id.to_string());
             }
         }
 
@@ -1163,7 +1178,7 @@ mod tests {
         let lifecycle = PluginLifecycle::new(registry.clone(), cache_dir);
 
         let loader = RecordingLoader {
-            unloaded: std::sync::Mutex::new(Vec::new()),
+            unloaded: parking_lot::Mutex::new(Vec::new()),
         };
 
         // Install first
@@ -1177,7 +1192,7 @@ mod tests {
             .unwrap();
 
         assert!(registry.get("uninstall-test").is_none());
-        assert_eq!(loader.unloaded.lock().unwrap()[0], "uninstall-test");
+        assert_eq!(loader.unloaded.lock()[0], "uninstall-test");
     }
 
     #[test]

@@ -56,7 +56,7 @@ fn new_session_uses_runtime_default_enablement_enabled() {
         .expect("Failed to create session");
 
     // Check that the MCP server is enabled by default
-    let session_guard = session.lock().unwrap();
+    let session_guard = session.lock();
     assert_eq!(
         session_guard.is_mcp_server_enabled("test-server"),
         Some(true),
@@ -92,7 +92,7 @@ fn new_session_uses_runtime_default_enablement_disabled() {
         .expect("Failed to create session");
 
     // Check that the MCP server is disabled (runtime default overrides server default)
-    let session_guard = session.lock().unwrap();
+    let session_guard = session.lock();
     assert_eq!(
         session_guard.is_mcp_server_enabled("test-server"),
         Some(false),
@@ -133,12 +133,12 @@ fn session_toggle_does_not_affect_another_session() {
 
     // Disable the MCP server for session 1
     {
-        let mut session1_guard = session1.lock().unwrap();
+        let mut session1_guard = session1.lock();
         session1_guard.set_mcp_server_enabled("test-server", false);
     }
 
     // Verify session 1 has the server disabled
-    let session1_guard = session1.lock().unwrap();
+    let session1_guard = session1.lock();
     assert_eq!(
         session1_guard.is_mcp_server_enabled("test-server"),
         Some(false),
@@ -147,7 +147,7 @@ fn session_toggle_does_not_affect_another_session() {
     drop(session1_guard);
 
     // Verify session 2 still has the server enabled
-    let session2_guard = session2.lock().unwrap();
+    let session2_guard = session2.lock();
     assert_eq!(
         session2_guard.is_mcp_server_enabled("test-server"),
         Some(true),
@@ -189,7 +189,7 @@ fn mcp_state_not_included_in_handoff() {
 
     // Verify MCP is enabled
     {
-        let session_guard = session.lock().unwrap();
+        let session_guard = session.lock();
         assert_eq!(
             session_guard.is_mcp_server_enabled("test-server"),
             Some(true)
@@ -197,7 +197,7 @@ fn mcp_state_not_included_in_handoff() {
     }
 
     // Export handoff bundle
-    let session_guard = session.lock().unwrap();
+    let session_guard = session.lock();
     let bundle = HandoffExporter::export(
         &session_guard,
         "test-model",
@@ -304,10 +304,7 @@ fn registering_new_server_materializes_runtime_default_for_existing_sessions() {
         .create_session(iron_core::ConnectionId(1))
         .expect("Failed to create session");
 
-    assert_eq!(
-        session.lock().unwrap().is_mcp_server_enabled("late-server"),
-        None
-    );
+    assert_eq!(session.lock().is_mcp_server_enabled("late-server"), None);
 
     runtime.register_mcp_server(McpServerConfig {
         id: "late-server".to_string(),
@@ -320,7 +317,7 @@ fn registering_new_server_materializes_runtime_default_for_existing_sessions() {
     });
 
     assert_eq!(
-        session.lock().unwrap().is_mcp_server_enabled("late-server"),
+        session.lock().is_mcp_server_enabled("late-server"),
         Some(false),
         "existing sessions should get explicit runtime-default MCP state for newly registered servers"
     );

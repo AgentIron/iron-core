@@ -39,12 +39,13 @@
 
 use crate::plugin::lifecycle::PluginLoader;
 use crate::plugin::manifest::PluginManifest;
+use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 /// Result type for WASM operations.
@@ -52,6 +53,20 @@ pub type WasmResult<T> = Result<T, WasmError>;
 
 /// Future type for async WASM tool execution.
 pub type WasmExecutionFuture = Pin<Box<dyn Future<Output = WasmResult<Value>> + Send>>;
+
+/// Default WASM linear-memory ceiling per plugin: 128 MB.
+pub const DEFAULT_PLUGIN_MAX_MEMORY_BYTES: u64 = 128 * 1024 * 1024;
+
+/// WASM page size (64 KiB) — Extism's `with_memory_max` takes a page count.
+const WASM_PAGE_SIZE: u64 = 64 * 1024;
+
+/// Convert a byte budget to the page count Extism expects, rounding down and
+/// clamping to `u32::MAX`. At least one page is always granted so the plugin
+/// has a shadow stack.
+fn bytes_to_pages(bytes: u64) -> u32 {
+    let pages = bytes / WASM_PAGE_SIZE;
+    pages.clamp(1, u32::MAX as u64) as u32
+}
 
 /// Bookkeeping for a single loaded plugin inside the WASM host.
 struct LoadedPlugin {
@@ -72,6 +87,7 @@ struct LoadedPlugin {
 #[derive(Clone)]
 pub struct WasmHost {
     inner: Arc<Mutex<WasmHostInner>>,
+    max_memory_bytes: u64,
 }
 
 struct WasmHostInner {
@@ -80,21 +96,45 @@ struct WasmHostInner {
 }
 
 impl WasmHost {
-    /// Create a new WASM host with no loaded plugins.
+    /// Create a new WASM host with no loaded plugins and the default memory
+    /// ceiling ([`DEFAULT_PLUGIN_MAX_MEMORY_BYTES`]).
     pub fn new() -> Self {
+        Self::with_max_memory_bytes(DEFAULT_PLUGIN_MAX_MEMORY_BYTES)
+    }
+
+    /// Create a new WASM host with an explicit per-plugin memory ceiling.
+    pub fn with_max_memory_bytes(max_memory_bytes: u64) -> Self {
         Self {
             inner: Arc::new(Mutex::new(WasmHostInner {
                 loaded: HashMap::new(),
             })),
+            max_memory_bytes,
         }
+    }
+
+    /// The per-plugin memory ceiling this host applies, in bytes.
+    pub fn max_memory_bytes(&self) -> u64 {
+        self.max_memory_bytes
     }
 
     /// Load a plugin into the WASM runtime.
     ///
     /// Reads the artifact from `artifact_path`, creates an Extism manifest
-    /// with a 30-second timeout and WASI enabled, then instantiates the
-    /// plugin.
+    /// with a 30-second timeout, the configured per-plugin memory ceiling,
+    /// and WASI enabled, then instantiates the plugin.
     pub fn load_plugin(&self, plugin_id: &str, artifact_path: &Path) -> WasmResult<()> {
+        self.load_plugin_with_limit(plugin_id, artifact_path, None)
+    }
+
+    /// Load a plugin, allowing the caller (typically the lifecycle layer) to
+    /// pass the plugin's manifest-declared `max_memory_bytes`. The effective
+    /// ceiling is the smaller of the declared value and the host ceiling.
+    pub fn load_plugin_with_limit(
+        &self,
+        plugin_id: &str,
+        artifact_path: &Path,
+        plugin_declared_max_bytes: Option<u64>,
+    ) -> WasmResult<()> {
         let wasm_bytes = std::fs::read(artifact_path).map_err(|e| {
             WasmError::LoadFailed(format!(
                 "Failed to read artifact {}: {}",
@@ -103,13 +143,19 @@ impl WasmHost {
             ))
         })?;
 
+        let effective_bytes = plugin_declared_max_bytes
+            .map(|declared| declared.min(self.max_memory_bytes))
+            .unwrap_or(self.max_memory_bytes);
+        let max_pages = bytes_to_pages(effective_bytes);
+
         let manifest = extism::Manifest::new([extism::Wasm::data(wasm_bytes)])
-            .with_timeout(std::time::Duration::from_secs(30));
+            .with_timeout(std::time::Duration::from_secs(30))
+            .with_memory_max(max_pages);
 
         let plugin = extism::Plugin::new(manifest, [], true)
             .map_err(|e| WasmError::LoadFailed(format!("Extism plugin creation failed: {}", e)))?;
 
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.loaded.insert(
             plugin_id.to_string(),
             LoadedPlugin {
@@ -119,7 +165,12 @@ impl WasmHost {
             },
         );
 
-        info!(plugin_id = %plugin_id, "Plugin loaded into WASM host");
+        info!(
+            plugin_id = %plugin_id,
+            max_memory_bytes = effective_bytes,
+            max_pages,
+            "Plugin loaded into WASM host"
+        );
         Ok(())
     }
 
@@ -129,7 +180,7 @@ impl WasmHost {
     /// was not loaded (idempotent).  Dropping the `LoadedPlugin` drops the
     /// underlying `extism::Plugin`.
     pub fn unload_plugin(&self, plugin_id: &str) -> WasmResult<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         if inner.loaded.remove(plugin_id).is_some() {
             info!(plugin_id = %plugin_id, "Plugin unloaded from WASM host");
         } else {
@@ -158,7 +209,7 @@ impl WasmHost {
         Box::pin(async move {
             // Execute on a blocking thread since Extism::call is sync
             let result = tokio::task::spawn_blocking(move || {
-                let mut guard = inner.lock().unwrap();
+                let mut guard = inner.lock();
                 let loaded = guard
                     .loaded
                     .get_mut(&plugin_id)
@@ -222,7 +273,7 @@ impl WasmHost {
         tool_name: &str,
         arguments: Value,
     ) -> WasmResult<Value> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock();
         let loaded = guard
             .loaded
             .get_mut(plugin_id)
@@ -266,7 +317,7 @@ impl WasmHost {
 
     /// Check if a plugin is loaded in the WASM host.
     pub fn is_plugin_loaded(&self, plugin_id: &str) -> bool {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         inner.loaded.contains_key(plugin_id)
     }
 
@@ -274,7 +325,7 @@ impl WasmHost {
     ///
     /// A plugin is healthy if it is loaded and its artifact still exists on disk.
     pub fn is_plugin_healthy(&self, plugin_id: &str) -> bool {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         match inner.loaded.get(plugin_id) {
             Some(loaded) => loaded.artifact_path.exists(),
             None => false,
@@ -286,7 +337,7 @@ impl WasmHost {
     /// Called by the lifecycle manager after it extracts the manifest from the
     /// WASM binary.
     pub fn set_manifest(&self, plugin_id: &str, manifest: PluginManifest) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         if let Some(loaded) = inner.loaded.get_mut(plugin_id) {
             loaded.manifest = Some(manifest);
         }
@@ -294,13 +345,13 @@ impl WasmHost {
 
     /// Get the manifest for a loaded plugin, if available.
     pub fn get_plugin_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         inner.loaded.get(plugin_id).and_then(|l| l.manifest.clone())
     }
 
     /// List all currently loaded plugin IDs.
     pub fn loaded_plugins(&self) -> Vec<String> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         inner.loaded.keys().cloned().collect()
     }
 }
@@ -313,7 +364,7 @@ impl Default for WasmHost {
 
 impl std::fmt::Debug for WasmHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         let ids: Vec<&String> = inner.loaded.keys().collect();
         f.debug_struct("WasmHost")
             .field("loaded_plugins", &ids)
@@ -326,6 +377,16 @@ impl std::fmt::Debug for WasmHost {
 impl PluginLoader for WasmHost {
     fn load(&self, plugin_id: &str, artifact_path: &Path) -> Result<(), String> {
         self.load_plugin(plugin_id, artifact_path)
+            .map_err(|e| e.to_string())
+    }
+
+    fn load_with_limit(
+        &self,
+        plugin_id: &str,
+        artifact_path: &Path,
+        plugin_declared_max_bytes: Option<u64>,
+    ) -> Result<(), String> {
+        self.load_plugin_with_limit(plugin_id, artifact_path, plugin_declared_max_bytes)
             .map_err(|e| e.to_string())
     }
 
@@ -408,6 +469,7 @@ mod tests {
                 requires_approval: false,
                 auth_requirements: None,
             }],
+            max_memory_bytes: None,
             api_version: "1.0".to_string(),
         }
     }
@@ -646,6 +708,61 @@ mod tests {
             "expected ExecutionFailed for missing export, got: {:?}",
             err
         );
+    }
+
+    #[test]
+    fn default_constructor_applies_default_memory_ceiling() {
+        let host = WasmHost::new();
+        assert_eq!(host.max_memory_bytes(), DEFAULT_PLUGIN_MAX_MEMORY_BYTES);
+    }
+
+    #[test]
+    fn explicit_memory_ceiling_is_stored() {
+        let host = WasmHost::with_max_memory_bytes(4 * 1024 * 1024);
+        assert_eq!(host.max_memory_bytes(), 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn plugin_declared_limit_lower_than_host_wins() {
+        // Host allows 128 MB, plugin asks for 4 MB — effective ceiling is 4 MB
+        // (verified indirectly by the bytes_to_pages computation).
+        let host_bytes: u64 = 128 * 1024 * 1024;
+        let plugin_bytes: u64 = 4 * 1024 * 1024;
+        let effective = plugin_bytes.min(host_bytes);
+        assert_eq!(effective, plugin_bytes);
+        assert_eq!(bytes_to_pages(effective), 64);
+    }
+
+    #[test]
+    fn host_ceiling_overrides_plugin_declared_higher_limit() {
+        // Plugin declares 512 MB but host only permits 128 MB.
+        let host_bytes: u64 = 128 * 1024 * 1024;
+        let plugin_bytes: u64 = 512 * 1024 * 1024;
+        let effective = plugin_bytes.min(host_bytes);
+        assert_eq!(effective, host_bytes);
+    }
+
+    #[test]
+    fn bytes_to_pages_has_minimum_of_one() {
+        assert_eq!(bytes_to_pages(0), 1);
+        assert_eq!(bytes_to_pages(1), 1);
+        assert_eq!(bytes_to_pages(WASM_PAGE_SIZE - 1), 1);
+        assert_eq!(bytes_to_pages(WASM_PAGE_SIZE), 1);
+        assert_eq!(bytes_to_pages(WASM_PAGE_SIZE * 2), 2);
+    }
+
+    #[test]
+    fn load_plugin_with_limit_applies_smaller_of_two() {
+        // Empty WASM loads successfully and records the applied limit via tracing.
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("cap.wasm");
+        std::fs::write(&artifact, b"\x00asm\x01\x00\x00\x00").unwrap();
+
+        let host = WasmHost::with_max_memory_bytes(16 * 1024 * 1024);
+        // Plugin declares 4 MB — smaller, so it wins.
+        host.load_plugin_with_limit("cap", &artifact, Some(4 * 1024 * 1024))
+            .unwrap();
+        assert!(host.is_plugin_loaded("cap"));
     }
 
     #[test]

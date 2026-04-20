@@ -1,4 +1,4 @@
-use crate::error::LoopResult;
+use crate::error::RuntimeResult;
 use crate::tool::{Tool, ToolDefinition, ToolFuture};
 use serde_json::{json, Value};
 
@@ -57,11 +57,11 @@ impl PythonExecTool {
     }
 
     #[cfg(feature = "embedded-python")]
-    fn execute_impl(&self, _call_id: &str, arguments: Value) -> LoopResult<Value> {
+    fn execute_impl(&self, _call_id: &str, arguments: Value) -> RuntimeResult<Value> {
         let script = arguments
             .get("script")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| crate::error::LoopError::tool_execution("missing 'script' argument"))?
+            .ok_or_else(|| crate::error::RuntimeError::tool_execution("missing 'script' argument"))?
             .to_string();
 
         let input = arguments.get("input").cloned().unwrap_or(json!({}));
@@ -79,8 +79,8 @@ impl PythonExecTool {
     }
 
     #[cfg(not(feature = "embedded-python"))]
-    fn execute_impl(&self, _call_id: &str, _arguments: Value) -> LoopResult<Value> {
-        Err(crate::error::LoopError::tool_execution(
+    fn execute_impl(&self, _call_id: &str, _arguments: Value) -> RuntimeResult<Value> {
+        Err(crate::error::RuntimeError::tool_execution(
             "embedded Python runtime is not enabled; rebuild with --features embedded-python",
         ))
     }

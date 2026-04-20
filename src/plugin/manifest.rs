@@ -19,6 +19,11 @@ pub struct PluginManifest {
     pub auth: Option<OAuthRequirements>,
     /// Exported tools provided by this plugin
     pub tools: Vec<ExportedTool>,
+    /// Optional maximum WASM linear memory the plugin is willing to consume,
+    /// in bytes. When set, the host uses the smaller of this value and the
+    /// runtime ceiling; when unset, the runtime ceiling alone applies.
+    #[serde(default)]
+    pub max_memory_bytes: Option<u64>,
     /// Plugin API version
     #[serde(rename = "api_version")]
     pub api_version: String,
@@ -210,6 +215,7 @@ mod tests {
                 requires_approval: false,
                 auth_requirements: None,
             }],
+            max_memory_bytes: None,
             api_version: "1.0".to_string(),
         }
     }

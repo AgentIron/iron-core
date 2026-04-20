@@ -1,7 +1,7 @@
 use crate::{
     config::{Config, ContextWindowPolicy},
     context::models::CompactedContext,
-    error::LoopError,
+    error::RuntimeError,
     tool::ToolRegistry,
 };
 use iron_providers::{InferenceRequest, Message, ToolPolicy};
@@ -16,7 +16,7 @@ pub fn build_inference_request_with_effective_tools(
     repo_instruction_payload: Option<&crate::prompt::config::RepoInstructionPayload>,
     effective_tools: &[crate::tool::ToolDefinition],
     python_exec_available: bool,
-) -> Result<InferenceRequest, LoopError> {
+) -> Result<InferenceRequest, RuntimeError> {
     let mut pruned = messages.to_vec();
     apply_context_window_policy(config, &mut pruned)?;
 
@@ -63,7 +63,7 @@ pub fn build_inference_request(
     messages: &[Message],
     instructions: Option<&str>,
     tool_registry: &ToolRegistry,
-) -> Result<InferenceRequest, LoopError> {
+) -> Result<InferenceRequest, RuntimeError> {
     build_inference_request_with_context_and_repo(
         config,
         messages,
@@ -80,7 +80,7 @@ pub fn build_inference_request_with_context(
     compacted_context: Option<&CompactedContext>,
     instructions: Option<&str>,
     tool_registry: &ToolRegistry,
-) -> Result<InferenceRequest, LoopError> {
+) -> Result<InferenceRequest, RuntimeError> {
     build_inference_request_with_context_and_repo(
         config,
         messages,
@@ -97,7 +97,7 @@ pub fn build_inference_request_with_repo(
     instructions: Option<&str>,
     repo_instruction_payload: Option<&crate::prompt::config::RepoInstructionPayload>,
     tool_registry: &ToolRegistry,
-) -> Result<InferenceRequest, LoopError> {
+) -> Result<InferenceRequest, RuntimeError> {
     build_inference_request_with_context_and_repo(
         config,
         messages,
@@ -115,7 +115,7 @@ pub fn build_inference_request_with_context_and_repo(
     instructions: Option<&str>,
     repo_instruction_payload: Option<&crate::prompt::config::RepoInstructionPayload>,
     tool_registry: &ToolRegistry,
-) -> Result<InferenceRequest, LoopError> {
+) -> Result<InferenceRequest, RuntimeError> {
     let mut pruned = messages.to_vec();
     apply_context_window_policy(config, &mut pruned)?;
 
@@ -205,7 +205,7 @@ fn build_composed_instructions(
 fn apply_context_window_policy(
     config: &Config,
     messages: &mut Vec<Message>,
-) -> Result<(), LoopError> {
+) -> Result<(), RuntimeError> {
     match config.context_window_policy {
         ContextWindowPolicy::KeepAll => Ok(()),
         ContextWindowPolicy::KeepRecent(count) => {

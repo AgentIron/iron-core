@@ -211,10 +211,7 @@ impl StdioMcpClient {
         if response.id != Some(id) {
             // The reader may have routed an id-less bootstrap response to us.
             // Accept it only when the response is unambiguous.
-            if response.id.is_none()
-                && response.error.is_none()
-                && response.result.is_some()
-            {
+            if response.id.is_none() && response.error.is_none() && response.result.is_some() {
                 tracing::debug!(
                     "Accepting MCP response with missing id during bootstrap for server '{}'",
                     self.server_id
@@ -414,9 +411,7 @@ const SENSITIVE_EXACT_NAMES: &[&str] = &[
 /// sensitive pattern. Matching is case-insensitive.
 fn is_sensitive_env_var(name: &str) -> bool {
     let upper = name.to_uppercase();
-    SENSITIVE_EXACT_NAMES
-        .iter()
-        .any(|exact| upper == *exact)
+    SENSITIVE_EXACT_NAMES.iter().any(|exact| upper == *exact)
         || SENSITIVE_SUFFIXES
             .iter()
             .any(|suffix| upper.ends_with(suffix))
@@ -475,10 +470,7 @@ fn format_rpc_error(error: JsonRpcError) -> String {
 /// pending waiter, the response carries a result (not an error), and the
 /// response `id` is absent. This preserves strict correlation for all
 /// post-bootstrap traffic.
-fn is_acceptable_bootstrap_response(
-    response: &JsonRpcResponse,
-    waiter_count: usize,
-) -> bool {
+fn is_acceptable_bootstrap_response(response: &JsonRpcResponse, waiter_count: usize) -> bool {
     response.id.is_none()
         && response.error.is_none()
         && response.result.is_some()
@@ -942,7 +934,6 @@ impl HttpSseMcpClient {
                 }
             }
         });
-
 
         *task_guard = Some(handle);
 

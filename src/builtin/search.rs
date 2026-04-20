@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::builtin::config::BuiltinToolConfig;
 use crate::builtin::error::BuiltinToolError;
 use crate::builtin::render::{render_path, render_skip_warning, render_truncation_footer};
-use crate::error::LoopResult;
+use crate::error::RuntimeResult;
 use crate::tool::{Tool, ToolDefinition, ToolFuture};
 use serde_json::Value;
 
@@ -56,7 +56,7 @@ impl Tool for GlobTool {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || execute_glob(&config, arguments))
                 .await
-                .map_err(|e| crate::error::LoopError::tool_execution(e.to_string()))?
+                .map_err(|e| crate::error::RuntimeError::tool_execution(e.to_string()))?
         })
     }
 
@@ -112,7 +112,7 @@ impl Tool for GrepTool {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || execute_grep(&config, arguments))
                 .await
-                .map_err(|e| crate::error::LoopError::tool_execution(e.to_string()))?
+                .map_err(|e| crate::error::RuntimeError::tool_execution(e.to_string()))?
         })
     }
 
@@ -151,12 +151,12 @@ enum GrepMode {
     Count,
 }
 
-fn execute_glob(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
+fn execute_glob(config: &BuiltinToolConfig, args: Value) -> RuntimeResult<Value> {
     let pattern = args
         .get("pattern")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BuiltinToolError::invalid_input("missing 'pattern' argument"))
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
     let base_path = args
         .get("path")
         .and_then(|v| v.as_str())
@@ -167,12 +167,14 @@ fn execute_glob(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
     let canonical_base = config
         .policy
         .validate_path(&base_path, &config.allowed_roots)
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
     if !canonical_base.is_dir() {
-        return Err(crate::error::LoopError::from(BuiltinToolError::invalid_input(format!(
-            "'{}' is not a directory",
-            base_path.display()
-        ))));
+        return Err(crate::error::RuntimeError::from(
+            BuiltinToolError::invalid_input(format!(
+                "'{}' is not a directory",
+                base_path.display()
+            )),
+        ));
     }
 
     let result = glob_search(
@@ -194,12 +196,12 @@ fn execute_glob(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
     }))
 }
 
-fn execute_grep(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
+fn execute_grep(config: &BuiltinToolConfig, args: Value) -> RuntimeResult<Value> {
     let pattern = args
         .get("pattern")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BuiltinToolError::invalid_input("missing 'pattern' argument"))
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
     let base_path = args
         .get("path")
         .and_then(|v| v.as_str())
@@ -207,11 +209,27 @@ fn execute_grep(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
         .unwrap_or_else(|| config.allowed_roots.first().cloned().unwrap_or_default());
     let explicit_path = args.get("path").is_some();
     let include_filter = args.get("include").and_then(|v| v.as_str());
-    let case_insensitive = args.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false);
-    let multiline = args.get("multiline").and_then(|v| v.as_bool()).unwrap_or(false);
-    let head_limit = args.get("head_limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let offset = args.get("offset").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let mode = match args.get("mode").and_then(|v| v.as_str()).unwrap_or("content") {
+    let case_insensitive = args
+        .get("case_insensitive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let multiline = args
+        .get("multiline")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let head_limit = args
+        .get("head_limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let offset = args
+        .get("offset")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let mode = match args
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("content")
+    {
         "files_with_matches" => GrepMode::Files,
         "count" => GrepMode::Count,
         _ => GrepMode::Content,
@@ -220,12 +238,14 @@ fn execute_grep(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
     let canonical_base = config
         .policy
         .validate_path(&base_path, &config.allowed_roots)
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
     if !canonical_base.is_dir() {
-        return Err(crate::error::LoopError::from(BuiltinToolError::invalid_input(format!(
-            "'{}' is not a directory",
-            base_path.display()
-        ))));
+        return Err(crate::error::RuntimeError::from(
+            BuiltinToolError::invalid_input(format!(
+                "'{}' is not a directory",
+                base_path.display()
+            )),
+        ));
     }
 
     let result = grep_search(
@@ -314,9 +334,14 @@ fn glob_search(
         }
     }
 
-    Ok(GlobResult { paths, truncated, skipped })
+    Ok(GlobResult {
+        paths,
+        truncated,
+        skipped,
+    })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn grep_search(
     base: &Path,
     allowed_roots: &[PathBuf],
@@ -341,7 +366,9 @@ fn grep_search(
             globset::GlobBuilder::new(pat)
                 .literal_separator(false)
                 .build()
-                .map_err(|e| BuiltinToolError::invalid_input(format!("invalid include pattern: {}", e)))
+                .map_err(|e| {
+                    BuiltinToolError::invalid_input(format!("invalid include pattern: {}", e))
+                })
                 .map(|g| g.compile_matcher())
         })
         .transpose()?;
@@ -442,7 +469,13 @@ fn grep_search(
     }
 
     let total_count = file_counts.values().sum();
-    Ok(GrepSearchResult { matches, file_counts, total_count, truncated, skipped })
+    Ok(GrepSearchResult {
+        matches,
+        file_counts,
+        total_count,
+        truncated,
+        skipped,
+    })
 }
 
 #[derive(Default)]
@@ -486,7 +519,9 @@ fn render_glob_output(result: &GlobResult, roots: &[PathBuf]) -> String {
         }
     }
     if result.truncated {
-        out.push_str(&render_truncation_footer("more entries not shown; refine pattern or use offset"));
+        out.push_str(&render_truncation_footer(
+            "more entries not shown; refine pattern or use offset",
+        ));
     }
     if result.skipped > 5 {
         out.push_str(&render_skip_warning(result.skipped));
@@ -512,23 +547,31 @@ fn render_grep_output(
     match mode {
         GrepMode::Files => {
             let start = offset.unwrap_or(0);
-            let end = head_limit.map(|l| (start + l).min(files.len())).unwrap_or(files.len());
+            let end = head_limit
+                .map(|l| (start + l).min(files.len()))
+                .unwrap_or(files.len());
             for (rendered, _, _) in files.iter().take(end).skip(start) {
                 out.push_str(&format!("{}\n", rendered));
             }
             if result.truncated {
-                out.push_str(&render_truncation_footer("more files not shown; refine pattern or use offset"));
+                out.push_str(&render_truncation_footer(
+                    "more files not shown; refine pattern or use offset",
+                ));
             }
         }
         GrepMode::Count => {
             out.push_str(&format!("{} matches total\n\n", result.total_count));
             let start = offset.unwrap_or(0);
-            let end = head_limit.map(|l| (start + l).min(files.len())).unwrap_or(files.len());
+            let end = head_limit
+                .map(|l| (start + l).min(files.len()))
+                .unwrap_or(files.len());
             for (rendered, _, count) in files.iter().take(end).skip(start) {
                 out.push_str(&format!("{}: {}\n", rendered, count));
             }
             if result.truncated {
-                out.push_str(&render_truncation_footer("more files not shown; refine pattern or use offset"));
+                out.push_str(&render_truncation_footer(
+                    "more files not shown; refine pattern or use offset",
+                ));
             }
         }
         GrepMode::Content => {
@@ -548,7 +591,11 @@ fn render_grep_output(
                     current_file = Some(rendered.clone());
                     out.push_str(&format!("{}:\n", rendered));
                 }
-                out.push_str(&format!("  {}: {}\n", m.line_number, truncate_line(&m.line)));
+                out.push_str(&format!(
+                    "  {}: {}\n",
+                    m.line_number,
+                    truncate_line(&m.line)
+                ));
             }
             if result.truncated {
                 out.push_str(&render_truncation_footer(

@@ -1,5 +1,5 @@
 use crate::builtin::config::BuiltinToolConfig;
-use crate::error::LoopResult;
+use crate::error::RuntimeResult;
 use crate::tool::{Tool, ToolDefinition, ToolFuture};
 use serde_json::Value;
 
@@ -50,14 +50,14 @@ impl Tool for BashTool {
     }
 }
 
-async fn execute_bash(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
+async fn execute_bash(config: &BuiltinToolConfig, args: Value) -> RuntimeResult<Value> {
     use crate::builtin::error::BuiltinToolError;
 
     let command = args
         .get("command")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BuiltinToolError::invalid_input("missing 'command' argument"))
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
 
     let working_dir = args
         .get("working_dir")
@@ -68,7 +68,7 @@ async fn execute_bash(config: &BuiltinToolConfig, args: Value) -> LoopResult<Val
         config
             .policy
             .validate_path(dir, &config.allowed_roots)
-            .map_err(crate::error::LoopError::from)?;
+            .map_err(crate::error::RuntimeError::from)?;
     }
 
     let timeout_secs = args
@@ -90,7 +90,7 @@ async fn execute_bash(config: &BuiltinToolConfig, args: Value) -> LoopResult<Val
     }
 
     let mut child = cmd.spawn().map_err(|e| {
-        crate::error::LoopError::tool_execution(format!("failed to spawn bash: {}", e))
+        crate::error::RuntimeError::tool_execution(format!("failed to spawn bash: {}", e))
     })?;
 
     let stdout_handle = child.stdout.take();
@@ -122,7 +122,7 @@ async fn execute_bash(config: &BuiltinToolConfig, args: Value) -> LoopResult<Val
                         "meta": meta,
                     }))
                 }
-                Err(e) => Err(crate::error::LoopError::tool_execution(format!(
+                Err(e) => Err(crate::error::RuntimeError::tool_execution(format!(
                     "bash execution failed: {}",
                     e
                 ))),
@@ -210,14 +210,14 @@ impl Tool for PowerShellTool {
     }
 }
 
-async fn execute_powershell(config: &BuiltinToolConfig, args: Value) -> LoopResult<Value> {
+async fn execute_powershell(config: &BuiltinToolConfig, args: Value) -> RuntimeResult<Value> {
     use crate::builtin::error::BuiltinToolError;
 
     let command = args
         .get("command")
         .and_then(|v| v.as_str())
         .ok_or_else(|| BuiltinToolError::invalid_input("missing 'command' argument"))
-        .map_err(crate::error::LoopError::from)?;
+        .map_err(crate::error::RuntimeError::from)?;
 
     let working_dir = args
         .get("working_dir")
@@ -228,7 +228,7 @@ async fn execute_powershell(config: &BuiltinToolConfig, args: Value) -> LoopResu
         config
             .policy
             .validate_path(dir, &config.allowed_roots)
-            .map_err(crate::error::LoopError::from)?;
+            .map_err(crate::error::RuntimeError::from)?;
     }
 
     let timeout_secs = args
@@ -282,7 +282,7 @@ async fn execute_powershell(config: &BuiltinToolConfig, args: Value) -> LoopResu
                 "meta": meta,
             }))
         }
-        Ok(Err(e)) => Err(crate::error::LoopError::tool_execution(format!(
+        Ok(Err(e)) => Err(crate::error::RuntimeError::tool_execution(format!(
             "powershell execution failed: {}",
             e
         ))),

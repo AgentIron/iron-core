@@ -136,7 +136,7 @@ impl std::fmt::Display for BuiltinToolError {
 
 impl std::error::Error for BuiltinToolError {}
 
-impl From<BuiltinToolError> for crate::error::LoopError {
+impl From<BuiltinToolError> for crate::error::RuntimeError {
     fn from(e: BuiltinToolError) -> Self {
         Self::tool_execution(e.to_string())
     }

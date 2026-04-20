@@ -19,6 +19,7 @@ thiserror = "1"
 tracing = "0.1"
 futures = "0.3"
 pin-project = "1"
+parking_lot = "0.12"
 
 # ACP SDK
 agent-client-protocol = { version = "0.10", features = ["unstable_session_close"] }
@@ -50,14 +51,16 @@ grep-regex = "0.1"
 
 # Embedded Python runtime (Monty)
 #
-# Position B adoption: pinned to upstream git main branch.
+# Position B adoption: pinned to a specific upstream commit for reproducibility.
 # crates.io only has a 0.0.0 placeholder, so a git dep is the only viable path.
 # Re-evaluate once Monty publishes a usable semver release.
 # Do NOT fork unless upstream cannot resolve a real Level 3 portability blocker.
 #
 # Publication of iron-core to crates.io is deferred until monty is available
 # there, because crates.io rejects manifests containing git dependencies.
-monty = { git = "https://github.com/pydantic/monty", branch = "main", optional = true }
+#
+# Bump `rev` deliberately after verifying against the iron-core test suite.
+monty = { git = "https://github.com/pydantic/monty", rev = "2e9df4b508e8a9ac80f3a6a26ed680242d1f460d", optional = true }
 num-bigint = { version = "0.4", optional = true }
 num-traits = { version = "0.2", optional = true }
 

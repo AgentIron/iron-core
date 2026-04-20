@@ -203,11 +203,10 @@ pub use durable::{
     SessionId, StructuredMessage, TimelineEntry, ToolRecordStatus, ToolTerminalOutcome,
 };
 pub use ephemeral::{EphemeralTurn, TurnPhase};
-pub use error::{LoopError, LoopResult, RuntimeError, RuntimeResult};
+pub use error::{RuntimeError, RuntimeResult};
 pub use facade::{
-    AgentConnection, AgentEvent, AgentSession, FacadeToolStatus, IronAgent, PermissionRequest,
-    PermissionVerdict, PromptEvent, PromptEvents, PromptHandle, PromptOutcome, PromptStatus,
-    ToolResultStatus,
+    AgentConnection, AgentSession, IronAgent, PermissionRequest, PermissionVerdict, PromptEvent,
+    PromptEvents, PromptHandle, PromptOutcome, PromptStatus, ToolResultStatus,
 };
 pub use prompt_turn::PromptTurn;
 pub use runtime::{ConnectionId, IronRuntime};
@@ -224,21 +223,23 @@ pub use transport::{
 
 pub use mcp::{
     McpConnectionManager, McpServerConfig, McpServerHealth, McpServerRegistry, McpServerState,
-    McpToolInfo, McpTransport, McpServerSummary, SessionToolCatalog, ToolDiagnostic, ToolSource,
+    McpServerSummary, McpToolInfo, McpTransport, SessionToolCatalog, ToolDiagnostic, ToolSource,
 };
 
+// --- Plugin public surface ---
+//
+// The items below are the intended public API for declaring plugins,
+// inspecting their status, and handling auth interactions.  Internal
+// lifecycle, effective-tool computation, and auth-plumbing types are
+// deliberately not re-exported — they can still be reached through the
+// `plugin` module for advanced integration but are not part of the
+// stable surface.
 pub use plugin::{
     auth::{
-        AuthActionHint, AuthAvailability, AuthInteractionRequest, AuthInteractionResponse,
-        AuthInteractionResult, AuthPrompt, AuthState, AuthStatusTransition, CredentialBinding,
-        OAuthProvider, OAuthRequirements,
+        AuthInteractionRequest, AuthInteractionResponse, AuthInteractionResult, AuthPrompt,
+        AuthState, CredentialBinding, OAuthRequirements,
     },
     config::{Checksum, ChecksumAlgorithm, PluginConfig as PluginSourceConfig, PluginSource},
-    effective_tools::{
-        compute_tool_availability, EffectivePluginToolView, PluginTool, ToolAvailabilityResult,
-        UnavailableReason,
-    },
-    lifecycle::{InstallResult, PluginLifecycle},
     manifest::{
         ExportedTool, PluginIdentity, PluginManifest, PluginPublisher, PresentationMetadata,
         ToolAuthRequirements,
@@ -256,11 +257,10 @@ pub use iron_providers::{
 
 pub mod prelude {
     pub use crate::{
-        AgentConnection, AgentEvent, AgentSession, ApprovalStrategy, Config, ConfigSource,
-        ContentBlock, ContextWindowPolicy, FacadeToolStatus, GenerationConfig, IronAgent,
-        LoopError, LoopResult, OpenAiConfig, OpenAiConfigSource, OpenAiProvider,
-        PermissionVerdict, PromptEvent, PromptEvents, PromptHandle, PromptOutcome, Provider,
-        RuntimeConfigSource, SessionId, Tool, ToolDefinition, ToolPolicy, ToolRegistry,
-        Transcript,
+        AgentConnection, AgentSession, ApprovalStrategy, Config, ConfigSource, ContentBlock,
+        ContextWindowPolicy, GenerationConfig, IronAgent, OpenAiConfig, OpenAiConfigSource,
+        OpenAiProvider, PermissionVerdict, PromptEvent, PromptEvents, PromptHandle, PromptOutcome,
+        Provider, RuntimeConfigSource, RuntimeError, RuntimeResult, SessionId, Tool,
+        ToolDefinition, ToolPolicy, ToolRegistry, Transcript,
     };
 }
