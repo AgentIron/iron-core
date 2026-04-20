@@ -8,6 +8,7 @@ impl PromptAssembler {
         repo_payload: &RepoInstructionPayload,
         additional_inline: &[String],
         session_instructions: Option<&str>,
+        skill_instructions: Option<&str>,
         runtime_context: &str,
     ) -> String {
         let mut parts: Vec<String> = Vec::new();
@@ -31,6 +32,12 @@ impl PromptAssembler {
         if let Some(instr) = session_instructions {
             if !instr.is_empty() {
                 parts.push(instr.to_string());
+            }
+        }
+
+        if let Some(skills) = skill_instructions {
+            if !skills.is_empty() {
+                parts.push(skills.to_string());
             }
         }
 

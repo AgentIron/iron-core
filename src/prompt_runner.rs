@@ -3,6 +3,7 @@ use crate::context::compaction::{CompactionEngine, CompactionReason};
 use crate::durable::DurableSession;
 use crate::ephemeral::EphemeralTurn;
 use crate::mcp::SessionToolCatalog;
+use crate::plugin::rich_output::transcript_text as plugin_transcript_text;
 use crate::prompt_lifecycle::{
     ApprovalRequest, ApprovalVerdict, PromptLifecycleEvent, PromptSink, ToolUpdateStatus,
 };
@@ -99,6 +100,7 @@ impl PromptRunner {
                 let compacted_context = session.compacted_context.clone();
                 let repo_payload = session.repo_instruction_payload.clone();
                 let messages = session.to_transcript().messages;
+                let skill_instructions = session.active_skill_instructions();
                 drop(session);
 
                 if let Some(tool_catalog) = tool_catalog.as_ref() {
@@ -110,6 +112,7 @@ impl PromptRunner {
                         repo_payload.as_ref(),
                         tool_catalog.definitions(),
                         tool_catalog.contains("python_exec"),
+                        Some(&skill_instructions),
                     )
                 } else {
                     let tool_registry = self.runtime.tool_registry();
@@ -120,6 +123,7 @@ impl PromptRunner {
                         instructions.as_deref(),
                         repo_payload.as_ref(),
                         &tool_registry,
+                        Some(&skill_instructions),
                     )
                 }
             };
@@ -612,6 +616,11 @@ impl PromptRunner {
             return;
         }
 
+        if call.tool_name == "activate_skill" {
+            self.execute_activate_skill(durable, sink, call).await;
+            return;
+        }
+
         self.execute_standard_tool(durable, sink, call, tool_catalog.as_ref())
             .await;
     }
@@ -639,6 +648,12 @@ impl PromptRunner {
         match execute_result {
             Ok(result) => {
                 let limited_result = limit_result_size(result);
+                if let Some(transcript_text) = plugin_transcript_text(&limited_result) {
+                    sink.emit(PromptLifecycleEvent::Output {
+                        text: transcript_text.to_string(),
+                    })
+                    .await;
+                }
                 {
                     let mut session = durable.lock();
                     session.complete_tool_call(&call_id, limited_result.clone());
@@ -666,6 +681,119 @@ impl PromptRunner {
                 .await;
             }
         }
+    }
+
+    async fn execute_activate_skill(
+        &self,
+        durable: &Arc<Mutex<DurableSession>>,
+        sink: &dyn PromptSink,
+        call: iron_providers::ToolCall,
+    ) {
+        let call_id = call.call_id.clone();
+        let skill_name = call
+            .arguments
+            .get("skill_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if skill_name.is_empty() {
+            let result = serde_json::json!({"error": "Missing 'skill_name' argument"});
+            {
+                let mut session = durable.lock();
+                session.fail_tool_call(&call_id, result.clone());
+            }
+            sink.emit(PromptLifecycleEvent::ToolCallUpdate {
+                call_id: call_id.clone(),
+                tool_name: "activate_skill".to_string(),
+                status: ToolUpdateStatus::Failed,
+                output: Some(result),
+            })
+            .await;
+            return;
+        }
+
+        let (skill, already_active) = {
+            let session = durable.lock();
+            match session.load_available_skill(skill_name) {
+                Some(skill) => (skill, session.is_skill_active(skill_name)),
+                None => {
+                    drop(session);
+                    let result = serde_json::json!({
+                        "error": format!("Skill '{}' is not available in this session", skill_name)
+                    });
+                    {
+                        let mut session = durable.lock();
+                        session.fail_tool_call(&call_id, result.clone());
+                    }
+                    sink.emit(PromptLifecycleEvent::ToolCallUpdate {
+                        call_id: call_id.clone(),
+                        tool_name: "activate_skill".to_string(),
+                        status: ToolUpdateStatus::Failed,
+                        output: Some(result),
+                    })
+                    .await;
+                    return;
+                }
+            }
+        };
+
+        if skill.metadata.requires_trust {
+            let result = serde_json::json!({
+                "error": format!(
+                    "Skill '{}' requires elevated trust and cannot be activated by the model. Ask the user to activate it.",
+                    skill_name
+                )
+            });
+            {
+                let mut session = durable.lock();
+                session.fail_tool_call(&call_id, result.clone());
+            }
+            sink.emit(PromptLifecycleEvent::ToolCallUpdate {
+                call_id: call_id.clone(),
+                tool_name: "activate_skill".to_string(),
+                status: ToolUpdateStatus::Failed,
+                output: Some(result),
+            })
+            .await;
+            return;
+        }
+
+        {
+            let mut session = durable.lock();
+            session.start_tool_call(&call_id, "activate_skill", call.arguments.clone());
+            if !already_active {
+                session.activate_skill(&skill.metadata.id, &skill.body, skill.resources.clone());
+            }
+        }
+
+        let result = if already_active {
+            serde_json::json!({
+                "status": "already_active",
+                "skill": skill.metadata.id,
+            })
+        } else {
+            serde_json::json!({
+                "status": "activated",
+                "skill": skill.metadata.id,
+                "description": skill.metadata.description,
+                "content": crate::skill::render_skill_content(&skill.metadata.id, &skill.body),
+                "resources": skill.resources.iter().map(|r| &r.path).collect::<Vec<_>>(),
+            })
+        };
+        let limited_result = limit_result_size(result);
+
+        {
+            let mut session = durable.lock();
+            session.complete_tool_call(&call_id, limited_result.clone());
+        }
+
+        sink.emit(PromptLifecycleEvent::ToolCallUpdate {
+            call_id: call_id.clone(),
+            tool_name: "activate_skill".to_string(),
+            status: ToolUpdateStatus::Completed,
+            output: Some(limited_result),
+        })
+        .await;
     }
 
     async fn cancel_remaining_tool_calls(

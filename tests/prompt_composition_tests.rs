@@ -27,7 +27,7 @@ fn make_additional(path: &str, content: &str) -> AdditionalInstructionFile {
 #[test]
 fn prompt_layer_ordering_baseline_first() {
     let payload = RepoInstructionPayload::default();
-    let result = PromptAssembler::assemble("BASELINE", &payload, &[], Some("SESSION"), "RUNTIME");
+    let result = PromptAssembler::assemble("BASELINE", &payload, &[], Some("SESSION"), None, "RUNTIME");
     let baseline_pos = result.find("BASELINE").unwrap();
     let session_pos = result.find("SESSION").unwrap();
     let runtime_pos = result.find("RUNTIME").unwrap();
@@ -41,7 +41,7 @@ fn prompt_layer_ordering_repo_between_baseline_and_session() {
         sources: vec![make_source("AGENTS.md", "repo content")],
         additional_files: vec![],
     };
-    let result = PromptAssembler::assemble("BASELINE", &payload, &[], Some("SESSION"), "RUNTIME");
+    let result = PromptAssembler::assemble("BASELINE", &payload, &[], Some("SESSION"), None, "RUNTIME");
     let baseline_pos = result.find("BASELINE").unwrap();
     let repo_pos = result.find("repo content").unwrap();
     let session_pos = result.find("SESSION").unwrap();
@@ -59,6 +59,7 @@ fn prompt_layer_ordering_inline_between_repo_and_session() {
         &payload,
         &["INLINE".to_string()],
         Some("SESSION"),
+        None,
         "RUNTIME",
     );
     let baseline_pos = result.find("BASELINE").unwrap();
@@ -69,9 +70,27 @@ fn prompt_layer_ordering_inline_between_repo_and_session() {
 }
 
 #[test]
+fn prompt_layer_ordering_skills_between_session_and_runtime() {
+    let payload = RepoInstructionPayload::default();
+    let result = PromptAssembler::assemble(
+        "BASELINE",
+        &payload,
+        &[],
+        Some("SESSION"),
+        Some("<skill_content name=\"review\">\nUse the review checklist\n</skill_content>"),
+        "RUNTIME",
+    );
+    let session_pos = result.find("SESSION").unwrap();
+    let skill_pos = result.find("<skill_content name=\"review\">").unwrap();
+    let runtime_pos = result.find("RUNTIME").unwrap();
+    assert!(session_pos < skill_pos);
+    assert!(skill_pos < runtime_pos);
+}
+
+#[test]
 fn absent_layers_omitted() {
     let payload = RepoInstructionPayload::default();
-    let result = PromptAssembler::assemble("BASELINE", &payload, &[], None, "");
+    let result = PromptAssembler::assemble("BASELINE", &payload, &[], None, None, "");
     assert!(result.contains("BASELINE"));
     assert!(!result.contains("<repository_instructions>"));
     assert!(!result.contains("<runtime_context>"));
@@ -83,7 +102,7 @@ fn repo_instructions_renders_sources_metadata() {
         sources: vec![make_source("AGENTS.md", "do good things")],
         additional_files: vec![make_additional("/extra.md", "extra stuff")],
     };
-    let result = PromptAssembler::assemble("", &payload, &[], None, "");
+    let result = PromptAssembler::assemble("", &payload, &[], None, None, "");
     assert!(result.contains("<repository_instruction_sources>"));
     assert!(result.contains("AGENTS.md"));
     assert!(result.contains("/extra.md"));

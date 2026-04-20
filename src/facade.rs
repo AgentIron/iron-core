@@ -1,3 +1,4 @@
+use crate::plugin::rich_output::{transcript_text as plugin_transcript_text, view as plugin_view};
 use crate::{
     capability::{CapabilityBackend, CapabilityDescriptor, CapabilityId},
     config::Config,
@@ -150,6 +151,10 @@ pub enum PromptEvent {
         status: ToolResultStatus,
         /// The result value (if successful).
         result: Option<serde_json::Value>,
+        /// Normalized transcript-safe text for plugin rich output, when present.
+        transcript_text: Option<String>,
+        /// Normalized rich view payload for plugin rich output, when present.
+        view: Option<serde_json::Value>,
     },
     /// Activity from an embedded Python script.
     ScriptActivity {
@@ -490,6 +495,11 @@ impl IronAgent {
     pub fn register_python_exec_tool(&self) {
         self.runtime
             .register_tool(crate::embedded_python::PythonExecTool::new());
+    }
+
+    /// Register the `activate_skill` model-facing tool.
+    pub fn register_activate_skill_tool(&self) {
+        self.runtime.register_activate_skill_tool();
     }
 
     /// Get a reference to the Tokio runtime handle.
@@ -1127,6 +1137,11 @@ fn convert_notification_to_prompt_event_with_index(
                 .or_else(|| tool_name_index.borrow().get(&call_id).cloned())
                 .unwrap_or_default();
             let result = update.fields.raw_output.clone();
+            let transcript_text = result
+                .as_ref()
+                .and_then(plugin_transcript_text)
+                .map(str::to_string);
+            let view = result.as_ref().and_then(plugin_view).cloned();
             let status = match update.fields.status {
                 Some(agent_client_protocol::ToolCallStatus::Completed) => {
                     ToolResultStatus::Completed
@@ -1156,6 +1171,8 @@ fn convert_notification_to_prompt_event_with_index(
                 tool_name,
                 status,
                 result,
+                transcript_text,
+                view,
             })
         }
         _ => None,
@@ -1450,6 +1467,54 @@ impl AgentSession {
     /// Set the system instructions for this session.
     pub fn set_instructions(&self, instructions: impl Into<String>) {
         self.durable.lock().set_instructions(instructions);
+    }
+
+    // -- Skill APIs --
+
+    /// Refresh the skill catalog by re-scanning all configured sources.
+    ///
+    /// Returns diagnostics from the discovery process.
+    pub fn refresh_skill_catalog(&self) -> Vec<crate::skill::SkillDiagnostic> {
+        let diagnostics = self.connection.runtime().refresh_skill_catalog();
+        let available_skills = self.connection.runtime().available_skill_snapshot();
+        self.durable.lock().set_available_skills(available_skills);
+        diagnostics
+    }
+
+    /// List skills available in the runtime catalog.
+    pub fn list_available_skills(&self) -> Vec<crate::skill::SkillMetadata> {
+        self.durable
+            .lock()
+            .list_available_skills()
+            .iter()
+            .map(|skill| skill.metadata.clone())
+            .collect()
+    }
+
+    /// Activate a skill for this session.
+    pub fn activate_skill(&self, name: &str) -> Result<(), String> {
+        let skill = self
+            .durable
+            .lock()
+            .load_available_skill(name)
+            .ok_or_else(|| format!("Skill '{}' not found", name))?;
+        self.durable
+            .lock()
+            .activate_skill(&skill.metadata.id, &skill.body, skill.resources.clone());
+        Ok(())
+    }
+
+    /// Deactivate a skill for this session.
+    pub fn deactivate_skill(&self, name: &str) {
+        self.durable.lock().deactivate_skill(name);
+    }
+
+    /// List the names of skills currently active in this session.
+    pub fn list_active_skills(&self) -> Vec<String> {
+        self.durable.lock().list_active_skills()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     /// Get a snapshot of the active context.

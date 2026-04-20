@@ -55,6 +55,8 @@ pub struct Config {
     pub mcp: McpConfig,
     /// Plugin configuration
     pub plugins: PluginConfig,
+    /// Skill configuration
+    pub skills: SkillConfig,
     /// Workspace roots used to derive the runtime context working directory
     /// and workspace root list. When non-empty, the first root becomes the
     /// primary working directory and all roots are surfaced as workspace roots.
@@ -76,6 +78,7 @@ impl Default for Config {
             prompt_composition: PromptCompositionConfig::default(),
             mcp: McpConfig::default(),
             plugins: PluginConfig::default(),
+            skills: SkillConfig::default(),
             workspace_roots: Vec::new(),
         }
     }
@@ -156,6 +159,12 @@ impl Config {
     /// Set the plugin configuration.
     pub fn with_plugins(mut self, plugins: PluginConfig) -> Self {
         self.plugins = plugins;
+        self
+    }
+
+    /// Set the skill configuration.
+    pub fn with_skills(mut self, skills: SkillConfig) -> Self {
+        self.skills = skills;
         self
     }
 
@@ -440,6 +449,55 @@ impl PluginConfig {
     /// Set the per-plugin WASM memory ceiling, in bytes.
     pub fn with_max_memory_bytes(mut self, bytes: u64) -> Self {
         self.max_memory_bytes = bytes;
+        self
+    }
+}
+
+/// Configuration for agent skills.
+///
+/// Skills are declarative instruction sets that models can discover and activate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillConfig {
+    /// Whether skills are enabled globally for this runtime.
+    pub enabled: bool,
+    /// Whether to trust project-level skills discovered from the workspace.
+    /// When false, project-level skills are hidden from the catalog.
+    pub trust_project_skills: bool,
+    /// Directories to scan for skills in addition to defaults.
+    pub additional_skill_dirs: Vec<std::path::PathBuf>,
+}
+
+impl Default for SkillConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            trust_project_skills: false,
+            additional_skill_dirs: Vec::new(),
+        }
+    }
+}
+
+impl SkillConfig {
+    /// Create a new skill configuration using defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable or disable skill support globally.
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Set whether to trust project-level skills.
+    pub fn with_trust_project_skills(mut self, trust: bool) -> Self {
+        self.trust_project_skills = trust;
+        self
+    }
+
+    /// Add an additional skill directory to scan.
+    pub fn with_additional_skill_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.additional_skill_dirs.push(dir);
         self
     }
 }

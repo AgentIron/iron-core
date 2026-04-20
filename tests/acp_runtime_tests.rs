@@ -16,6 +16,7 @@ use futures::StreamExt;
 use iron_core::{
     config::ApprovalStrategy,
     facade::{PermissionVerdict, PromptEvent, PromptOutcome, ToolResultStatus},
+    skill::{LoadedSkill, SkillMetadata, SkillOrigin},
     tool::{FunctionTool, ToolDefinition},
     AuthInteractionResponse, AuthInteractionResult, AuthState, Config, ConnectionId, ContentBlock,
     DurableSession, EphemeralTurn, IronAgent, IronRuntime, OAuthRequirements, PluginHealth,
@@ -154,6 +155,327 @@ fn register_test_auth_plugin(agent: &IronAgent, plugin_id: &str) {
             api_version: "1.0".to_string(),
         },
     );
+}
+
+fn make_skill(name: &str, description: &str) -> LoadedSkill {
+    LoadedSkill {
+        metadata: SkillMetadata {
+            id: name.to_string(),
+            display_name: name.to_string(),
+            description: description.to_string(),
+            origin: SkillOrigin::ClientProvided,
+            auto_activate: false,
+            tags: vec![],
+            requires_tools: vec![],
+            requires_capabilities: vec![],
+            requires_trust: false,
+        },
+        location: None,
+        body: format!("# {}\nUse this skill carefully.", name),
+        resources: vec![],
+    }
+}
+
+#[test]
+fn activate_skill_returns_structured_content_and_resources() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new("sk1", "activate_skill", json!({"skill_name": "review"})),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![ProviderEvent::Complete],
+        ]);
+        let agent = IronAgent::new(Config::default(), provider);
+        agent.runtime().register_skill(LoadedSkill {
+            metadata: SkillMetadata {
+                id: "review".to_string(),
+                display_name: "review".to_string(),
+                description: "Review code changes".to_string(),
+                origin: SkillOrigin::ClientProvided,
+                auto_activate: false,
+                tags: vec![],
+                requires_tools: vec![],
+                requires_capabilities: vec![],
+                requires_trust: false,
+            },
+            location: None,
+            body: "# review\nUse this skill carefully.".to_string(),
+            resources: vec![iron_core::skill::SkillResourceEntry {
+                path: "checklist.md".to_string(),
+                description: String::new(),
+            }],
+        });
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        let (_handle, mut events) = session.prompt_stream("go");
+
+        let mut tool_result = None;
+        while let Some(event) = events.next().await {
+            if let PromptEvent::ToolResult {
+                call_id,
+                status,
+                result,
+                ..
+            } = event.clone()
+            {
+                if call_id == "sk1" {
+                    tool_result = Some((status, result));
+                }
+            }
+            if matches!(event, PromptEvent::Complete { .. }) {
+                break;
+            }
+        }
+
+        let (status, result) = tool_result.expect("expected activate_skill result");
+        assert_eq!(status, ToolResultStatus::Completed);
+        let result = result.expect("expected result payload");
+        assert_eq!(result["status"], "activated");
+        assert!(result["content"]
+            .as_str()
+            .unwrap()
+            .contains("<skill_content name=\"review\">"));
+        assert_eq!(result["resources"][0], "checklist.md");
+        assert_eq!(session.list_active_skills(), vec!["review".to_string()]);
+    });
+}
+
+#[test]
+fn activate_skill_rejects_names_outside_session_catalog() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::ToolCall {
+                call: ToolCall::new("sk2", "activate_skill", json!({"skill_name": "missing"})),
+            },
+            ProviderEvent::Complete,
+        ]]);
+        let agent = IronAgent::new(Config::default(), provider);
+        agent.runtime().register_skill(make_skill("review", "Review code changes"));
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        let (_handle, mut events) = session.prompt_stream("go");
+
+        let mut tool_result = None;
+        while let Some(event) = events.next().await {
+            if let PromptEvent::ToolResult {
+                call_id,
+                status,
+                result,
+                ..
+            } = event.clone()
+            {
+                if call_id == "sk2" {
+                    tool_result = Some((status, result));
+                }
+            }
+            if matches!(event, PromptEvent::Complete { .. }) {
+                break;
+            }
+        }
+
+        let (status, result) = tool_result.expect("expected activate_skill failure");
+        assert_eq!(status, ToolResultStatus::Failed);
+        let result = result.expect("expected failure payload");
+        let error = result["error"].as_str().unwrap();
+        assert!(error.contains("missing"));
+    });
+}
+
+#[test]
+fn activate_skill_duplicate_activation_returns_lightweight_confirmation() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new("sk3", "activate_skill", json!({"skill_name": "review"})),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new("sk4", "activate_skill", json!({"skill_name": "review"})),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![ProviderEvent::Complete],
+        ]);
+        let agent = IronAgent::new(Config::default(), provider);
+        agent.runtime().register_skill(make_skill("review", "Review code changes"));
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        let (_handle, mut events) = session.prompt_stream("go");
+
+        let mut first_result = None;
+        let mut second_result = None;
+        while let Some(event) = events.next().await {
+            if let PromptEvent::ToolResult {
+                call_id,
+                status,
+                result,
+                ..
+            } = event.clone()
+            {
+                if call_id == "sk3" {
+                    first_result = Some((status, result.clone()));
+                }
+                if call_id == "sk4" {
+                    second_result = Some((status, result));
+                }
+            }
+            if matches!(event, PromptEvent::Complete { .. }) {
+                break;
+            }
+        }
+
+        let (first_status, first_payload) = first_result.expect("expected first activation result");
+        assert_eq!(first_status, ToolResultStatus::Completed);
+        assert_eq!(first_payload.unwrap()["status"], "activated");
+
+        let (second_status, second_payload) = second_result.expect("expected second activation result");
+        assert_eq!(second_status, ToolResultStatus::Completed);
+        let second_payload = second_payload.unwrap();
+        assert_eq!(second_payload["status"], "already_active");
+        assert!(second_payload.get("content").is_none());
+    });
+}
+
+#[test]
+fn facade_activation_allows_trust_required_skills() {
+    let agent = IronAgent::new(Config::default(), MockProvider::default());
+    agent.runtime().register_skill(LoadedSkill {
+        metadata: SkillMetadata {
+            id: "trusted-review".to_string(),
+            display_name: "trusted-review".to_string(),
+            description: "Review privileged changes".to_string(),
+            origin: SkillOrigin::ClientProvided,
+            auto_activate: false,
+            tags: vec![],
+            requires_tools: vec![],
+            requires_capabilities: vec![],
+            requires_trust: true,
+        },
+        location: None,
+        body: "# trusted-review\nHandle privileged review tasks.".to_string(),
+        resources: vec![],
+    });
+
+    let conn = agent.connect();
+    let session = conn.create_session().unwrap();
+
+    session
+        .activate_skill("trusted-review")
+        .expect("direct facade activation should remain user-controlled");
+
+    assert_eq!(session.list_active_skills(), vec!["trusted-review".to_string()]);
+}
+
+#[test]
+fn normalized_plugin_result_reaches_tool_result_fields_and_output_stream() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new("vr1", "plugin_demo_render", json!({})),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![ProviderEvent::Complete],
+        ]);
+        let agent = IronAgent::new(Config::default(), provider);
+        agent.register_tool(FunctionTool::simple(
+            "plugin_demo_render",
+            "plugin_demo_render",
+            |_| {
+                Ok(json!({
+                    "kind": "plugin_tool_result",
+                    "transcript": {"text": "Updated todo list."},
+                    "view": {
+                        "id": "todo:session:1",
+                        "mode": "replace",
+                        "payload": {
+                            "kind": "todo_list",
+                            "title": "Current Tasks",
+                            "items": [
+                                {"id": "task_1", "label": "Review tool efficiency", "done": true},
+                                {"id": "task_2", "label": "Add plugin rich output", "done": false}
+                            ]
+                        }
+                    },
+                    "metadata": {
+                        "plugin_id": "demo-plugin",
+                        "tool_name": "render"
+                    }
+                }))
+            },
+        ));
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+        let (_handle, mut events) = session.prompt_stream("go");
+
+        let mut saw_output = false;
+        let mut tool_result = None;
+
+        while let Some(event) = events.next().await {
+            match event {
+                PromptEvent::Output { text } if text == "Updated todo list." => {
+                    saw_output = true;
+                }
+                PromptEvent::ToolResult { ref call_id, .. } if call_id == "vr1" => {
+                    tool_result = Some(event.clone());
+                }
+                PromptEvent::Complete { .. } => break,
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_output,
+            "normalized transcript text should reach the output stream"
+        );
+
+        let Some(PromptEvent::ToolResult {
+            status,
+            result,
+            transcript_text,
+            view,
+            ..
+        }) = tool_result
+        else {
+            panic!("expected tool result for normalized plugin output");
+        };
+
+        assert_eq!(status, ToolResultStatus::Completed);
+        assert_eq!(transcript_text.as_deref(), Some("Updated todo list."));
+        assert_eq!(
+            view,
+            Some(json!({
+                "id": "todo:session:1",
+                "mode": "replace",
+                "payload": {
+                    "kind": "todo_list",
+                    "title": "Current Tasks",
+                    "items": [
+                        {"id": "task_1", "label": "Review tool efficiency", "done": true},
+                        {"id": "task_2", "label": "Add plugin rich output", "done": false}
+                    ]
+                }
+            }))
+        );
+        assert!(
+            result.is_some(),
+            "raw result should remain available for compatibility"
+        );
+
+        let records = session.tool_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].result, result);
+    });
 }
 
 // ===================================================================
@@ -3011,6 +3333,7 @@ fn prompt_iteration_uses_one_consistent_tool_snapshot() {
                     tool_name,
                     status,
                     result,
+                    ..
                 } if call_id == "swap1" && tool_name == "swap_tool" => {
                     assert_eq!(status, ToolResultStatus::Completed);
                     final_result = result;

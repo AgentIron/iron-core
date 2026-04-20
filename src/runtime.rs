@@ -14,6 +14,9 @@ use crate::{
     plugin::registry::{PluginAvailabilitySummary, PluginRegistry},
     plugin::status::{PluginInfo, PluginStatus},
     plugin::wasm_host::WasmHost,
+    skill::{LoadedSkill, SkillCatalog, SkillDiagnostic},
+    skill::source::FilesystemSkillSource,
+    skill::SkillOrigin,
     tool::ToolRegistry,
 };
 use iron_providers::Provider;
@@ -35,6 +38,7 @@ struct RuntimeInner {
     mcp_connection_manager: Arc<McpConnectionManager>,
     plugin_registry: RwLock<PluginRegistry>,
     wasm_host: RwLock<WasmHost>,
+    skill_catalog: RwLock<SkillCatalog>,
     sessions: RwLock<HashMap<SessionId, Arc<RuntimeSession>>>,
     connections: RwLock<HashMap<ConnectionId, Arc<RuntimeConnection>>>,
     tokio_handle: tokio::runtime::Handle,
@@ -61,6 +65,7 @@ struct CachedSessionToolCatalog {
     plugin_registry_version: u64,
     mcp_server_enablement: std::collections::HashMap<String, bool>,
     plugin_enablement: crate::plugin::session::SessionPluginEnablement,
+    available_skills: Vec<(String, String)>,
     catalog: Arc<SessionToolCatalog>,
 }
 
@@ -172,6 +177,8 @@ impl IronRuntime {
         let mcp_connection_manager = Arc::new(McpConnectionManager::new(mcp_registry.clone()));
         let plugin_max_memory = config.plugins.max_memory_bytes;
 
+        let skill_catalog = RwLock::new(SkillCatalog::new());
+
         let inner = RuntimeInner {
             config,
             provider: Arc::new(provider),
@@ -181,6 +188,7 @@ impl IronRuntime {
             mcp_connection_manager,
             plugin_registry: RwLock::new(PluginRegistry::new()),
             wasm_host: RwLock::new(WasmHost::with_max_memory_bytes(plugin_max_memory)),
+            skill_catalog,
             sessions: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
             tokio_handle: handle,
@@ -202,6 +210,11 @@ impl IronRuntime {
             });
         }
 
+        if this.inner.config.skills.enabled {
+            this.register_activate_skill_tool();
+            this.refresh_skill_catalog();
+        }
+
         this
     }
 
@@ -215,6 +228,8 @@ impl IronRuntime {
         let mcp_connection_manager = Arc::new(McpConnectionManager::new(mcp_registry.clone()));
         let plugin_max_memory = config.plugins.max_memory_bytes;
 
+        let skill_catalog = RwLock::new(SkillCatalog::new());
+
         let inner = RuntimeInner {
             config,
             provider: Arc::new(provider),
@@ -224,6 +239,7 @@ impl IronRuntime {
             mcp_connection_manager,
             plugin_registry: RwLock::new(PluginRegistry::new()),
             wasm_host: RwLock::new(WasmHost::with_max_memory_bytes(plugin_max_memory)),
+            skill_catalog,
             sessions: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
             tokio_handle: handle,
@@ -243,6 +259,11 @@ impl IronRuntime {
             let _ = this.spawn(async move {
                 manager.start(ReconnectConfig::default(), shutdown_rx).await;
             });
+        }
+
+        if this.inner.config.skills.enabled {
+            this.register_activate_skill_tool();
+            this.refresh_skill_catalog();
         }
 
         this
@@ -278,6 +299,33 @@ impl IronRuntime {
     /// Register the embedded Python execution tool.
     pub fn register_python_exec_tool(&self) {
         self.register_tool(crate::embedded_python::PythonExecTool::new());
+    }
+
+    /// Register the `activate_skill` model-facing tool.
+    pub fn register_activate_skill_tool(&self) {
+        use crate::tool::{ToolDefinition, FunctionTool};
+        let definition = ToolDefinition::new(
+            "activate_skill",
+            "Activate a skill by name to receive its instructions. The skill will be loaded into the session context.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "The name of the skill to activate"
+                    }
+                },
+                "required": ["skill_name"]
+            }),
+        );
+        let tool = FunctionTool::new(definition, |_args| {
+            // Actual activation is handled by the orchestrator; this dummy
+            // handler should never be called.
+            Err(crate::error::RuntimeError::tool_execution(
+                "activate_skill must be handled by the orchestrator".to_string(),
+            ))
+        });
+        self.register_tool(tool);
     }
 
     /// Borrow the capability registry.
@@ -335,6 +383,100 @@ impl IronRuntime {
         let plugin_id = config.id.clone();
         self.inner.plugin_registry.write().register(config);
         self.initialize_existing_sessions_for_new_plugin(&plugin_id);
+    }
+
+    /// Borrow the skill catalog.
+    pub fn skill_catalog(&self) -> parking_lot::RwLockReadGuard<'_, SkillCatalog> {
+        self.inner.skill_catalog.read()
+    }
+
+    /// Register a skill into the catalog.
+    pub fn register_skill(&self, skill: crate::skill::LoadedSkill) {
+        self.inner.skill_catalog.write().register(skill);
+    }
+
+    /// Discover skills from all configured sources and merge into the catalog.
+    pub fn discover_skills(&self, sources: &[Box<dyn crate::skill::source::SkillSource>]) {
+        let mut catalog = self.inner.skill_catalog.write();
+        *catalog = SkillCatalog::discover(sources);
+    }
+
+    /// Refresh the skill catalog by re-scanning all configured sources.
+    ///
+    /// Returns diagnostics about the discovery process (skipped skills,
+    /// collisions, parse errors, etc.).
+    pub fn refresh_skill_catalog(&self) -> Vec<SkillDiagnostic> {
+        let mut sources: Vec<Box<dyn crate::skill::source::SkillSource>> = Vec::new();
+        let mut diagnostics = Vec::new();
+        let config = &self.inner.config;
+
+        if !config.skills.enabled {
+            *self.inner.skill_catalog.write() = SkillCatalog::new();
+            return diagnostics;
+        }
+
+        let roots = if config.workspace_roots.is_empty() {
+            vec![std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))]
+        } else {
+            config.workspace_roots.clone()
+        };
+
+        // Project-level skills: .agents/skills/ in each workspace root
+        for root in roots {
+            let project_skills_dir = root.join(".agents").join("skills");
+            if project_skills_dir.exists() && project_skills_dir.is_dir() {
+                if config.skills.trust_project_skills {
+                    sources.push(Box::new(FilesystemSkillSource::new(
+                        project_skills_dir,
+                        SkillOrigin::ProjectFilesystem,
+                    )));
+                } else {
+                    diagnostics.push(SkillDiagnostic {
+                        level: crate::skill::DiagnosticLevel::Warning,
+                        message: format!(
+                            "Project skills in '{}' were hidden because trust_project_skills is disabled",
+                            project_skills_dir.display()
+                        ),
+                        skill_name: None,
+                    });
+                }
+            }
+        }
+
+        // User-level skills: ~/.agents/skills/
+        let home_dir = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(std::path::PathBuf::from)
+            .ok();
+        if let Some(home) = home_dir {
+            let user_skills_dir = home.join(".agents").join("skills");
+            if user_skills_dir.exists() && user_skills_dir.is_dir() {
+                sources.push(Box::new(FilesystemSkillSource::new(
+                    user_skills_dir,
+                    SkillOrigin::UserFilesystem,
+                )));
+            }
+        }
+
+        // Additional configured skill directories
+        for dir in &config.skills.additional_skill_dirs {
+            if dir.exists() && dir.is_dir() {
+                sources.push(Box::new(FilesystemSkillSource::new(
+                    dir.clone(),
+                    SkillOrigin::UserFilesystem,
+                )));
+            }
+        }
+
+        let mut catalog = SkillCatalog::discover(&sources);
+        catalog.extend_diagnostics(diagnostics);
+        let diagnostics = catalog.diagnostics().to_vec();
+        *self.inner.skill_catalog.write() = catalog;
+        diagnostics
+    }
+
+    pub(crate) fn available_skill_snapshot(&self) -> Vec<LoadedSkill> {
+        self.skill_catalog().list_all().into_iter().cloned().collect()
     }
 
     /// Borrow the Tokio runtime handle used for orchestration.
@@ -420,6 +562,21 @@ impl IronRuntime {
             let runtime_default = self.inner.config.plugins.enabled_by_default;
             for plugin in plugin_registry.list() {
                 durable.set_plugin_enabled(&plugin.config.id, runtime_default);
+            }
+        }
+
+        // Initialize active skills from runtime skill catalog
+        if self.inner.config.skills.enabled {
+            let available_skills = self.available_skill_snapshot();
+            durable.set_available_skills(available_skills.clone());
+            for skill in &available_skills {
+                if skill.metadata.auto_activate && !skill.metadata.requires_trust {
+                    durable.activate_skill(
+                        &skill.metadata.id,
+                        &skill.body,
+                        skill.resources.clone(),
+                    );
+                }
             }
         }
 
@@ -612,6 +769,16 @@ impl IronRuntime {
         let plugin_registry_version = plugin_registry_snapshot.version();
 
         {
+            let available_skills: Vec<(String, String)> = session_guard
+                .list_available_skills()
+                .iter()
+                .map(|skill| {
+                    (
+                        skill.metadata.id.clone(),
+                        skill.metadata.description.clone(),
+                    )
+                })
+                .collect();
             let cache_guard = runtime_session.tool_catalog_cache.lock();
             if let Some(cached) = cache_guard.as_ref() {
                 if cached.tool_registry_version == tool_registry_version
@@ -619,6 +786,7 @@ impl IronRuntime {
                     && cached.plugin_registry_version == plugin_registry_version
                     && cached.mcp_server_enablement == session_guard.mcp_server_enablement
                     && cached.plugin_enablement == session_guard.plugin_enablement
+                    && cached.available_skills == available_skills
                 {
                     return Some((*cached.catalog).clone());
                 }
@@ -641,6 +809,16 @@ impl IronRuntime {
         ));
 
         {
+            let available_skills = session_guard
+                .list_available_skills()
+                .iter()
+                .map(|skill| {
+                    (
+                        skill.metadata.id.clone(),
+                        skill.metadata.description.clone(),
+                    )
+                })
+                .collect();
             let mut cache_guard = runtime_session.tool_catalog_cache.lock();
             *cache_guard = Some(CachedSessionToolCatalog {
                 tool_registry_version,
@@ -648,6 +826,7 @@ impl IronRuntime {
                 plugin_registry_version,
                 mcp_server_enablement: session_guard.mcp_server_enablement.clone(),
                 plugin_enablement: session_guard.plugin_enablement.clone(),
+                available_skills,
                 catalog: catalog.clone(),
             });
         }
@@ -853,5 +1032,156 @@ impl std::fmt::Debug for IronRuntime {
             .field("connection_count", &self.connection_count())
             .field("is_shutdown", &self.is_shutdown())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream::{self, BoxStream};
+    use futures::StreamExt;
+    use crate::skill::source::StaticSkillSource;
+    use crate::skill::{LoadedSkill, SkillMetadata};
+
+    #[derive(Clone, Default)]
+    struct MockProvider;
+
+    impl Provider for MockProvider {
+        fn infer(
+            &self,
+            _request: iron_providers::InferenceRequest,
+        ) -> iron_providers::ProviderFuture<'_, Vec<iron_providers::ProviderEvent>> {
+            Box::pin(async move { Ok(vec![iron_providers::ProviderEvent::Complete]) })
+        }
+
+        fn infer_stream(
+            &self,
+            _request: iron_providers::InferenceRequest,
+        ) -> iron_providers::ProviderFuture<
+            '_,
+            BoxStream<'static, iron_providers::ProviderResult<iron_providers::ProviderEvent>>,
+        > {
+            Box::pin(async move {
+                Ok(stream::iter(vec![Ok(iron_providers::ProviderEvent::Complete)]).boxed())
+            })
+        }
+    }
+
+    fn make_skill(name: &str, description: &str) -> LoadedSkill {
+        LoadedSkill {
+            metadata: SkillMetadata {
+                id: name.to_string(),
+                display_name: name.to_string(),
+                description: description.to_string(),
+                origin: SkillOrigin::ClientProvided,
+                auto_activate: false,
+                tags: vec![],
+                requires_tools: vec![],
+                requires_capabilities: vec![],
+                requires_trust: false,
+            },
+            location: None,
+            body: format!("# {}\nInstructions", name),
+            resources: vec![],
+        }
+    }
+
+    #[test]
+    fn refresh_skill_catalog_records_diagnostic_for_untrusted_project_skills() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "iron-core-skill-trust-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project_skill_dir = temp_root.join(".agents").join("skills").join("review");
+        std::fs::create_dir_all(&project_skill_dir).unwrap();
+        std::fs::write(
+            project_skill_dir.join("SKILL.md"),
+            "---\nid: review\nname: review\ndescription: Review code\n---\n# review\nUse this skill.",
+        )
+        .unwrap();
+
+        let config = Config::default()
+            .with_workspace_roots(vec![temp_root.clone()])
+            .with_skills(crate::config::SkillConfig::default().with_trust_project_skills(false));
+        let runtime = IronRuntime::new(config, MockProvider);
+
+        let diagnostics = runtime.refresh_skill_catalog();
+        assert!(diagnostics.iter().any(|diag| {
+            diag.message.contains("hidden because trust_project_skills is disabled")
+        }));
+        assert!(runtime.skill_catalog().get("review").is_none());
+
+        let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn sessions_keep_independent_skill_snapshots() {
+        let runtime = IronRuntime::new(Config::default(), MockProvider);
+        let conn = ConnectionId(1);
+        runtime.register_connection(conn);
+
+        let mut source_a = StaticSkillSource::new();
+        source_a.register(make_skill("review", "Review code changes"));
+        runtime.discover_skills(&[Box::new(source_a)]);
+        let (_session_a_id, session_a) = runtime.create_session(conn).unwrap();
+
+        let mut source_b = StaticSkillSource::new();
+        source_b.register(make_skill("docs", "Write technical docs"));
+        runtime.discover_skills(&[Box::new(source_b)]);
+        let (_session_b_id, session_b) = runtime.create_session(conn).unwrap();
+
+        let session_a_names: Vec<_> = session_a
+            .lock()
+            .list_available_skills()
+            .iter()
+            .map(|skill| skill.metadata.id.clone())
+            .collect();
+        let session_b_names: Vec<_> = session_b
+            .lock()
+            .list_available_skills()
+            .iter()
+            .map(|skill| skill.metadata.id.clone())
+            .collect();
+
+        assert_eq!(session_a_names, vec!["review".to_string()]);
+        assert_eq!(session_b_names, vec!["docs".to_string()]);
+    }
+
+    #[test]
+    fn additional_skill_dirs_are_loaded_as_trusted_user_scope() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "iron-core-skill-additional-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let skill_dir = temp_root.join("review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nid: review\nname: review\ndescription: Review code\n---\n# review\nUse this skill.",
+        )
+        .unwrap();
+
+        let config = Config::default().with_skills(
+            crate::config::SkillConfig::default()
+                .with_trust_project_skills(false)
+                .with_additional_skill_dir(temp_root.clone()),
+        );
+        let runtime = IronRuntime::new(config, MockProvider);
+
+        let catalog = runtime.skill_catalog();
+        let skill = catalog
+            .get("review")
+            .expect("configured skill dir should load even when project trust is disabled");
+        assert_eq!(skill.origin, SkillOrigin::UserFilesystem);
+
+        let _ = std::fs::remove_dir_all(temp_root);
     }
 }

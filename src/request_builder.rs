@@ -16,6 +16,7 @@ pub fn build_inference_request_with_effective_tools(
     repo_instruction_payload: Option<&crate::prompt::config::RepoInstructionPayload>,
     effective_tools: &[crate::tool::ToolDefinition],
     python_exec_available: bool,
+    skill_instructions: Option<&str>,
 ) -> Result<InferenceRequest, RuntimeError> {
     let mut pruned = messages.to_vec();
     apply_context_window_policy(config, &mut pruned)?;
@@ -50,6 +51,7 @@ pub fn build_inference_request_with_effective_tools(
         instructions,
         repo_instruction_payload,
         python_exec_available,
+        skill_instructions,
     );
     if !composed.is_empty() {
         request = request.with_instructions(composed);
@@ -71,6 +73,7 @@ pub fn build_inference_request(
         instructions,
         None,
         tool_registry,
+        None,
     )
 }
 
@@ -88,6 +91,7 @@ pub fn build_inference_request_with_context(
         instructions,
         None,
         tool_registry,
+        None,
     )
 }
 
@@ -105,6 +109,7 @@ pub fn build_inference_request_with_repo(
         instructions,
         repo_instruction_payload,
         tool_registry,
+        None,
     )
 }
 
@@ -115,6 +120,7 @@ pub fn build_inference_request_with_context_and_repo(
     instructions: Option<&str>,
     repo_instruction_payload: Option<&crate::prompt::config::RepoInstructionPayload>,
     tool_registry: &ToolRegistry,
+    skill_instructions: Option<&str>,
 ) -> Result<InferenceRequest, RuntimeError> {
     let mut pruned = messages.to_vec();
     apply_context_window_policy(config, &mut pruned)?;
@@ -145,6 +151,7 @@ pub fn build_inference_request_with_context_and_repo(
         instructions,
         repo_instruction_payload,
         python_exec_available,
+        skill_instructions,
     );
     if !composed.is_empty() {
         request = request.with_instructions(composed);
@@ -169,6 +176,7 @@ fn build_composed_instructions(
     session_instructions: Option<&str>,
     repo_instruction_payload: Option<&crate::prompt::config::RepoInstructionPayload>,
     python_exec_available: bool,
+    skill_instructions: Option<&str>,
 ) -> String {
     let baseline = crate::prompt::baseline::BASELINE_PROMPT;
 
@@ -198,6 +206,7 @@ fn build_composed_instructions(
         &repo_payload,
         &config.prompt_composition.additional_inline,
         session_instructions,
+        skill_instructions,
         &runtime_context,
     )
 }

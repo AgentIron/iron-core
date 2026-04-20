@@ -62,6 +62,44 @@ pub struct McpServerSummary {
 }
 
 impl SessionToolCatalog {
+    fn activate_skill_definition(session: &DurableSession) -> Option<ToolDefinition> {
+        let mut skills: Vec<_> = session
+            .list_available_skills()
+            .iter()
+            .map(|skill| (skill.metadata.id.clone(), skill.metadata.description.clone()))
+            .collect();
+        if skills.is_empty() {
+            return None;
+        }
+
+        skills.sort_by(|a, b| a.0.cmp(&b.0));
+        let catalog_lines = skills
+            .iter()
+            .map(|(name, description)| format!("- {}: {}", name, description))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let enum_values = skills.into_iter().map(|(name, _)| name).collect::<Vec<_>>();
+
+        Some(ToolDefinition::new(
+            "activate_skill",
+            format!(
+                "Activate a skill by name to receive its instructions. Available skills:\n{}",
+                catalog_lines
+            ),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "The name of the skill to activate",
+                        "enum": enum_values,
+                    }
+                },
+                "required": ["skill_name"]
+            }),
+        ))
+    }
+
     fn is_mcp_server_enabled_for_session(session: &DurableSession, server_id: &str) -> bool {
         session.is_mcp_server_enabled(server_id).unwrap_or(false)
     }
@@ -117,6 +155,16 @@ impl SessionToolCatalog {
 
         // Add local tools
         for def in local_registry.definitions() {
+            if def.name == "activate_skill" {
+                let Some(definition) = Self::activate_skill_definition(session) else {
+                    continue;
+                };
+                let name = definition.name.clone();
+                tool_map.insert(name.clone(), ToolInfo::Local { name: name.clone() });
+                definitions.push(definition);
+                continue;
+            }
+
             let name = def.name.clone();
             tool_map.insert(name.clone(), ToolInfo::Local { name: name.clone() });
             definitions.push(def);
@@ -815,6 +863,7 @@ mod tests {
     };
     use crate::plugin::network::NetworkPolicy;
     use crate::plugin::status::PluginHealth;
+    use crate::skill::{LoadedSkill, SkillMetadata, SkillOrigin};
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -877,10 +926,46 @@ mod tests {
         }
     }
 
+    fn make_skill(name: &str, description: &str) -> LoadedSkill {
+        LoadedSkill {
+            metadata: SkillMetadata {
+                id: name.to_string(),
+                display_name: name.to_string(),
+                description: description.to_string(),
+                origin: SkillOrigin::ClientProvided,
+                auto_activate: false,
+                tags: vec![],
+                requires_tools: vec![],
+                requires_capabilities: vec![],
+                requires_trust: false,
+            },
+            location: None,
+            body: format!("# {}\nInstructions", name),
+            resources: vec![],
+        }
+    }
+
     /// Helper: build a SessionToolCatalog with only local + plugin registries
     /// (no MCP).  Uses empty MCP registries.
     fn build_catalog(session: &DurableSession) -> SessionToolCatalog {
         let local = Arc::new(crate::tool::ToolRegistry::new());
+        let mcp = Arc::new(crate::mcp::server::McpServerRegistry::new());
+        let plugin = Arc::new(crate::plugin::registry::PluginRegistry::new());
+        let wasm = Arc::new(crate::plugin::wasm_host::WasmHost::new());
+        let conn = Arc::new(crate::mcp::McpConnectionManager::new(
+            crate::mcp::server::McpServerRegistry::new(),
+        ));
+
+        SessionToolCatalog::new(local, mcp, plugin, wasm, conn, session)
+    }
+
+    fn build_catalog_with_local_tools(
+        session: &DurableSession,
+        tools: impl FnOnce(&mut crate::tool::ToolRegistry),
+    ) -> SessionToolCatalog {
+        let mut local_registry = crate::tool::ToolRegistry::new();
+        tools(&mut local_registry);
+        let local = Arc::new(local_registry);
         let mcp = Arc::new(crate::mcp::server::McpServerRegistry::new());
         let plugin = Arc::new(crate::plugin::registry::PluginRegistry::new());
         let wasm = Arc::new(crate::plugin::wasm_host::WasmHost::new());
@@ -923,6 +1008,79 @@ mod tests {
         let session = DurableSession::new(SessionId::new());
         let catalog = build_catalog(&session);
         assert!(catalog.is_empty());
+    }
+
+    #[test]
+    fn catalog_omits_activate_skill_when_session_has_no_available_skills() {
+        let session = DurableSession::new(SessionId::new());
+        let catalog = build_catalog_with_local_tools(&session, |registry| {
+            registry.register(crate::tool::FunctionTool::simple(
+                "activate_skill",
+                "activate skill",
+                |_| Ok(serde_json::json!({})),
+            ));
+        });
+
+        assert!(!catalog.contains("activate_skill"));
+    }
+
+    #[test]
+    fn catalog_exposes_dynamic_activate_skill_definition() {
+        let mut session = DurableSession::new(SessionId::new());
+        session.set_available_skills(vec![
+            make_skill("review", "Review code changes"),
+            make_skill("docs", "Write technical docs"),
+        ]);
+
+        let catalog = build_catalog_with_local_tools(&session, |registry| {
+            registry.register(crate::tool::FunctionTool::simple(
+                "activate_skill",
+                "activate skill",
+                |_| Ok(serde_json::json!({})),
+            ));
+        });
+
+        let definition = catalog
+            .get_definition("activate_skill")
+            .expect("activate_skill should be present");
+        assert!(definition.description.contains("review: Review code changes"));
+        assert!(definition.description.contains("docs: Write technical docs"));
+        let enum_values = definition.input_schema["properties"]["skill_name"]["enum"]
+            .as_array()
+            .expect("enum values");
+        assert_eq!(enum_values.len(), 2);
+        assert!(enum_values.iter().any(|value| value == "review"));
+        assert!(enum_values.iter().any(|value| value == "docs"));
+    }
+
+    #[test]
+    fn catalogs_use_session_local_skill_snapshots() {
+        let mut session_a = DurableSession::new(SessionId::new());
+        session_a.set_available_skills(vec![make_skill("review", "Review code changes")]);
+        let mut session_b = DurableSession::new(SessionId::new());
+        session_b.set_available_skills(vec![make_skill("docs", "Write technical docs")]);
+
+        let catalog_a = build_catalog_with_local_tools(&session_a, |registry| {
+            registry.register(crate::tool::FunctionTool::simple(
+                "activate_skill",
+                "activate skill",
+                |_| Ok(serde_json::json!({})),
+            ));
+        });
+        let catalog_b = build_catalog_with_local_tools(&session_b, |registry| {
+            registry.register(crate::tool::FunctionTool::simple(
+                "activate_skill",
+                "activate skill",
+                |_| Ok(serde_json::json!({})),
+            ));
+        });
+
+        let definition_a = catalog_a.get_definition("activate_skill").unwrap();
+        let definition_b = catalog_b.get_definition("activate_skill").unwrap();
+        assert!(definition_a.description.contains("review: Review code changes"));
+        assert!(!definition_a.description.contains("docs: Write technical docs"));
+        assert!(definition_b.description.contains("docs: Write technical docs"));
+        assert!(!definition_b.description.contains("review: Review code changes"));
     }
 
     #[test]

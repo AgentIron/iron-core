@@ -177,6 +177,7 @@ pub mod prompt;
 pub mod prompt_lifecycle;
 pub mod prompt_runner;
 pub mod prompt_turn;
+pub mod skill;
 pub mod request_builder;
 pub mod runtime;
 pub mod schema;

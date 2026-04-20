@@ -315,6 +315,12 @@ pub struct DurableSession {
     /// NOTE: This is excluded from handoff bundles (see handoff.rs).
     #[serde(default)]
     pub plugin_enablement: crate::plugin::session::SessionPluginEnablement,
+    /// Session-scoped skill activation state.
+    #[serde(default)]
+    pub skill_state: crate::skill::SessionSkillState,
+    /// Session-scoped snapshot of skills available for activation.
+    #[serde(default)]
+    pub available_skills: Vec<crate::skill::LoadedSkill>,
 }
 
 impl DurableSession {
@@ -332,6 +338,8 @@ impl DurableSession {
             repo_instruction_payload: None,
             mcp_server_enablement: std::collections::HashMap::new(),
             plugin_enablement: crate::plugin::session::SessionPluginEnablement::new(),
+            skill_state: crate::skill::SessionSkillState::default(),
+            available_skills: Vec::new(),
         }
     }
 
@@ -755,6 +763,53 @@ impl DurableSession {
                 ToolRecordStatus::PendingApproval | ToolRecordStatus::Running
             )
         })
+    }
+
+    // -- Skill activation helpers --
+
+    pub fn activate_skill(
+        &mut self,
+        name: impl Into<String>,
+        body: impl Into<String>,
+        resources: Vec<crate::skill::SkillResourceEntry>,
+    ) {
+        let record = crate::skill::ActivatedSkillRecord {
+            name: name.into(),
+            body: body.into(),
+            resources,
+        };
+        self.skill_state.activate(record);
+    }
+
+    pub fn deactivate_skill(&mut self, name: &str) {
+        self.skill_state.deactivate(name);
+    }
+
+    pub fn list_active_skills(&self) -> Vec<&str> {
+        self.skill_state.active_names()
+    }
+
+    pub fn active_skill_instructions(&self) -> String {
+        self.skill_state.active_skill_instructions()
+    }
+
+    pub fn is_skill_active(&self, name: &str) -> bool {
+        self.skill_state.is_active(name)
+    }
+
+    pub fn set_available_skills(&mut self, skills: Vec<crate::skill::LoadedSkill>) {
+        self.available_skills = skills;
+    }
+
+    pub fn list_available_skills(&self) -> &[crate::skill::LoadedSkill] {
+        &self.available_skills
+    }
+
+    pub fn load_available_skill(&self, name: &str) -> Option<crate::skill::LoadedSkill> {
+        self.available_skills
+            .iter()
+            .find(|skill| skill.metadata.id == name)
+            .cloned()
     }
 
     pub fn to_transcript(&self) -> iron_providers::Transcript {
