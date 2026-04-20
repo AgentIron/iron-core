@@ -12,6 +12,7 @@ pub mod session_catalog;
 pub use client::{create_transport_client, McpTransportClient};
 pub use connection::{McpConnectionHandle, McpConnectionManager, ReconnectConfig};
 pub use server::{
-    McpServerConfig, McpServerHealth, McpServerRegistry, McpServerState, McpToolInfo, McpTransport,
+    HttpConfig, McpServerConfig, McpServerHealth, McpServerRegistry, McpServerState, McpToolInfo,
+    McpTransport,
 };
 pub use session_catalog::{McpServerSummary, SessionToolCatalog, ToolDiagnostic, ToolSource};

@@ -3,8 +3,8 @@ use iron_core::{
     config::{ApprovalStrategy, McpConfig},
     mcp::create_transport_client,
     mcp::ReconnectConfig,
-    Config, IronAgent, McpConnectionManager, McpServerConfig, McpServerHealth, McpServerRegistry,
-    McpTransport, PromptOutcome,
+    Config, HttpConfig, IronAgent, McpConnectionManager, McpServerConfig, McpServerHealth,
+    McpServerRegistry, McpTransport, PromptOutcome,
 };
 use iron_providers::{InferenceRequest, Provider, ProviderEvent, ToolCall};
 use serde_json::json;
@@ -565,7 +565,7 @@ async fn http_sse_transport_handles_framing_and_response_correlation() {
         id: "sse-server".to_string(),
         label: "Fake SSE server".to_string(),
         transport: McpTransport::HttpSse {
-            url: fake_sse_server.url.clone(),
+            config: HttpConfig::new(fake_sse_server.url.clone()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -592,7 +592,7 @@ async fn sse_tool_discovery_follows_pagination() {
         id: "paged-sse".to_string(),
         label: "Paged SSE".to_string(),
         transport: McpTransport::HttpSse {
-            url: fake_sse_server.url.clone(),
+            config: HttpConfig::new(fake_sse_server.url.clone()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -841,7 +841,7 @@ async fn sse_startup_failure_fails_fast() {
         id: "broken-sse".to_string(),
         label: "Broken SSE".to_string(),
         transport: McpTransport::HttpSse {
-            url: format!("http://127.0.0.1:{}", unused_port),
+            config: HttpConfig::new(format!("http://127.0.0.1:{}", unused_port)),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -1033,7 +1033,7 @@ async fn concurrent_sse_requests_are_correctly_correlated() {
         id: "concurrent-sse".to_string(),
         label: "Concurrent SSE server".to_string(),
         transport: McpTransport::HttpSse {
-            url: fake_sse_server.url.clone(),
+            config: HttpConfig::new(fake_sse_server.url.clone()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -1463,7 +1463,7 @@ async fn sse_initialize_accepts_absent_response_id() {
         id: "null-id-sse".to_string(),
         label: "Null ID SSE server".to_string(),
         transport: McpTransport::HttpSse {
-            url: fake_sse_server.url.clone(),
+            config: HttpConfig::new(fake_sse_server.url.clone()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -1491,7 +1491,7 @@ async fn sse_initialize_accepts_explicit_null_response_id() {
         id: "explicit-null-sse".to_string(),
         label: "Explicit null ID SSE server".to_string(),
         transport: McpTransport::HttpSse {
-            url: fake_sse_server.url.clone(),
+            config: HttpConfig::new(fake_sse_server.url.clone()),
         },
         enabled_by_default: true,
         working_dir: None,

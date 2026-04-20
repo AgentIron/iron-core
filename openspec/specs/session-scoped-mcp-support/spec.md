@@ -76,12 +76,22 @@ The runtime SHALL execute MCP-backed tool calls through the same validation, app
 - **THEN** the runtime executes that call through the same validation, approval, and durable-record flow used for non-child tool calls
 
 ### Requirement: Runtime supports concrete MCP transport clients
-The runtime SHALL provide concrete transport support for configured MCP servers using the declared transport type, including stdio, HTTP, and HTTP+SSE.
+The runtime SHALL provide concrete transport support for configured MCP servers using the declared transport type, including stdio, HTTP, and HTTP+SSE. HTTP and HTTP+SSE transports SHALL use a shared `HttpConfig` struct that carries the server URL and optional custom headers. The runtime SHALL send the `Accept: application/json, text/event-stream` header on all HTTP-based MCP requests and merge any configured custom headers.
 
 #### Scenario: SSE transport handles structured event responses
 - **WHEN** a configured MCP server uses the HTTP+SSE transport
 - **THEN** the runtime handles SSE framing explicitly rather than assuming the first data block is always the response payload
 - **THEN** the runtime correlates the server response to the initiating MCP request sufficiently to avoid accepting unrelated stream events as a successful response
+
+#### Scenario: HTTP transport uses HttpConfig for URL and headers
+- **WHEN** a configured MCP server uses the HTTP transport
+- **THEN** the transport reads its URL and optional custom headers from the `HttpConfig` struct
+- **THEN** all requests include the default `Accept` header and any configured custom headers
+
+#### Scenario: SSE transport uses HttpConfig for URL and headers
+- **WHEN** a configured MCP server uses the HTTP+SSE transport
+- **THEN** the transport reads its URL and optional custom headers from the `HttpConfig` struct
+- **THEN** both the SSE bootstrap GET and JSON-RPC POST requests include the default `Accept` header and any configured custom headers
 
 ### Requirement: Client-visible MCP inspection and session control APIs
 The system SHALL provide client-visible APIs to inspect runtime MCP inventory and to enable or disable configured MCP servers for a session. The system SHALL expose enough state for clients to distinguish runtime server health from session enablement intent. When the runtime renders prompt/runtime context for a model request, the displayed working directory and workspace roots SHALL reflect the configured builtin tool roots when such roots are available, rather than the process current directory alone.

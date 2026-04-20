@@ -2,8 +2,8 @@
 
 use iron_core::{
     mcp::McpConnectionManager, plugin::wasm_host::WasmHost, plugin::PluginRegistry,
-    tool::ToolRegistry, McpServerConfig, McpServerHealth, McpServerRegistry, McpToolInfo,
-    McpTransport, SessionToolCatalog,
+    tool::ToolRegistry, HttpConfig, McpServerConfig, McpServerHealth, McpServerRegistry,
+    McpToolInfo, McpTransport, SessionToolCatalog,
 };
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ fn create_test_registry() -> Arc<McpServerRegistry> {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,

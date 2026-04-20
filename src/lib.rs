@@ -222,8 +222,9 @@ pub use transport::{
 };
 
 pub use mcp::{
-    McpConnectionManager, McpServerConfig, McpServerHealth, McpServerRegistry, McpServerState,
-    McpServerSummary, McpToolInfo, McpTransport, SessionToolCatalog, ToolDiagnostic, ToolSource,
+    HttpConfig, McpConnectionManager, McpServerConfig, McpServerHealth, McpServerRegistry,
+    McpServerState, McpServerSummary, McpToolInfo, McpTransport, SessionToolCatalog,
+    ToolDiagnostic, ToolSource,
 };
 
 // --- Plugin public surface ---

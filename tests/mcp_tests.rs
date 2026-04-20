@@ -1,7 +1,7 @@
 //! Tests for MCP (Model Context Protocol) session-scoped support
 
 use futures::StreamExt;
-use iron_core::{config::McpConfig, Config, IronAgent, McpServerConfig, McpTransport, SessionId};
+use iron_core::{config::McpConfig, Config, HttpConfig, IronAgent, McpServerConfig, McpTransport, SessionId};
 use iron_providers::{Provider, ProviderEvent};
 
 // Mock provider for testing
@@ -42,7 +42,7 @@ fn new_session_uses_runtime_default_enablement_enabled() {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -79,7 +79,7 @@ fn new_session_uses_runtime_default_enablement_disabled() {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -115,7 +115,7 @@ fn session_toggle_does_not_affect_another_session() {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -175,7 +175,7 @@ fn mcp_state_not_included_in_handoff() {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -241,7 +241,7 @@ async fn imported_session_adopts_destination_runtime_mcp_policy() {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -271,7 +271,7 @@ async fn imported_session_adopts_destination_runtime_mcp_policy() {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -310,7 +310,7 @@ fn registering_new_server_materializes_runtime_default_for_existing_sessions() {
         id: "late-server".to_string(),
         label: "Late Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,

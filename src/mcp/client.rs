@@ -18,7 +18,25 @@ use crate::mcp::protocol::messages as protocol_messages;
 use crate::mcp::protocol::JsonRpcRequest as ProtocolJsonRpcRequest;
 use crate::mcp::protocol::{tool_content_to_value, tool_error_to_string};
 use crate::mcp::protocol::{JsonRpcError, JsonRpcResponse};
-use crate::mcp::server::{McpServerConfig, McpToolInfo, McpTransport};
+use crate::mcp::server::{HttpConfig, McpServerConfig, McpToolInfo, McpTransport};
+
+/// Default Accept header required by remote MCP servers.
+const MCP_ACCEPT_HEADER: &str = "application/json, text/event-stream";
+
+/// Apply the default Accept header and any custom headers to a reqwest request builder.
+/// Custom headers override the default Accept header if set.
+fn apply_headers(
+    builder: reqwest::RequestBuilder,
+    custom_headers: &Option<HashMap<String, String>>,
+) -> reqwest::RequestBuilder {
+    let mut builder = builder.header("Accept", MCP_ACCEPT_HEADER);
+    if let Some(headers) = custom_headers {
+        for (key, value) in headers {
+            builder = builder.header(key.as_str(), value.as_str());
+        }
+    }
+    builder
+}
 
 /// Type alias for the pending-response waiter map shared across stdio client tasks.
 type WaiterMap =
@@ -607,6 +625,7 @@ pub struct HttpMcpClient {
     #[allow(dead_code)]
     server_id: String,
     url: String,
+    headers: Option<HashMap<String, String>>,
     client: reqwest::Client,
     connected: AtomicBool,
     request_counter: Arc<Mutex<u64>>,
@@ -614,10 +633,11 @@ pub struct HttpMcpClient {
 
 impl HttpMcpClient {
     /// Create a new HTTP MCP client.
-    pub fn new(server_id: String, url: String) -> Self {
+    pub fn new(server_id: String, config: HttpConfig) -> Self {
         Self {
             server_id,
-            url,
+            url: config.url,
+            headers: config.headers,
             client: reqwest::Client::new(),
             connected: AtomicBool::new(false),
             request_counter: Arc::new(Mutex::new(0)),
@@ -638,10 +658,8 @@ impl HttpMcpClient {
 
         let request = ProtocolJsonRpcRequest::new(method, params, id);
 
-        let response = self
-            .client
-            .post(&self.url)
-            .json(&request)
+        let builder = self.client.post(&self.url).json(&request);
+        let response = apply_headers(builder, &self.headers)
             .send()
             .await
             .map_err(|e| format!("HTTP request failed: {}", e))?;
@@ -766,6 +784,7 @@ impl McpTransportClient for HttpMcpClient {
 pub struct HttpSseMcpClient {
     server_id: String,
     url: String,
+    headers: Option<HashMap<String, String>>,
     client: reqwest::Client,
     connected: AtomicBool,
     request_counter: Arc<Mutex<u64>>,
@@ -781,10 +800,11 @@ pub struct HttpSseMcpClient {
 
 impl HttpSseMcpClient {
     /// Create a new HTTP+SSE MCP client.
-    pub fn new(server_id: String, url: String) -> Self {
+    pub fn new(server_id: String, config: HttpConfig) -> Self {
         Self {
             server_id,
-            url,
+            url: config.url,
+            headers: config.headers,
             client: reqwest::Client::new(),
             connected: AtomicBool::new(false),
             request_counter: Arc::new(Mutex::new(0)),
@@ -803,15 +823,17 @@ impl HttpSseMcpClient {
 
         let url = self.url.clone();
         let client = self.client.clone();
+        let headers = self.headers.clone();
         let waiters: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<JsonRpcResponse>>>> =
             self.waiters.clone();
         let bootstrap_mode = self.bootstrap_mode.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
         let handle = tokio::spawn(async move {
+            let get_builder = client.get(&url);
             let response = match tokio::time::timeout(
                 tokio::time::Duration::from_secs(3),
-                client.get(&url).send(),
+                apply_headers(get_builder, &headers).send(),
             )
             .await
             {
@@ -971,10 +993,8 @@ impl HttpSseMcpClient {
         }
 
         // Send POST request
-        let post_response = self
-            .client
-            .post(&self.url)
-            .json(&request)
+        let post_builder = self.client.post(&self.url).json(&request);
+        let post_response = apply_headers(post_builder, &self.headers)
             .send()
             .await
             .map_err(|e| {
@@ -1123,13 +1143,13 @@ pub fn create_transport_client(
             let client = StdioMcpClient::new(server_id.to_string(), config.clone())?;
             Ok(Box::new(client))
         }
-        McpTransport::Http { url } => Ok(Box::new(HttpMcpClient::new(
+        McpTransport::Http { config: http_config } => Ok(Box::new(HttpMcpClient::new(
             server_id.to_string(),
-            url.clone(),
+            http_config.clone(),
         ))),
-        McpTransport::HttpSse { url } => Ok(Box::new(HttpSseMcpClient::new(
+        McpTransport::HttpSse { config: http_config } => Ok(Box::new(HttpSseMcpClient::new(
             server_id.to_string(),
-            url.clone(),
+            http_config.clone(),
         ))),
     }
 }

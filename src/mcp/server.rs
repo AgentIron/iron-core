@@ -8,6 +8,27 @@ use std::sync::{
 };
 use tracing::{info, warn};
 
+/// Configuration shared by HTTP-based MCP transports.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpConfig {
+    /// Server URL for the MCP endpoint.
+    pub url: String,
+    /// Optional custom HTTP headers to send with every request.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
+}
+
+impl HttpConfig {
+    /// Create a new `HttpConfig` with the given URL and no custom headers.
+    pub fn new(url: String) -> Self {
+        Self {
+            url,
+            headers: None,
+        }
+    }
+}
+
 /// Transport type for MCP servers
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum McpTransport {
@@ -18,9 +39,15 @@ pub enum McpTransport {
         env: HashMap<String, String>,
     },
     /// Remote HTTP transport
-    Http { url: String },
+    Http {
+        #[serde(flatten)]
+        config: HttpConfig,
+    },
     /// Remote HTTP with SSE transport
-    HttpSse { url: String },
+    HttpSse {
+        #[serde(flatten)]
+        config: HttpConfig,
+    },
 }
 
 /// Health state of an MCP server connection
@@ -221,5 +248,86 @@ impl McpServerRegistry {
             }
         }
         all_tools
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_config_serializes_without_headers_when_none() {
+        let config = HttpConfig::new("https://example.com/mcp".to_string());
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            !json.contains("headers"),
+            "serialized output should not contain 'headers' when None: {}",
+            json
+        );
+        assert!(
+            json.contains("\"url\""),
+            "serialized output should contain 'url': {}",
+            json
+        );
+    }
+
+    #[test]
+    fn http_config_round_trip_with_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer token123".to_string());
+        headers.insert("X-Custom".to_string(), "value".to_string());
+        let config = HttpConfig {
+            url: "https://example.com/mcp".to_string(),
+            headers: Some(headers),
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: HttpConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(config, deserialized);
+        assert_eq!(
+            deserialized.headers.as_ref().unwrap().get("Authorization"),
+            Some(&"Bearer token123".to_string())
+        );
+    }
+
+    #[test]
+    fn http_config_deserializes_without_headers() {
+        let json = r#"{"url":"https://example.com/mcp"}"#;
+        let config: HttpConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.url, "https://example.com/mcp");
+        assert_eq!(config.headers, None);
+    }
+
+    #[test]
+    fn mcp_transport_http_flattens_http_config() {
+        let json = r#"{"Http":{"url":"https://example.com/mcp","headers":{"X-Key":"val"}}}"#;
+        let transport: McpTransport = serde_json::from_str(json).unwrap();
+
+        match transport {
+            McpTransport::Http { config } => {
+                assert_eq!(config.url, "https://example.com/mcp");
+                assert_eq!(
+                    config.headers.as_ref().unwrap().get("X-Key"),
+                    Some(&"val".to_string())
+                );
+            }
+            other => panic!("expected Http variant, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mcp_transport_http_deserializes_without_headers() {
+        let json = r#"{"Http":{"url":"https://example.com/mcp"}}"#;
+        let transport: McpTransport = serde_json::from_str(json).unwrap();
+
+        match transport {
+            McpTransport::Http { config } => {
+                assert_eq!(config.url, "https://example.com/mcp");
+                assert_eq!(config.headers, None);
+            }
+            other => panic!("expected Http variant, got {:?}", other),
+        }
     }
 }

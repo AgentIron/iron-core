@@ -1,10 +1,10 @@
 use futures::StreamExt;
 use iron_core::{
-    config::McpConfig, Config, IronRuntime, McpServerConfig, McpServerHealth, McpToolInfo,
-    McpTransport,
+    config::McpConfig, Config, HttpConfig, IronRuntime, McpServerConfig, McpServerHealth,
+    McpToolInfo, McpTransport,
 };
 use iron_providers::{Provider, ProviderEvent};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
@@ -80,7 +80,7 @@ fn test_mcp_server_registration_stores_configuration() {
         id: "my-server".to_string(),
         label: "My Test Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -108,7 +108,7 @@ fn test_mcp_server_health_transitions() {
         id: "my-server".to_string(),
         label: "My Test Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -145,7 +145,7 @@ fn test_tool_discovery_updates_registry() {
         id: "my-server".to_string(),
         label: "My Test Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -182,7 +182,7 @@ async fn test_session_tool_catalog_includes_mcp_tools_when_enabled_and_usable() 
         id: "my-server".to_string(),
         label: "My Test Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -226,7 +226,7 @@ async fn test_session_tool_catalog_excludes_disabled_mcp_servers() {
         id: "disabled-server".to_string(),
         label: "Disabled Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: false,
         working_dir: None,
@@ -268,7 +268,7 @@ async fn test_session_tool_catalog_excludes_errored_mcp_servers() {
         id: "errored-server".to_string(),
         label: "Errored Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -308,7 +308,7 @@ async fn test_session_tool_catalog_cache_invalidates_on_mcp_registry_change() {
         id: "cached-server".to_string(),
         label: "Cached Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -359,7 +359,7 @@ async fn test_session_tool_catalog_filters_consistently() {
         id: "enabled-server".to_string(),
         label: "Enabled Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8081".to_string(),
+            config: HttpConfig::new("http://localhost:8081".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -369,7 +369,7 @@ async fn test_session_tool_catalog_filters_consistently() {
         id: "disabled-server".to_string(),
         label: "Disabled Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8082".to_string(),
+            config: HttpConfig::new("http://localhost:8082".to_string()),
         },
         enabled_by_default: false,
         working_dir: None,
@@ -503,7 +503,7 @@ async fn test_mcp_tool_execution_requires_approval() {
         id: "approval-server".to_string(),
         label: "Approval Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -643,7 +643,7 @@ async fn test_mcp_unavailable_tool_diagnostics_disabled_server() {
         id: "diagnostics-server".to_string(),
         label: "Diagnostics Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -709,7 +709,7 @@ async fn test_mcp_unavailable_tool_diagnostics_unknown_tool() {
         id: "tools-server".to_string(),
         label: "Tools Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -807,7 +807,7 @@ async fn test_mcp_runtime_default_enablement_semantics() {
         id: "override-server".to_string(),
         label: "Override Server".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: true, // Server says enabled, but runtime says disabled
         working_dir: None,
@@ -842,7 +842,7 @@ async fn test_mcp_runtime_default_enablement_semantics() {
         id: "override-server2".to_string(),
         label: "Override Server 2".to_string(),
         transport: McpTransport::Http {
-            url: "http://localhost:8080".to_string(),
+            config: HttpConfig::new("http://localhost:8080".to_string()),
         },
         enabled_by_default: false, // Server says disabled, but runtime says enabled
         working_dir: None,
@@ -862,4 +862,196 @@ async fn test_mcp_runtime_default_enablement_semantics() {
         Some(true),
         "Runtime default (enabled) should override server default (disabled)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// HTTP header integration tests
+// ---------------------------------------------------------------------------
+
+/// Read an HTTP request from a TCP stream, returning (request_line, headers, body).
+async fn read_http_request_with_body(
+    stream: &mut tokio::net::TcpStream,
+) -> (String, HashMap<String, String>, Vec<u8>) {
+    use tokio::io::AsyncReadExt;
+
+    let mut buffer = Vec::new();
+    let headers_end = loop {
+        let mut chunk = [0u8; 4096];
+        let read = stream.read(&mut chunk).await.unwrap();
+        assert!(read > 0, "unexpected EOF while reading HTTP request");
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(index) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+            break index + 4;
+        }
+    };
+
+    let header_text = String::from_utf8_lossy(&buffer[..headers_end]);
+    let mut lines = header_text.lines();
+    let request_line = lines.next().unwrap().to_string();
+    let mut headers = HashMap::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            headers.insert(
+                key.trim().to_ascii_lowercase(),
+                value.trim().to_string(),
+            );
+        }
+    }
+
+    // Read body based on Content-Length
+    let body = if let Some(content_length) = headers.get("content-length") {
+        let length: usize = content_length.parse().unwrap();
+        let mut body = buffer[headers_end..].to_vec();
+        while body.len() < length {
+            let mut chunk = [0u8; 4096];
+            let read = stream.read(&mut chunk).await.unwrap();
+            body.extend_from_slice(&chunk[..read]);
+        }
+        body
+    } else {
+        Vec::new()
+    };
+
+    (request_line, headers, body)
+}
+
+/// Start a fake HTTP server that captures request headers and responds to MCP initialize.
+async fn start_header_capture_http_server() -> (
+    u16,
+    Arc<tokio::sync::Mutex<Vec<HashMap<String, String>>>>,
+) {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let captured_headers: Arc<tokio::sync::Mutex<Vec<HashMap<String, String>>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+    let captured = Arc::clone(&captured_headers);
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let captured = Arc::clone(&captured);
+            tokio::spawn(async move {
+                let (_request_line, headers, body) = read_http_request_with_body(&mut socket).await;
+
+                // Store captured headers
+                captured.lock().await.push(headers.clone());
+
+                // Build a JSON-RPC response matching the request id
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                let id = request.get("id").and_then(|v| v.as_u64()).unwrap_or(1);
+
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "serverInfo": {"name": "test-server", "version": "1.0"}
+                    }
+                });
+
+                let response_body = serde_json::to_string(&response).unwrap();
+                let http_response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                let _ = socket.write_all(http_response.as_bytes()).await;
+            });
+        }
+    });
+
+    (port, captured_headers)
+}
+
+#[tokio::test]
+async fn test_http_mcp_client_sends_accept_header() {
+    let (port, captured_headers) = start_header_capture_http_server().await;
+
+    let config = McpServerConfig {
+        id: "test-accept".to_string(),
+        label: "Test Accept Header".to_string(),
+        transport: McpTransport::Http {
+            config: HttpConfig::new(format!("http://127.0.0.1:{}", port)),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    };
+
+    let client =
+        iron_core::mcp::create_transport_client("test-accept", &config).expect("client creation");
+    let result = client.initialize().await;
+    assert!(result.is_ok(), "initialize should succeed: {:?}", result);
+
+    // Verify the Accept header was sent
+    let headers = captured_headers.lock().await;
+    assert!(!headers.is_empty(), "should have captured at least one request");
+    let request_headers = &headers[0];
+    let accept = request_headers
+        .get("accept")
+        .expect("Accept header should be present");
+    assert_eq!(
+        accept, "application/json, text/event-stream",
+        "Accept header should match MCP requirement"
+    );
+}
+
+#[tokio::test]
+async fn test_http_mcp_client_sends_custom_headers() {
+    let (port, captured_headers) = start_header_capture_http_server().await;
+
+    let mut custom_headers = HashMap::new();
+    custom_headers.insert("Authorization".to_string(), "Bearer test-token".to_string());
+    custom_headers.insert("X-API-Key".to_string(), "key-123".to_string());
+
+    let config = McpServerConfig {
+        id: "test-custom-headers".to_string(),
+        label: "Test Custom Headers".to_string(),
+        transport: McpTransport::Http {
+            config: HttpConfig {
+                url: format!("http://127.0.0.1:{}", port),
+                headers: Some(custom_headers),
+            },
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    };
+
+    let client = iron_core::mcp::create_transport_client("test-custom-headers", &config)
+        .expect("client creation");
+    let result = client.initialize().await;
+    assert!(result.is_ok(), "initialize should succeed: {:?}", result);
+
+    // Verify both Accept and custom headers were sent
+    let headers = captured_headers.lock().await;
+    assert!(!headers.is_empty(), "should have captured at least one request");
+    let request_headers = &headers[0];
+
+    let accept = request_headers
+        .get("accept")
+        .expect("Accept header should be present");
+    assert_eq!(
+        accept, "application/json, text/event-stream",
+        "Accept header should be present alongside custom headers"
+    );
+
+    let auth = request_headers
+        .get("authorization")
+        .expect("Authorization header should be present");
+    assert_eq!(auth, "Bearer test-token");
+
+    let api_key = request_headers
+        .get("x-api-key")
+        .expect("X-API-Key header should be present");
+    assert_eq!(api_key, "key-123");
 }
