@@ -1,3 +1,4 @@
+use agent_client_protocol::schema as acp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
@@ -52,16 +53,16 @@ impl ContentBlock {
         }
     }
 
-    pub fn from_acp_content(block: &agent_client_protocol::ContentBlock) -> Self {
+    pub fn from_acp_content(block: &acp::ContentBlock) -> Self {
         match block {
-            agent_client_protocol::ContentBlock::Text(tc) => ContentBlock::Text {
+            acp::ContentBlock::Text(tc) => ContentBlock::Text {
                 text: tc.text.clone(),
             },
-            agent_client_protocol::ContentBlock::Image(ic) => ContentBlock::Image {
+            acp::ContentBlock::Image(ic) => ContentBlock::Image {
                 data: ic.data.clone(),
                 mime_type: ic.mime_type.clone(),
             },
-            agent_client_protocol::ContentBlock::ResourceLink(rl) => ContentBlock::Resource {
+            acp::ContentBlock::ResourceLink(rl) => ContentBlock::Resource {
                 uri: rl.uri.clone(),
                 name: Some(rl.name.clone()),
             },

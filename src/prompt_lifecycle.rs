@@ -1,4 +1,5 @@
 use crate::connection::{notification, SharedClientChannel};
+use agent_client_protocol::schema as acp;
 use std::pin::Pin;
 
 pub enum PromptLifecycleEvent {
@@ -55,15 +56,12 @@ pub trait PromptSink {
 }
 
 pub(crate) struct AcpPromptSink {
-    session_id: agent_client_protocol::SessionId,
+    session_id: acp::SessionId,
     client: SharedClientChannel,
 }
 
 impl AcpPromptSink {
-    pub(crate) fn new(
-        session_id: agent_client_protocol::SessionId,
-        client: SharedClientChannel,
-    ) -> Self {
+    pub(crate) fn new(session_id: acp::SessionId, client: SharedClientChannel) -> Self {
         Self { session_id, client }
     }
 }
@@ -74,13 +72,9 @@ impl PromptSink for AcpPromptSink {
             PromptLifecycleEvent::Output { text } => {
                 let notif = notification(
                     &self.session_id,
-                    agent_client_protocol::SessionUpdate::AgentMessageChunk(
-                        agent_client_protocol::ContentChunk::new(
-                            agent_client_protocol::ContentBlock::Text(
-                                agent_client_protocol::TextContent::new(&text),
-                            ),
-                        ),
-                    ),
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new(&text)),
+                    )),
                 );
                 let client = self.client.clone();
                 Box::pin(async move {
@@ -94,13 +88,10 @@ impl PromptSink for AcpPromptSink {
             } => {
                 let notif = notification(
                     &self.session_id,
-                    agent_client_protocol::SessionUpdate::ToolCall(
-                        agent_client_protocol::ToolCall::new(
-                            agent_client_protocol::ToolCallId::new(call_id),
-                            &tool_name,
-                        )
-                        .raw_input(arguments)
-                        .status(agent_client_protocol::ToolCallStatus::Pending),
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(acp::ToolCallId::new(call_id), &tool_name)
+                            .raw_input(arguments)
+                            .status(acp::ToolCallStatus::Pending),
                     ),
                 );
                 let client = self.client.clone();
@@ -115,14 +106,11 @@ impl PromptSink for AcpPromptSink {
                 output,
             } => {
                 let acp_status = match status {
-                    ToolUpdateStatus::InProgress => {
-                        agent_client_protocol::ToolCallStatus::InProgress
-                    }
-                    ToolUpdateStatus::Completed => agent_client_protocol::ToolCallStatus::Completed,
-                    ToolUpdateStatus::Failed => agent_client_protocol::ToolCallStatus::Failed,
+                    ToolUpdateStatus::InProgress => acp::ToolCallStatus::InProgress,
+                    ToolUpdateStatus::Completed => acp::ToolCallStatus::Completed,
+                    ToolUpdateStatus::Failed => acp::ToolCallStatus::Failed,
                 };
-                let mut fields =
-                    agent_client_protocol::ToolCallUpdateFields::new().status(acp_status);
+                let mut fields = acp::ToolCallUpdateFields::new().status(acp_status);
                 if !tool_name.is_empty() {
                     fields = fields.title(&tool_name);
                 }
@@ -131,12 +119,10 @@ impl PromptSink for AcpPromptSink {
                 }
                 let notif = notification(
                     &self.session_id,
-                    agent_client_protocol::SessionUpdate::ToolCallUpdate(
-                        agent_client_protocol::ToolCallUpdate::new(
-                            agent_client_protocol::ToolCallId::new(call_id),
-                            fields,
-                        ),
-                    ),
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        acp::ToolCallId::new(call_id),
+                        fields,
+                    )),
                 );
                 let client = self.client.clone();
                 Box::pin(async move {
@@ -170,27 +156,27 @@ impl PromptSink for AcpPromptSink {
         &self,
         request: ApprovalRequest,
     ) -> Pin<Box<dyn std::future::Future<Output = ApprovalVerdict>>> {
-        let tool_call_update = agent_client_protocol::ToolCallUpdate::new(
-            agent_client_protocol::ToolCallId::new(request.call_id.clone()),
-            agent_client_protocol::ToolCallUpdateFields::new()
+        let tool_call_update = acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(request.call_id.clone()),
+            acp::ToolCallUpdateFields::new()
                 .title(&request.tool_name)
                 .raw_input(request.arguments)
-                .status(agent_client_protocol::ToolCallStatus::InProgress),
+                .status(acp::ToolCallStatus::InProgress),
         );
 
-        let perm_request = agent_client_protocol::RequestPermissionRequest::new(
+        let perm_request = acp::RequestPermissionRequest::new(
             self.session_id.clone(),
             tool_call_update,
             vec![
-                agent_client_protocol::PermissionOption::new(
-                    agent_client_protocol::PermissionOptionId::new("allow_once"),
+                acp::PermissionOption::new(
+                    acp::PermissionOptionId::new("allow_once"),
                     "Allow once",
-                    agent_client_protocol::PermissionOptionKind::AllowOnce,
+                    acp::PermissionOptionKind::AllowOnce,
                 ),
-                agent_client_protocol::PermissionOption::new(
-                    agent_client_protocol::PermissionOptionId::new("reject_once"),
+                acp::PermissionOption::new(
+                    acp::PermissionOptionId::new("reject_once"),
                     "Deny",
-                    agent_client_protocol::PermissionOptionKind::RejectOnce,
+                    acp::PermissionOptionKind::RejectOnce,
                 ),
             ],
         );
@@ -199,10 +185,8 @@ impl PromptSink for AcpPromptSink {
         Box::pin(async move {
             match client.request_permission(perm_request).await {
                 Ok(response) => match response.outcome {
-                    agent_client_protocol::RequestPermissionOutcome::Cancelled => {
-                        ApprovalVerdict::Cancelled
-                    }
-                    agent_client_protocol::RequestPermissionOutcome::Selected(sel) => {
+                    acp::RequestPermissionOutcome::Cancelled => ApprovalVerdict::Cancelled,
+                    acp::RequestPermissionOutcome::Selected(sel) => {
                         let option_id = sel.option_id.to_string();
                         if option_id.contains("allow") {
                             ApprovalVerdict::AllowOnce

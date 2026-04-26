@@ -8,6 +8,7 @@ use crate::prompt_lifecycle::{
     ApprovalRequest, ApprovalVerdict, PromptLifecycleEvent, PromptSink, ToolUpdateStatus,
 };
 use crate::runtime::IronRuntime;
+use agent_client_protocol::schema as acp;
 use futures::StreamExt;
 use iron_providers::ProviderEvent;
 use parking_lot::Mutex;
@@ -62,7 +63,7 @@ impl PromptRunner {
         sink: &dyn PromptSink,
         config: &Config,
         max_iterations: u32,
-    ) -> agent_client_protocol::StopReason {
+    ) -> acp::StopReason {
         let mut iteration: u32 = 0;
 
         loop {
@@ -70,13 +71,13 @@ impl PromptRunner {
                 let turn = ephemeral.lock();
                 if turn.is_cancel_requested() {
                     tie_off_cancelled(durable);
-                    return agent_client_protocol::StopReason::Cancelled;
+                    return acp::StopReason::Cancelled;
                 }
             }
 
             iteration += 1;
             if iteration > max_iterations {
-                return agent_client_protocol::StopReason::MaxTurnRequests;
+                return acp::StopReason::MaxTurnRequests;
             }
 
             trace!(iteration, "Starting inference iteration");
@@ -138,7 +139,7 @@ impl PromptRunner {
                         let mut session = durable.lock();
                         session.add_agent_text(format!("[Request error: {}]", e));
                     }
-                    return agent_client_protocol::StopReason::EndTurn;
+                    return acp::StopReason::EndTurn;
                 }
             };
 
@@ -150,7 +151,7 @@ impl PromptRunner {
                         let mut session = durable.lock();
                         session.add_agent_text(format!("[Provider error: {}]", e));
                     }
-                    return agent_client_protocol::StopReason::EndTurn;
+                    return acp::StopReason::EndTurn;
                 }
             };
 
@@ -160,7 +161,7 @@ impl PromptRunner {
             };
 
             if step.tool_calls.is_empty() {
-                return agent_client_protocol::StopReason::EndTurn;
+                return acp::StopReason::EndTurn;
             }
 
             let cancel_check = || {
@@ -170,7 +171,7 @@ impl PromptRunner {
 
             if cancel_check() {
                 tie_off_cancelled(durable);
-                return agent_client_protocol::StopReason::Cancelled;
+                return acp::StopReason::Cancelled;
             }
 
             let needs_permission = {
@@ -206,7 +207,7 @@ impl PromptRunner {
                 {
                     Ok(calls) => calls,
                     Err(reason) => {
-                        if matches!(reason, agent_client_protocol::StopReason::Cancelled) {
+                        if matches!(reason, acp::StopReason::Cancelled) {
                             tie_off_cancelled(durable);
                         }
                         return reason;
@@ -244,7 +245,7 @@ impl PromptRunner {
             'static,
             iron_providers::ProviderResult<ProviderEvent>,
         >,
-    ) -> Result<ProviderStep, agent_client_protocol::StopReason> {
+    ) -> Result<ProviderStep, acp::StopReason> {
         let mut tool_calls = Vec::new();
         let mut assistant_output = String::new();
 
@@ -256,7 +257,7 @@ impl PromptRunner {
                         let mut session = durable.lock();
                         session.add_agent_text(&assistant_output);
                     }
-                    return Err(agent_client_protocol::StopReason::EndTurn);
+                    return Err(acp::StopReason::EndTurn);
                 }
             };
 
@@ -292,7 +293,7 @@ impl PromptRunner {
                         let mut session = durable.lock();
                         session.add_agent_text(&assistant_output);
                     }
-                    return Err(agent_client_protocol::StopReason::EndTurn);
+                    return Err(acp::StopReason::EndTurn);
                 }
                 ProviderEvent::Complete => {}
                 ProviderEvent::Error { source: _ } => {
@@ -300,7 +301,7 @@ impl PromptRunner {
                         let mut session = durable.lock();
                         session.add_agent_text(&assistant_output);
                     }
-                    return Err(agent_client_protocol::StopReason::EndTurn);
+                    return Err(acp::StopReason::EndTurn);
                 }
             }
         }
@@ -321,7 +322,7 @@ impl PromptRunner {
         tool_calls: &[iron_providers::ToolCall],
         _config: &Config,
         tool_catalog: Option<Arc<SessionToolCatalog>>,
-    ) -> Result<Vec<iron_providers::ToolCall>, agent_client_protocol::StopReason> {
+    ) -> Result<Vec<iron_providers::ToolCall>, acp::StopReason> {
         let tool_catalog = match tool_catalog {
             Some(catalog) => catalog,
             None => {
@@ -398,7 +399,7 @@ impl PromptRunner {
                         })
                         .await;
                     }
-                    return Err(agent_client_protocol::StopReason::Cancelled);
+                    return Err(acp::StopReason::Cancelled);
                 }
                 ApprovalVerdict::AllowOnce => {
                     approved.push(call.clone());

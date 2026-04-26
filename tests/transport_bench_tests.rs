@@ -1,34 +1,37 @@
-use agent_client_protocol::{Agent as _, Client};
 use iron_core::{
     runtime::IronRuntime,
-    transport::{create_in_process_transport, InProcessTransport},
+    transport::{create_in_process_transport, InProcessClientHandler, InProcessTransport},
     Config,
 };
 use iron_providers::{OpenAiConfig, OpenAiProvider};
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Instant;
+
+use agent_client_protocol::schema as acp;
 
 struct NopClient;
 
-#[async_trait::async_trait(?Send)]
-impl Client for NopClient {
-    async fn request_permission(
+impl InProcessClientHandler for NopClient {
+    fn request_permission(
         &self,
-        _args: agent_client_protocol::RequestPermissionRequest,
-    ) -> agent_client_protocol::Result<agent_client_protocol::RequestPermissionResponse> {
-        Ok(agent_client_protocol::RequestPermissionResponse::new(
-            agent_client_protocol::RequestPermissionOutcome::Selected(
-                agent_client_protocol::SelectedPermissionOutcome::new(
-                    agent_client_protocol::PermissionOptionId::new("allow"),
-                ),
-            ),
-        ))
+        _args: acp::RequestPermissionRequest,
+    ) -> Pin<Box<dyn Future<Output = agent_client_protocol::Result<acp::RequestPermissionResponse>>>>
+    {
+        Box::pin(async move {
+            Ok(acp::RequestPermissionResponse::new(
+                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                    acp::PermissionOptionId::new("allow"),
+                )),
+            ))
+        })
     }
 
-    async fn session_notification(
+    fn session_notification(
         &self,
-        _args: agent_client_protocol::SessionNotification,
-    ) -> agent_client_protocol::Result<()> {
-        Ok(())
+        _args: acp::SessionNotification,
+    ) -> Pin<Box<dyn Future<Output = agent_client_protocol::Result<()>>>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -45,9 +48,7 @@ async fn setup() -> InProcessTransport {
     tokio::task::spawn_local(agent_fut);
     let _ = transport
         .client()
-        .initialize(agent_client_protocol::InitializeRequest::new(
-            agent_client_protocol::ProtocolVersion::LATEST,
-        ))
+        .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
         .await
         .unwrap();
     transport
@@ -70,9 +71,7 @@ fn bench_initialize_round_trip() {
             let start = Instant::now();
             let _ = transport
                 .client()
-                .initialize(agent_client_protocol::InitializeRequest::new(
-                    agent_client_protocol::ProtocolVersion::LATEST,
-                ))
+                .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
                 .await
                 .unwrap();
             durations.push(start.elapsed());
@@ -105,7 +104,7 @@ fn bench_new_session_round_trip() {
         let start = Instant::now();
         for _ in 0..100 {
             let _ = client
-                .new_session(agent_client_protocol::NewSessionRequest::new("."))
+                .new_session(acp::NewSessionRequest::new("."))
                 .await
                 .unwrap();
         }
@@ -135,7 +134,7 @@ fn bench_prompt_round_trip_with_fake_provider() {
         let transport = setup().await;
         let client = transport.client();
         let session = client
-            .new_session(agent_client_protocol::NewSessionRequest::new("."))
+            .new_session(acp::NewSessionRequest::new("."))
             .await
             .unwrap()
             .session_id;
@@ -143,11 +142,9 @@ fn bench_prompt_round_trip_with_fake_provider() {
         let start = Instant::now();
         for _ in 0..50 {
             let _ = client
-                .prompt(agent_client_protocol::PromptRequest::new(
+                .prompt(acp::PromptRequest::new(
                     session.clone(),
-                    vec![agent_client_protocol::ContentBlock::Text(
-                        agent_client_protocol::TextContent::new("hi"),
-                    )],
+                    vec![acp::ContentBlock::Text(acp::TextContent::new("hi"))],
                 ))
                 .await
                 .unwrap();
