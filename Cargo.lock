@@ -2042,7 +2042,7 @@ dependencies = [
 
 [[package]]
 name = "iron-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
