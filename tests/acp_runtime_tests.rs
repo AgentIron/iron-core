@@ -254,7 +254,9 @@ fn activate_skill_rejects_names_outside_session_catalog() {
             ProviderEvent::Complete,
         ]]);
         let agent = IronAgent::new(Config::default(), provider);
-        agent.runtime().register_skill(make_skill("review", "Review code changes"));
+        agent
+            .runtime()
+            .register_skill(make_skill("review", "Review code changes"));
         let conn = agent.connect();
         let session = conn.create_session().unwrap();
 
@@ -305,7 +307,9 @@ fn activate_skill_duplicate_activation_returns_lightweight_confirmation() {
             vec![ProviderEvent::Complete],
         ]);
         let agent = IronAgent::new(Config::default(), provider);
-        agent.runtime().register_skill(make_skill("review", "Review code changes"));
+        agent
+            .runtime()
+            .register_skill(make_skill("review", "Review code changes"));
         let conn = agent.connect();
         let session = conn.create_session().unwrap();
 
@@ -337,7 +341,8 @@ fn activate_skill_duplicate_activation_returns_lightweight_confirmation() {
         assert_eq!(first_status, ToolResultStatus::Completed);
         assert_eq!(first_payload.unwrap()["status"], "activated");
 
-        let (second_status, second_payload) = second_result.expect("expected second activation result");
+        let (second_status, second_payload) =
+            second_result.expect("expected second activation result");
         assert_eq!(second_status, ToolResultStatus::Completed);
         let second_payload = second_payload.unwrap();
         assert_eq!(second_payload["status"], "already_active");
@@ -372,7 +377,10 @@ fn facade_activation_allows_trust_required_skills() {
         .activate_skill("trusted-review")
         .expect("direct facade activation should remain user-controlled");
 
-    assert_eq!(session.list_active_skills(), vec!["trusted-review".to_string()]);
+    assert_eq!(
+        session.list_active_skills(),
+        vec!["trusted-review".to_string()]
+    );
 }
 
 #[test]

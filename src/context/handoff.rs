@@ -67,8 +67,12 @@ impl HandoffExporter {
         let compacted_context = compacted.cloned().unwrap_or_default();
 
         let target_tokens = config.handoff_export.default_target_tokens;
-        let size_estimate =
-            estimate_bundle_size(&compacted_context, &tail, session.instructions.as_deref(), &session.skill_state);
+        let size_estimate = estimate_bundle_size(
+            &compacted_context,
+            &tail,
+            session.instructions.as_deref(),
+            &session.skill_state,
+        );
 
         let mut handoff_note = format!(
             "Context transferred from session {} on model {}.",
@@ -309,11 +313,7 @@ mod tests {
     #[test]
     fn handoff_preserves_activated_skills() {
         let mut source = DurableSession::new(SessionId::new());
-        source.activate_skill(
-            "test-skill",
-            "# Test Skill\nDo something useful.",
-            vec![],
-        );
+        source.activate_skill("test-skill", "# Test Skill\nDo something useful.", vec![]);
         source.add_agent_text("hello");
 
         assert!(source.skill_state.is_active("test-skill"));
@@ -326,7 +326,10 @@ mod tests {
         assert!(bundle.skill_state.is_active("test-skill"));
         assert_eq!(bundle.skill_state.active.len(), 1);
         assert_eq!(bundle.skill_state.active[0].name, "test-skill");
-        assert_eq!(bundle.skill_state.active[0].body, "# Test Skill\nDo something useful.");
+        assert_eq!(
+            bundle.skill_state.active[0].body,
+            "# Test Skill\nDo something useful."
+        );
 
         // Hydrate into a new session
         let hydrated = HandoffImporter::hydrate_into_new(bundle);
@@ -343,14 +346,17 @@ mod tests {
     #[test]
     fn handoff_includes_skill_state_in_size_estimate() {
         let mut source = DurableSession::new(SessionId::new());
-        source.activate_skill("big-skill", &"x".repeat(1000), vec![]);
+        source.activate_skill("big-skill", "x".repeat(1000), vec![]);
 
         let config = ContextManagementConfig::default();
         let bundle = HandoffExporter::export(&source, "test-model", None, vec![], &config, None)
             .expect("export should succeed");
 
         // Size estimate should include skill instructions (~250 tokens for 1000 chars)
-        assert!(bundle.metadata.size_estimate_tokens >= 250,
-            "Size estimate should include skill instructions, got {} tokens", bundle.metadata.size_estimate_tokens);
+        assert!(
+            bundle.metadata.size_estimate_tokens >= 250,
+            "Size estimate should include skill instructions, got {} tokens",
+            bundle.metadata.size_estimate_tokens
+        );
     }
 }

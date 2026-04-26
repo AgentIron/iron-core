@@ -14,9 +14,9 @@ use crate::{
     plugin::registry::{PluginAvailabilitySummary, PluginRegistry},
     plugin::status::{PluginInfo, PluginStatus},
     plugin::wasm_host::WasmHost,
-    skill::{LoadedSkill, SkillCatalog, SkillDiagnostic},
     skill::source::FilesystemSkillSource,
     skill::SkillOrigin,
+    skill::{LoadedSkill, SkillCatalog, SkillDiagnostic},
     tool::ToolRegistry,
 };
 use iron_providers::Provider;
@@ -303,7 +303,7 @@ impl IronRuntime {
 
     /// Register the `activate_skill` model-facing tool.
     pub fn register_activate_skill_tool(&self) {
-        use crate::tool::{ToolDefinition, FunctionTool};
+        use crate::tool::{FunctionTool, ToolDefinition};
         let definition = ToolDefinition::new(
             "activate_skill",
             "Activate a skill by name to receive its instructions. The skill will be loaded into the session context.",
@@ -476,7 +476,11 @@ impl IronRuntime {
     }
 
     pub(crate) fn available_skill_snapshot(&self) -> Vec<LoadedSkill> {
-        self.skill_catalog().list_all().into_iter().cloned().collect()
+        self.skill_catalog()
+            .list_all()
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     /// Borrow the Tokio runtime handle used for orchestration.
@@ -1038,10 +1042,10 @@ impl std::fmt::Debug for IronRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream::{self, BoxStream};
-    use futures::StreamExt;
     use crate::skill::source::StaticSkillSource;
     use crate::skill::{LoadedSkill, SkillMetadata};
+    use futures::stream::{self, BoxStream};
+    use futures::StreamExt;
 
     #[derive(Clone, Default)]
     struct MockProvider;
@@ -1111,7 +1115,8 @@ mod tests {
 
         let diagnostics = runtime.refresh_skill_catalog();
         assert!(diagnostics.iter().any(|diag| {
-            diag.message.contains("hidden because trust_project_skills is disabled")
+            diag.message
+                .contains("hidden because trust_project_skills is disabled")
         }));
         assert!(runtime.skill_catalog().get("review").is_none());
 

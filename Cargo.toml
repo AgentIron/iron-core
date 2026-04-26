@@ -8,6 +8,12 @@ rust-version = "1.91"
 description = "Core AgentIron loop, session state, and tool registry"
 readme = "README.md"
 repository = "https://github.com/AgentIron/iron-core"
+exclude = [
+    ".opencode/**",
+    "openspec/**",
+    "tasks.py",
+    "Cargo.lock",
+]
 
 [dependencies]
 iron-providers = "0.1.3"

@@ -6,23 +6,27 @@ use crate::{
 };
 use iron_providers::{InferenceRequest, Message, ToolPolicy};
 
+pub struct EffectiveToolRequestContext<'a> {
+    pub compacted_context: Option<&'a CompactedContext>,
+    pub instructions: Option<&'a str>,
+    pub repo_instruction_payload: Option<&'a crate::prompt::config::RepoInstructionPayload>,
+    pub python_exec_available: bool,
+    pub skill_instructions: Option<&'a str>,
+}
+
 /// Build an inference request using an effective tool view.
 /// This allows MCP tools to be included based on session state.
 pub fn build_inference_request_with_effective_tools(
     config: &Config,
     messages: &[Message],
-    compacted_context: Option<&CompactedContext>,
-    instructions: Option<&str>,
-    repo_instruction_payload: Option<&crate::prompt::config::RepoInstructionPayload>,
+    context: EffectiveToolRequestContext<'_>,
     effective_tools: &[crate::tool::ToolDefinition],
-    python_exec_available: bool,
-    skill_instructions: Option<&str>,
 ) -> Result<InferenceRequest, RuntimeError> {
     let mut pruned = messages.to_vec();
     apply_context_window_policy(config, &mut pruned)?;
 
     let mut provider_messages = Vec::new();
-    if let Some(summary) = compacted_context_message(compacted_context) {
+    if let Some(summary) = compacted_context_message(context.compacted_context) {
         provider_messages.push(summary);
     }
     provider_messages.extend(pruned);
@@ -48,10 +52,10 @@ pub fn build_inference_request_with_effective_tools(
 
     let composed = build_composed_instructions(
         config,
-        instructions,
-        repo_instruction_payload,
-        python_exec_available,
-        skill_instructions,
+        context.instructions,
+        context.repo_instruction_payload,
+        context.python_exec_available,
+        context.skill_instructions,
     );
     if !composed.is_empty() {
         request = request.with_instructions(composed);

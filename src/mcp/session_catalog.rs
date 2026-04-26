@@ -66,7 +66,12 @@ impl SessionToolCatalog {
         let mut skills: Vec<_> = session
             .list_available_skills()
             .iter()
-            .map(|skill| (skill.metadata.id.clone(), skill.metadata.description.clone()))
+            .map(|skill| {
+                (
+                    skill.metadata.id.clone(),
+                    skill.metadata.description.clone(),
+                )
+            })
             .collect();
         if skills.is_empty() {
             return None;
@@ -1043,8 +1048,12 @@ mod tests {
         let definition = catalog
             .get_definition("activate_skill")
             .expect("activate_skill should be present");
-        assert!(definition.description.contains("review: Review code changes"));
-        assert!(definition.description.contains("docs: Write technical docs"));
+        assert!(definition
+            .description
+            .contains("review: Review code changes"));
+        assert!(definition
+            .description
+            .contains("docs: Write technical docs"));
         let enum_values = definition.input_schema["properties"]["skill_name"]["enum"]
             .as_array()
             .expect("enum values");
@@ -1077,10 +1086,18 @@ mod tests {
 
         let definition_a = catalog_a.get_definition("activate_skill").unwrap();
         let definition_b = catalog_b.get_definition("activate_skill").unwrap();
-        assert!(definition_a.description.contains("review: Review code changes"));
-        assert!(!definition_a.description.contains("docs: Write technical docs"));
-        assert!(definition_b.description.contains("docs: Write technical docs"));
-        assert!(!definition_b.description.contains("review: Review code changes"));
+        assert!(definition_a
+            .description
+            .contains("review: Review code changes"));
+        assert!(!definition_a
+            .description
+            .contains("docs: Write technical docs"));
+        assert!(definition_b
+            .description
+            .contains("docs: Write technical docs"));
+        assert!(!definition_b
+            .description
+            .contains("review: Review code changes"));
     }
 
     #[test]

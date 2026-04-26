@@ -1,0 +1,99 @@
+name: Release Patch
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-master
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Patch Release
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          token: ${{ secrets.RELEASE_GITHUB_TOKEN || github.token }}
+
+      - name: Fetch tags
+        run: git fetch --force --tags origin
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Detect unreleased changes
+        id: release_gate
+        shell: bash
+        run: |
+          latest_tag="$(git tag --list 'v*' --sort=-version:refname | head -n 1)"
+          if [ -n "$latest_tag" ]; then
+            commit_subjects="$(git log --format=%s "${latest_tag}..HEAD")"
+          else
+            commit_subjects="$(git log --format=%s)"
+          fi
+
+          release_subjects="$(printf '%s\n' "$commit_subjects" | grep -Ev '^chore: release v[0-9]+\.[0-9]+\.[0-9]+' || true)"
+
+          if [ -z "$release_subjects" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify build, lint, and tests
+        if: steps.release_gate.outputs.should_release == 'true'
+        run: |
+          cargo build --locked --all-targets
+          cargo fmt --manifest-path Cargo.toml -- --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked
+
+      - name: Bump patch version
+        if: steps.release_gate.outputs.should_release == 'true'
+        id: version
+        shell: bash
+        run: |
+          next_version="$(python3 .github/scripts/bump_cargo_version.py patch)"
+          cargo check --quiet
+          echo "version=$next_version" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and tag release
+        if: steps.release_gate.outputs.should_release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: release v${VERSION} [skip release]"
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+          git push origin main "v${VERSION}"
+
+      - name: Skip crates.io publish
+        if: steps.release_gate.outputs.should_release == 'true'
+        run: |
+          printf '%s\n' 'Skipping crates.io publish because Cargo.toml still contains the git-only monty dependency.'
+
+      - name: Create GitHub release
+        if: steps.release_gate.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN || github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: gh release create "v${VERSION}" --generate-notes --title "v${VERSION}"
