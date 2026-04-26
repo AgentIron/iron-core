@@ -2,6 +2,7 @@ use crate::durable::{DurableSession, SessionId};
 use crate::prompt_lifecycle::AcpPromptSink;
 use crate::prompt_runner::PromptRunner;
 use crate::runtime::{ConnectionId, IronRuntime};
+use agent_client_protocol::schema as acp;
 use std::cell::RefCell;
 use std::rc::Rc;
 use tracing::{debug, info};
@@ -9,18 +10,16 @@ use tracing::{debug, info};
 pub trait ClientChannel {
     fn send_notification(
         &self,
-        notification: agent_client_protocol::SessionNotification,
+        notification: acp::SessionNotification,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = agent_client_protocol::Result<()>>>>;
 
     fn request_permission(
         &self,
-        request: agent_client_protocol::RequestPermissionRequest,
+        request: acp::RequestPermissionRequest,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
-                Output = agent_client_protocol::Result<
-                    agent_client_protocol::RequestPermissionResponse,
-                >,
+                Output = agent_client_protocol::Result<acp::RequestPermissionResponse>,
             >,
         >,
     >;
@@ -42,7 +41,7 @@ struct NopClientChannel;
 impl ClientChannel for NopClientChannel {
     fn send_notification(
         &self,
-        _notification: agent_client_protocol::SessionNotification,
+        _notification: acp::SessionNotification,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = agent_client_protocol::Result<()>>>>
     {
         Box::pin(async { Ok(()) })
@@ -50,24 +49,20 @@ impl ClientChannel for NopClientChannel {
 
     fn request_permission(
         &self,
-        request: agent_client_protocol::RequestPermissionRequest,
+        request: acp::RequestPermissionRequest,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
-                Output = agent_client_protocol::Result<
-                    agent_client_protocol::RequestPermissionResponse,
-                >,
+                Output = agent_client_protocol::Result<acp::RequestPermissionResponse>,
             >,
         >,
     > {
         let _tool_call_id = request.tool_call.tool_call_id.to_string();
         Box::pin(async move {
-            Ok(agent_client_protocol::RequestPermissionResponse::new(
-                agent_client_protocol::RequestPermissionOutcome::Selected(
-                    agent_client_protocol::SelectedPermissionOutcome::new(
-                        agent_client_protocol::PermissionOptionId::new("allow_once"),
-                    ),
-                ),
+            Ok(acp::RequestPermissionResponse::new(
+                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                    acp::PermissionOptionId::new("allow_once"),
+                )),
             ))
         })
     }
@@ -113,7 +108,7 @@ impl IronConnection {
             .unwrap_or_else(|| Rc::new(NopClientChannel))
     }
 
-    fn parse_session_id(&self, id: &agent_client_protocol::SessionId) -> Option<SessionId> {
+    fn parse_session_id(&self, id: &acp::SessionId) -> Option<SessionId> {
         let s = id.to_string();
         s.strip_prefix("session-")
             .and_then(|n| n.parse::<u64>().ok())
@@ -122,7 +117,7 @@ impl IronConnection {
 
     fn resolve_owned_session(
         &self,
-        acp_session_id: &agent_client_protocol::SessionId,
+        acp_session_id: &acp::SessionId,
     ) -> Result<
         (
             SessionId,
@@ -157,32 +152,28 @@ impl IronConnection {
     }
 }
 
-#[async_trait::async_trait(?Send)]
-impl agent_client_protocol::Agent for IronConnection {
-    async fn initialize(
+impl IronConnection {
+    pub async fn handle_initialize(
         &self,
-        _args: agent_client_protocol::InitializeRequest,
-    ) -> agent_client_protocol::Result<agent_client_protocol::InitializeResponse> {
+        _args: acp::InitializeRequest,
+    ) -> agent_client_protocol::Result<acp::InitializeResponse> {
         info!("ACP initialize from client");
 
-        let caps = agent_client_protocol::AgentCapabilities::default();
-        Ok(agent_client_protocol::InitializeResponse::new(
-            agent_client_protocol::ProtocolVersion::V1,
-        )
-        .agent_capabilities(caps))
+        let caps = acp::AgentCapabilities::default();
+        Ok(acp::InitializeResponse::new(acp::ProtocolVersion::V1).agent_capabilities(caps))
     }
 
-    async fn authenticate(
+    pub async fn handle_authenticate(
         &self,
-        _args: agent_client_protocol::AuthenticateRequest,
-    ) -> agent_client_protocol::Result<agent_client_protocol::AuthenticateResponse> {
-        Ok(agent_client_protocol::AuthenticateResponse::new())
+        _args: acp::AuthenticateRequest,
+    ) -> agent_client_protocol::Result<acp::AuthenticateResponse> {
+        Ok(acp::AuthenticateResponse::new())
     }
 
-    async fn new_session(
+    pub async fn handle_new_session(
         &self,
-        _args: agent_client_protocol::NewSessionRequest,
-    ) -> agent_client_protocol::Result<agent_client_protocol::NewSessionResponse> {
+        _args: acp::NewSessionRequest,
+    ) -> agent_client_protocol::Result<acp::NewSessionResponse> {
         info!(connection_id = self.id.0, "ACP new_session");
 
         let (session_id, _session) = self
@@ -190,15 +181,15 @@ impl agent_client_protocol::Agent for IronConnection {
             .create_session(self.id)
             .map_err(|e| agent_client_protocol::Error::into_internal_error(&e))?;
 
-        Ok(agent_client_protocol::NewSessionResponse::new(
-            agent_client_protocol::SessionId::new(session_id.to_string()),
-        ))
+        Ok(acp::NewSessionResponse::new(acp::SessionId::new(
+            session_id.to_string(),
+        )))
     }
 
-    async fn prompt(
+    pub async fn handle_prompt(
         &self,
-        args: agent_client_protocol::PromptRequest,
-    ) -> agent_client_protocol::Result<agent_client_protocol::PromptResponse> {
+        args: acp::PromptRequest,
+    ) -> agent_client_protocol::Result<acp::PromptResponse> {
         debug!(session_id = %args.session_id, "ACP prompt received");
 
         let (iron_session_id, durable) = self.resolve_owned_session(&args.session_id)?;
@@ -241,12 +232,12 @@ impl agent_client_protocol::Agent for IronConnection {
             runner.maybe_compact_post_turn(&durable, &config).await;
         }
 
-        Ok(agent_client_protocol::PromptResponse::new(stop_reason))
+        Ok(acp::PromptResponse::new(stop_reason))
     }
 
-    async fn cancel(
+    pub async fn handle_cancel(
         &self,
-        args: agent_client_protocol::CancelNotification,
+        args: acp::CancelNotification,
     ) -> agent_client_protocol::Result<()> {
         info!(session_id = %args.session_id, "ACP cancel received");
 
@@ -258,25 +249,25 @@ impl agent_client_protocol::Agent for IronConnection {
         Ok(())
     }
 
-    async fn close_session(
+    pub async fn handle_close_session(
         &self,
-        args: agent_client_protocol::CloseSessionRequest,
-    ) -> agent_client_protocol::Result<agent_client_protocol::CloseSessionResponse> {
+        args: acp::CloseSessionRequest,
+    ) -> agent_client_protocol::Result<acp::CloseSessionResponse> {
         info!(session_id = %args.session_id, "ACP close_session");
 
         let (iron_session_id, _) = self.resolve_owned_session(&args.session_id)?;
         self.runtime.finish_prompt(iron_session_id);
         self.runtime.close_session(iron_session_id);
 
-        Ok(agent_client_protocol::CloseSessionResponse::new())
+        Ok(acp::CloseSessionResponse::new())
     }
 }
 
 pub(crate) fn notification(
-    session_id: &agent_client_protocol::SessionId,
-    update: agent_client_protocol::SessionUpdate,
-) -> agent_client_protocol::SessionNotification {
-    agent_client_protocol::SessionNotification::new(session_id.clone(), update)
+    session_id: &acp::SessionId,
+    update: acp::SessionUpdate,
+) -> acp::SessionNotification {
+    acp::SessionNotification::new(session_id.clone(), update)
 }
 
 impl Drop for IronConnection {

@@ -2,17 +2,10 @@
 
 use crate::connection::{ClientChannel, IronConnection};
 use agent_client_protocol as acp;
-use agent_client_protocol::Client;
-use futures::{
-    channel::mpsc::{self, UnboundedReceiver, UnboundedSender},
-    future::LocalBoxFuture,
-    join, AsyncRead, AsyncWrite, StreamExt,
-};
-use std::io::{self, Error, ErrorKind};
+use agent_client_protocol::schema as acp_schema;
+use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::task::{Context, Poll};
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 /// Transport families supported by `iron-core`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,125 +80,124 @@ impl TransportMetadata {
 
 #[allow(dead_code)]
 const TRANSPORT_CONSISTENCY_NOTE: &str = "\
-All transports route through the same ACP RPC layer (AgentSideConnection / \
-ClientSideConnection), which enforces identical session ownership, durable \
-timeline, permission flow, and cancellation semantics. The transport only \
-affects how bytes move between the agent and client sides — it does not \
-change runtime/session ownership, durable history behavior, permission \
-mediation, or cancellation outcomes.";
+All transports route through the same ACP RPC layer, which enforces identical \
+session ownership, durable timeline, permission flow, and cancellation \
+semantics. The transport only affects how bytes move between the agent and \
+client sides - it does not change runtime/session ownership, durable history \
+behavior, permission mediation, or cancellation outcomes.";
 
-struct PipeWrite {
-    tx: UnboundedSender<Vec<u8>>,
+pub trait InProcessClientHandler: 'static {
+    fn session_notification(
+        &self,
+        notification: acp_schema::SessionNotification,
+    ) -> Pin<Box<dyn Future<Output = agent_client_protocol::Result<()>>>>;
+
+    fn request_permission(
+        &self,
+        request: acp_schema::RequestPermissionRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                Output = agent_client_protocol::Result<acp_schema::RequestPermissionResponse>,
+            >,
+        >,
+    >;
 }
 
-struct PipeRead {
-    rx: UnboundedReceiver<Vec<u8>>,
-    buffer: Vec<u8>,
+struct LocalClientChannel<H> {
+    handler: Rc<H>,
 }
 
-fn create_pipe() -> (PipeWrite, PipeRead) {
-    let (tx, rx) = mpsc::unbounded();
-    (
-        PipeWrite { tx },
-        PipeRead {
-            rx,
-            buffer: Vec::new(),
-        },
-    )
-}
-
-impl AsyncWrite for PipeWrite {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match self.tx.unbounded_send(buf.to_vec()) {
-            Ok(()) => Poll::Ready(Ok(buf.len())),
-            Err(_) => Poll::Ready(Err(Error::new(ErrorKind::BrokenPipe, "channel closed"))),
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.tx.close_channel();
-        Poll::Ready(Ok(()))
+impl<H> LocalClientChannel<H> {
+    fn new(handler: Rc<H>) -> Self {
+        Self { handler }
     }
 }
 
-impl AsyncRead for PipeRead {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-
-        if !this.buffer.is_empty() {
-            let n = buf.len().min(this.buffer.len());
-            buf[..n].copy_from_slice(&this.buffer[..n]);
-            this.buffer.drain(..n);
-            return Poll::Ready(Ok(n));
-        }
-
-        match this.rx.poll_next_unpin(cx) {
-            Poll::Ready(Some(data)) => {
-                let n = buf.len().min(data.len());
-                buf[..n].copy_from_slice(&data[..n]);
-                if n < data.len() {
-                    this.buffer.extend_from_slice(&data[n..]);
-                }
-                Poll::Ready(Ok(n))
-            }
-            Poll::Ready(None) => Poll::Ready(Ok(0)),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-struct AcpClientChannel {
-    inner: Rc<acp::AgentSideConnection>,
-}
-
-impl ClientChannel for AcpClientChannel {
+impl<H> ClientChannel for LocalClientChannel<H>
+where
+    H: InProcessClientHandler,
+{
     fn send_notification(
         &self,
-        notification: acp::SessionNotification,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = agent_client_protocol::Result<()>>>>
-    {
-        let inner = self.inner.clone();
-        Box::pin(async move { inner.session_notification(notification).await })
+        notification: acp_schema::SessionNotification,
+    ) -> Pin<Box<dyn Future<Output = agent_client_protocol::Result<()>>>> {
+        self.handler.session_notification(notification)
     }
 
     fn request_permission(
         &self,
-        request: acp::RequestPermissionRequest,
-    ) -> std::pin::Pin<
+        request: acp_schema::RequestPermissionRequest,
+    ) -> Pin<
         Box<
-            dyn std::future::Future<
-                Output = agent_client_protocol::Result<
-                    agent_client_protocol::RequestPermissionResponse,
-                >,
+            dyn Future<
+                Output = agent_client_protocol::Result<acp_schema::RequestPermissionResponse>,
             >,
         >,
     > {
-        let inner = self.inner.clone();
-        Box::pin(async move { inner.request_permission(request).await })
+        self.handler.request_permission(request)
     }
 }
 
-/// In-process ACP transport pairing a client-side connection with an IO driver.
+/// In-process ACP transport pairing a local client wrapper with the agent runtime.
 pub struct InProcessTransport {
-    client: acp::ClientSideConnection,
+    client: InProcessClient,
 }
 
 impl InProcessTransport {
-    /// Borrow the ACP client-side connection.
-    pub fn client(&self) -> &acp::ClientSideConnection {
+    /// Borrow the in-process ACP client wrapper.
+    pub fn client(&self) -> &InProcessClient {
         &self.client
+    }
+}
+
+/// Local ACP client facade used by the in-process transport.
+pub struct InProcessClient {
+    connection: Rc<IronConnection>,
+}
+
+impl InProcessClient {
+    async fn with_client_channel<T>(
+        &self,
+        op: impl AsyncFnOnce() -> agent_client_protocol::Result<T>,
+    ) -> agent_client_protocol::Result<T> {
+        op().await
+    }
+
+    pub async fn initialize(
+        &self,
+        request: acp_schema::InitializeRequest,
+    ) -> agent_client_protocol::Result<acp_schema::InitializeResponse> {
+        self.connection.handle_initialize(request).await
+    }
+
+    pub async fn new_session(
+        &self,
+        request: acp_schema::NewSessionRequest,
+    ) -> agent_client_protocol::Result<acp_schema::NewSessionResponse> {
+        self.connection.handle_new_session(request).await
+    }
+
+    pub async fn prompt(
+        &self,
+        request: acp_schema::PromptRequest,
+    ) -> agent_client_protocol::Result<acp_schema::PromptResponse> {
+        self.with_client_channel(|| self.connection.handle_prompt(request))
+            .await
+    }
+
+    pub async fn cancel(
+        &self,
+        notification: acp_schema::CancelNotification,
+    ) -> agent_client_protocol::Result<()> {
+        self.connection.handle_cancel(notification).await
+    }
+
+    pub async fn close_session(
+        &self,
+        request: acp_schema::CloseSessionRequest,
+    ) -> agent_client_protocol::Result<acp_schema::CloseSessionResponse> {
+        self.connection.handle_close_session(request).await
     }
 }
 
@@ -213,42 +205,21 @@ impl InProcessTransport {
 pub fn create_in_process_transport<C>(
     runtime: crate::runtime::IronRuntime,
     client_handler: C,
-) -> (
-    InProcessTransport,
-    impl std::future::Future<Output = ()> + 'static,
-)
+) -> (InProcessTransport, impl Future<Output = ()> + 'static)
 where
-    C: acp::Client + 'static,
+    C: InProcessClientHandler,
 {
-    let (c2a_write, c2a_read) = create_pipe();
-    let (a2c_write, a2c_read) = create_pipe();
-
     let iron_conn = Rc::new(IronConnection::new(runtime));
-
-    let spawn_fn = |fut: LocalBoxFuture<'static, ()>| {
-        tokio::task::spawn_local(fut);
-    };
-
-    let (agent_side, agent_io) =
-        acp::AgentSideConnection::new(iron_conn.clone(), a2c_write, c2a_read, spawn_fn);
-
-    let acp_client = Rc::new(AcpClientChannel {
-        inner: Rc::new(agent_side),
-    });
-    iron_conn.set_client(acp_client);
-
-    let (client_conn, client_io) =
-        acp::ClientSideConnection::new(client_handler, c2a_write, a2c_read, spawn_fn);
-
-    let io_driver = async move {
-        let _ = join!(agent_io, client_io);
-    };
+    let client_handler = Rc::new(client_handler);
+    iron_conn.set_client(Rc::new(LocalClientChannel::new(client_handler)));
 
     (
         InProcessTransport {
-            client: client_conn,
+            client: InProcessClient {
+                connection: iron_conn,
+            },
         },
-        io_driver,
+        async {},
     )
 }
 
@@ -263,103 +234,27 @@ pub fn create_stdio_agent(
     runtime: crate::runtime::IronRuntime,
 ) -> (
     Rc<IronConnection>,
-    impl std::future::Future<Output = acp::Result<()>> + 'static,
+    impl Future<Output = acp::Result<()>> + 'static,
 ) {
-    let outgoing = tokio::io::stdout().compat_write();
-    let incoming = tokio::io::stdin().compat();
-
     let iron_conn = Rc::new(IronConnection::new(runtime));
-
-    let spawn_fn = |fut: LocalBoxFuture<'static, ()>| {
-        tokio::task::spawn_local(fut);
+    let future = async {
+        Err(acp::Error::internal_error().data(
+            "create_stdio_agent is not yet adapted to the ACP 0.11 Send handler requirements",
+        ))
     };
-
-    let (agent_side, agent_io) =
-        acp::AgentSideConnection::new(iron_conn.clone(), outgoing, incoming, spawn_fn);
-
-    let acp_client = Rc::new(AcpClientChannel {
-        inner: Rc::new(agent_side),
-    });
-    iron_conn.set_client(acp_client);
-
-    (iron_conn, agent_io)
+    (iron_conn, future)
 }
 
 /// Serve ACP connections over TCP at the provided socket address.
 pub async fn serve_tcp_agent(
-    runtime: crate::runtime::IronRuntime,
-    addr: std::net::SocketAddr,
+    _runtime: crate::runtime::IronRuntime,
+    _addr: std::net::SocketAddr,
 ) -> acp::Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| acp::Error::into_internal_error(&e))?;
-
-    loop {
-        let (stream, _peer) = listener
-            .accept()
-            .await
-            .map_err(|e| acp::Error::into_internal_error(&e))?;
-
-        let (read_half, write_half) = tokio::io::split(stream);
-        let outgoing: tokio_util::compat::Compat<tokio::io::WriteHalf<tokio::net::TcpStream>> =
-            write_half.compat_write();
-        let incoming: tokio_util::compat::Compat<tokio::io::ReadHalf<tokio::net::TcpStream>> =
-            read_half.compat();
-
-        let rt = runtime.clone();
-        std::thread::spawn(move || {
-            let thread_rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("Failed to create per-connection runtime");
-            let local_set = tokio::task::LocalSet::new();
-            local_set.block_on(&thread_rt, async move {
-                let iron_conn = Rc::new(IronConnection::new(rt));
-
-                let spawn_fn = |fut: LocalBoxFuture<'static, ()>| {
-                    tokio::task::spawn_local(fut);
-                };
-
-                let (agent_side, agent_io) =
-                    acp::AgentSideConnection::new(iron_conn.clone(), outgoing, incoming, spawn_fn);
-
-                let acp_client = Rc::new(AcpClientChannel {
-                    inner: Rc::new(agent_side),
-                });
-                iron_conn.set_client(acp_client);
-
-                let _ = agent_io.await;
-            });
-        });
-    }
+    Err(acp::Error::internal_error()
+        .data("serve_tcp_agent is not yet adapted to the ACP 0.11 Send handler requirements"))
 }
 
-pub async fn connect_tcp_client<C>(
-    client_handler: C,
-    addr: std::net::SocketAddr,
-) -> acp::Result<(
-    acp::ClientSideConnection,
-    impl std::future::Future<Output = acp::Result<()>> + 'static,
-)>
-where
-    C: acp::Client + 'static,
-{
-    let stream = tokio::net::TcpStream::connect(addr)
-        .await
-        .map_err(|e| acp::Error::into_internal_error(&e))?;
-
-    let (read_half, write_half) = tokio::io::split(stream);
-    let outgoing = write_half.compat_write();
-    let incoming = read_half.compat();
-
-    let spawn_fn = |fut: LocalBoxFuture<'static, ()>| {
-        tokio::task::spawn_local(fut);
-    };
-
-    Ok(acp::ClientSideConnection::new(
-        client_handler,
-        outgoing,
-        incoming,
-        spawn_fn,
-    ))
+pub async fn connect_tcp_client(_addr: std::net::SocketAddr) -> acp::Result<()> {
+    Err(acp::Error::internal_error()
+        .data("connect_tcp_client is not yet adapted to the ACP 0.11 client builder API"))
 }

@@ -13,7 +13,7 @@ use crate::{
     runtime::{ConnectionId, IronRuntime},
     tool::Tool,
 };
-use agent_client_protocol::Agent;
+use agent_client_protocol::schema as acp;
 use futures::Stream;
 use iron_providers::Provider;
 use parking_lot::Mutex;
@@ -41,12 +41,12 @@ pub enum PromptOutcome {
     MaxTurnRequests,
 }
 
-impl From<agent_client_protocol::StopReason> for PromptOutcome {
-    fn from(reason: agent_client_protocol::StopReason) -> Self {
+impl From<acp::StopReason> for PromptOutcome {
+    fn from(reason: acp::StopReason) -> Self {
         match reason {
-            agent_client_protocol::StopReason::EndTurn => PromptOutcome::EndTurn,
-            agent_client_protocol::StopReason::Cancelled => PromptOutcome::Cancelled,
-            agent_client_protocol::StopReason::MaxTurnRequests => PromptOutcome::MaxTurnRequests,
+            acp::StopReason::EndTurn => PromptOutcome::EndTurn,
+            acp::StopReason::Cancelled => PromptOutcome::Cancelled,
+            acp::StopReason::MaxTurnRequests => PromptOutcome::MaxTurnRequests,
             _ => PromptOutcome::EndTurn,
         }
     }
@@ -951,7 +951,7 @@ impl FacadeClientChannel {
 impl ClientChannel for FacadeClientChannel {
     fn send_notification(
         &self,
-        notification: agent_client_protocol::SessionNotification,
+        notification: acp::SessionNotification,
     ) -> Pin<Box<dyn std::future::Future<Output = agent_client_protocol::Result<()>>>> {
         let session_key = notification.session_id.to_string();
         let streams = self.active_streams.borrow();
@@ -1004,13 +1004,11 @@ impl ClientChannel for FacadeClientChannel {
 
     fn request_permission(
         &self,
-        request: agent_client_protocol::RequestPermissionRequest,
+        request: acp::RequestPermissionRequest,
     ) -> Pin<
         Box<
             dyn std::future::Future<
-                Output = agent_client_protocol::Result<
-                    agent_client_protocol::RequestPermissionResponse,
-                >,
+                Output = agent_client_protocol::Result<acp::RequestPermissionResponse>,
             >,
         >,
     > {
@@ -1042,12 +1040,12 @@ impl ClientChannel for FacadeClientChannel {
                     arguments,
                 });
                 match rx.await {
-                    Ok(verdict) => Ok(agent_client_protocol::RequestPermissionResponse::new(
-                        verdict_to_outcome(verdict),
-                    )),
-                    Err(_) => Ok(agent_client_protocol::RequestPermissionResponse::new(
-                        verdict_to_outcome(PermissionVerdict::Deny),
-                    )),
+                    Ok(verdict) => Ok(acp::RequestPermissionResponse::new(verdict_to_outcome(
+                        verdict,
+                    ))),
+                    Err(_) => Ok(acp::RequestPermissionResponse::new(verdict_to_outcome(
+                        PermissionVerdict::Deny,
+                    ))),
                 }
             });
         }
@@ -1064,9 +1062,9 @@ impl ClientChannel for FacadeClientChannel {
             drop(async_handler);
             return Box::pin(async move {
                 let verdict = future.await;
-                Ok(agent_client_protocol::RequestPermissionResponse::new(
-                    verdict_to_outcome(verdict),
-                ))
+                Ok(acp::RequestPermissionResponse::new(verdict_to_outcome(
+                    verdict,
+                )))
             });
         }
         drop(async_handler);
@@ -1079,43 +1077,41 @@ impl ClientChannel for FacadeClientChannel {
         drop(handler);
 
         Box::pin(async move {
-            Ok(agent_client_protocol::RequestPermissionResponse::new(
-                verdict_to_outcome(verdict),
-            ))
+            Ok(acp::RequestPermissionResponse::new(verdict_to_outcome(
+                verdict,
+            )))
         })
     }
 }
 
-fn verdict_to_outcome(
-    verdict: PermissionVerdict,
-) -> agent_client_protocol::RequestPermissionOutcome {
+fn verdict_to_outcome(verdict: PermissionVerdict) -> acp::RequestPermissionOutcome {
     match verdict {
-        PermissionVerdict::AllowOnce => agent_client_protocol::RequestPermissionOutcome::Selected(
-            agent_client_protocol::SelectedPermissionOutcome::new(
-                agent_client_protocol::PermissionOptionId::new(PERMISSION_ALLOW_ONCE),
-            ),
-        ),
-        PermissionVerdict::Deny => agent_client_protocol::RequestPermissionOutcome::Selected(
-            agent_client_protocol::SelectedPermissionOutcome::new(
-                agent_client_protocol::PermissionOptionId::new(PERMISSION_REJECT_ONCE),
-            ),
-        ),
-        PermissionVerdict::Cancel => agent_client_protocol::RequestPermissionOutcome::Cancelled,
+        PermissionVerdict::AllowOnce => {
+            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                acp::PermissionOptionId::new(PERMISSION_ALLOW_ONCE),
+            ))
+        }
+        PermissionVerdict::Deny => {
+            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                acp::PermissionOptionId::new(PERMISSION_REJECT_ONCE),
+            ))
+        }
+        PermissionVerdict::Cancel => acp::RequestPermissionOutcome::Cancelled,
     }
 }
 
 fn convert_notification_to_prompt_event_with_index(
-    notification: &agent_client_protocol::SessionNotification,
+    notification: &acp::SessionNotification,
     tool_name_index: &Rc<RefCell<HashMap<String, String>>>,
 ) -> Option<PromptEvent> {
     match &notification.update {
-        agent_client_protocol::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
-            agent_client_protocol::ContentBlock::Text(tc) => Some(PromptEvent::Output {
+        acp::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+            acp::ContentBlock::Text(tc) => Some(PromptEvent::Output {
                 text: tc.text.clone(),
             }),
             _ => None,
         },
-        agent_client_protocol::SessionUpdate::ToolCall(tc) => {
+        acp::SessionUpdate::ToolCall(tc) => {
             let call_id = tc.tool_call_id.to_string();
             let tool_name = tc.title.clone();
             let arguments = tc.raw_input.clone().unwrap_or_default();
@@ -1128,7 +1124,7 @@ fn convert_notification_to_prompt_event_with_index(
                 arguments,
             })
         }
-        agent_client_protocol::SessionUpdate::ToolCallUpdate(update) => {
+        acp::SessionUpdate::ToolCallUpdate(update) => {
             let call_id = update.tool_call_id.to_string();
             let tool_name = update
                 .fields
@@ -1143,10 +1139,8 @@ fn convert_notification_to_prompt_event_with_index(
                 .map(str::to_string);
             let view = result.as_ref().and_then(plugin_view).cloned();
             let status = match update.fields.status {
-                Some(agent_client_protocol::ToolCallStatus::Completed) => {
-                    ToolResultStatus::Completed
-                }
-                Some(agent_client_protocol::ToolCallStatus::Failed) => {
+                Some(acp::ToolCallStatus::Completed) => ToolResultStatus::Completed,
+                Some(acp::ToolCallStatus::Failed) => {
                     let is_denied = result.as_ref().is_some_and(|r| {
                         r.get("error")
                             .and_then(|v| v.as_str())
@@ -1158,10 +1152,10 @@ fn convert_notification_to_prompt_event_with_index(
                         ToolResultStatus::Failed
                     }
                 }
-                Some(agent_client_protocol::ToolCallStatus::Pending) => {
+                Some(acp::ToolCallStatus::Pending) => {
                     return None;
                 }
-                Some(agent_client_protocol::ToolCallStatus::InProgress) => {
+                Some(acp::ToolCallStatus::InProgress) => {
                     return None;
                 }
                 _ => return None,
@@ -1268,14 +1262,12 @@ impl AgentSession {
     /// Returns the terminal [`PromptOutcome`]. For incremental event access,
     /// use [`prompt_stream`](AgentSession::prompt_stream).
     pub async fn prompt(&self, text: &str) -> PromptOutcome {
-        let acp_session_id = agent_client_protocol::SessionId::new(self.id.to_string());
-        let request = agent_client_protocol::PromptRequest::new(
+        let acp_session_id = acp::SessionId::new(self.id.to_string());
+        let request = acp::PromptRequest::new(
             acp_session_id,
-            vec![agent_client_protocol::ContentBlock::Text(
-                agent_client_protocol::TextContent::new(text),
-            )],
+            vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
         );
-        match self.connection.prompt(request).await {
+        match self.connection.handle_prompt(request).await {
             Ok(response) => response.stop_reason.into(),
             Err(_) => PromptOutcome::EndTurn,
         }
@@ -1283,10 +1275,10 @@ impl AgentSession {
 
     /// Send a multimodal prompt and await completion.
     pub async fn prompt_with_blocks(&self, blocks: &[ContentBlock]) -> PromptOutcome {
-        let acp_session_id = agent_client_protocol::SessionId::new(self.id.to_string());
+        let acp_session_id = acp::SessionId::new(self.id.to_string());
         let acp_blocks: Vec<_> = blocks.iter().map(to_acp_content_block).collect();
-        let request = agent_client_protocol::PromptRequest::new(acp_session_id, acp_blocks);
-        match self.connection.prompt(request).await {
+        let request = acp::PromptRequest::new(acp_session_id, acp_blocks);
+        match self.connection.handle_prompt(request).await {
             Ok(response) => response.stop_reason.into(),
             Err(_) => PromptOutcome::EndTurn,
         }
@@ -1317,9 +1309,7 @@ impl AgentSession {
     /// }
     /// ```
     pub fn prompt_stream(&self, text: &str) -> (PromptHandle, PromptEvents) {
-        let acp_blocks = vec![agent_client_protocol::ContentBlock::Text(
-            agent_client_protocol::TextContent::new(text),
-        )];
+        let acp_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
         self.prompt_stream_with_acp_blocks(acp_blocks)
     }
 
@@ -1377,7 +1367,7 @@ impl AgentSession {
     /// and completion handling are unified in one place.
     fn prompt_stream_with_acp_blocks(
         &self,
-        acp_blocks: Vec<agent_client_protocol::ContentBlock>,
+        acp_blocks: Vec<acp::ContentBlock>,
     ) -> (PromptHandle, PromptEvents) {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let approval_resolvers: Rc<
@@ -1402,15 +1392,15 @@ impl AgentSession {
         };
         let events = PromptEvents { rx: event_rx };
 
-        let acp_session_id = agent_client_protocol::SessionId::new(self.id.to_string());
-        let request = agent_client_protocol::PromptRequest::new(acp_session_id, acp_blocks);
+        let acp_session_id = acp::SessionId::new(self.id.to_string());
+        let request = acp::PromptRequest::new(acp_session_id, acp_blocks);
 
         let connection = self.connection.clone();
         let active_streams = self.active_streams.clone();
         let status_cell = status.clone();
 
         tokio::task::spawn_local(async move {
-            let outcome = match connection.prompt(request).await {
+            let outcome = match connection.handle_prompt(request).await {
                 Ok(response) => response.stop_reason.into(),
                 Err(_) => PromptOutcome::EndTurn,
             };
@@ -1433,9 +1423,9 @@ impl AgentSession {
 
     /// Cancel any active prompt on this session.
     pub async fn cancel(&self) {
-        let acp_session_id = agent_client_protocol::SessionId::new(self.id.to_string());
-        let notification = agent_client_protocol::CancelNotification::new(acp_session_id);
-        let _ = self.connection.cancel(notification).await;
+        let acp_session_id = acp::SessionId::new(self.id.to_string());
+        let notification = acp::CancelNotification::new(acp_session_id);
+        let _ = self.connection.handle_cancel(notification).await;
     }
 
     /// Get the conversation timeline.
@@ -1778,16 +1768,14 @@ impl AgentSession {
     }
 }
 
-fn to_acp_content_block(block: &ContentBlock) -> agent_client_protocol::ContentBlock {
+fn to_acp_content_block(block: &ContentBlock) -> acp::ContentBlock {
     match block {
-        ContentBlock::Text { text } => {
-            agent_client_protocol::ContentBlock::Text(agent_client_protocol::TextContent::new(text))
+        ContentBlock::Text { text } => acp::ContentBlock::Text(acp::TextContent::new(text)),
+        ContentBlock::Image { data, mime_type } => {
+            acp::ContentBlock::Image(acp::ImageContent::new(data, mime_type))
         }
-        ContentBlock::Image { data, mime_type } => agent_client_protocol::ContentBlock::Image(
-            agent_client_protocol::ImageContent::new(data, mime_type),
-        ),
-        ContentBlock::Resource { uri, name } => agent_client_protocol::ContentBlock::ResourceLink(
-            agent_client_protocol::ResourceLink::new(name.as_deref().unwrap_or("resource"), uri),
+        ContentBlock::Resource { uri, name } => acp::ContentBlock::ResourceLink(
+            acp::ResourceLink::new(name.as_deref().unwrap_or("resource"), uri),
         ),
     }
 }

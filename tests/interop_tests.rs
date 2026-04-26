@@ -1,43 +1,49 @@
-use agent_client_protocol::{Agent as _, Client};
 use iron_core::{
-    runtime::IronRuntime, transport::create_in_process_transport, Config, InProcessTransport,
+    runtime::IronRuntime,
+    transport::{create_in_process_transport, InProcessClientHandler},
+    Config, InProcessTransport,
 };
 use iron_providers::OpenAiProvider;
 use std::cell::RefCell;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 
+use agent_client_protocol::schema as acp;
+
 struct MockClient {
-    notifications: Rc<RefCell<Vec<agent_client_protocol::SessionNotification>>>,
+    notifications: Rc<RefCell<Vec<acp::SessionNotification>>>,
 }
 
 impl MockClient {
-    fn new(notifications: Rc<RefCell<Vec<agent_client_protocol::SessionNotification>>>) -> Self {
+    fn new(notifications: Rc<RefCell<Vec<acp::SessionNotification>>>) -> Self {
         Self { notifications }
     }
 }
 
-#[async_trait::async_trait(?Send)]
-impl Client for MockClient {
-    async fn session_notification(
+impl InProcessClientHandler for MockClient {
+    fn session_notification(
         &self,
-        args: agent_client_protocol::SessionNotification,
-    ) -> agent_client_protocol::Result<()> {
-        self.notifications.borrow_mut().push(args);
-        Ok(())
+        args: acp::SessionNotification,
+    ) -> Pin<Box<dyn Future<Output = agent_client_protocol::Result<()>>>> {
+        let notifications = self.notifications.clone();
+        Box::pin(async move {
+            notifications.borrow_mut().push(args);
+            Ok(())
+        })
     }
 
-    async fn request_permission(
+    fn request_permission(
         &self,
-        _args: agent_client_protocol::RequestPermissionRequest,
-    ) -> agent_client_protocol::Result<agent_client_protocol::RequestPermissionResponse> {
-        let outcome = agent_client_protocol::RequestPermissionOutcome::Selected(
-            agent_client_protocol::SelectedPermissionOutcome::new(
-                agent_client_protocol::PermissionOptionId::new("allow_once"),
-            ),
-        );
-        Ok(agent_client_protocol::RequestPermissionResponse::new(
-            outcome,
-        ))
+        _args: acp::RequestPermissionRequest,
+    ) -> Pin<Box<dyn Future<Output = agent_client_protocol::Result<acp::RequestPermissionResponse>>>>
+    {
+        Box::pin(async move {
+            let outcome = acp::RequestPermissionOutcome::Selected(
+                acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new("allow_once")),
+            );
+            Ok(acp::RequestPermissionResponse::new(outcome))
+        })
     }
 }
 
@@ -50,7 +56,7 @@ fn make_runtime() -> IronRuntime {
 
 async fn setup_transport() -> (
     InProcessTransport,
-    Rc<RefCell<Vec<agent_client_protocol::SessionNotification>>>,
+    Rc<RefCell<Vec<acp::SessionNotification>>>,
 ) {
     let runtime = make_runtime();
     let notifications = Rc::new(RefCell::new(Vec::new()));
@@ -61,9 +67,7 @@ async fn setup_transport() -> (
 
     let _ = transport
         .client()
-        .initialize(agent_client_protocol::InitializeRequest::new(
-            agent_client_protocol::ProtocolVersion::LATEST,
-        ))
+        .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
         .await
         .unwrap();
 
@@ -83,7 +87,7 @@ fn inprocess_initialize_and_new_session() {
         let acp_client = transport.client();
 
         let session_resp = acp_client
-            .new_session(agent_client_protocol::NewSessionRequest::new("."))
+            .new_session(acp::NewSessionRequest::new("."))
             .await
             .unwrap();
         assert!(!session_resp.session_id.to_string().is_empty());
@@ -103,13 +107,13 @@ fn inprocess_cancel() {
         let acp_client = transport.client();
 
         let session_resp = acp_client
-            .new_session(agent_client_protocol::NewSessionRequest::new("."))
+            .new_session(acp::NewSessionRequest::new("."))
             .await
             .unwrap();
         let session_id = session_resp.session_id;
 
         let cancel_result = acp_client
-            .cancel(agent_client_protocol::CancelNotification::new(session_id))
+            .cancel(acp::CancelNotification::new(session_id))
             .await;
         assert!(cancel_result.is_ok());
     });
@@ -128,13 +132,13 @@ fn inprocess_close_session() {
         let acp_client = transport.client();
 
         let session_resp = acp_client
-            .new_session(agent_client_protocol::NewSessionRequest::new("."))
+            .new_session(acp::NewSessionRequest::new("."))
             .await
             .unwrap();
         let session_id = session_resp.session_id;
 
         let close_result = acp_client
-            .close_session(agent_client_protocol::CloseSessionRequest::new(session_id))
+            .close_session(acp::CloseSessionRequest::new(session_id))
             .await;
         assert!(close_result.is_ok());
     });
@@ -153,12 +157,12 @@ fn inprocess_multiple_sessions() {
         let acp_client = transport.client();
 
         let s1 = acp_client
-            .new_session(agent_client_protocol::NewSessionRequest::new("."))
+            .new_session(acp::NewSessionRequest::new("."))
             .await
             .unwrap()
             .session_id;
         let s2 = acp_client
-            .new_session(agent_client_protocol::NewSessionRequest::new("."))
+            .new_session(acp::NewSessionRequest::new("."))
             .await
             .unwrap()
             .session_id;
@@ -166,10 +170,10 @@ fn inprocess_multiple_sessions() {
         assert_ne!(s1, s2);
 
         let _ = acp_client
-            .close_session(agent_client_protocol::CloseSessionRequest::new(s1))
+            .close_session(acp::CloseSessionRequest::new(s1))
             .await;
         let _ = acp_client
-            .close_session(agent_client_protocol::CloseSessionRequest::new(s2))
+            .close_session(acp::CloseSessionRequest::new(s2))
             .await;
     });
 }
@@ -187,25 +191,20 @@ fn inprocess_prompt_with_fake_provider_returns_end_turn() {
         let acp_client = transport.client();
 
         let session_resp = acp_client
-            .new_session(agent_client_protocol::NewSessionRequest::new("."))
+            .new_session(acp::NewSessionRequest::new("."))
             .await
             .unwrap();
         let session_id = session_resp.session_id;
 
         let result = acp_client
-            .prompt(agent_client_protocol::PromptRequest::new(
+            .prompt(acp::PromptRequest::new(
                 session_id,
-                vec![agent_client_protocol::ContentBlock::Text(
-                    agent_client_protocol::TextContent::new("hello"),
-                )],
+                vec![acp::ContentBlock::Text(acp::TextContent::new("hello"))],
             ))
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap().stop_reason,
-            agent_client_protocol::StopReason::EndTurn
-        );
+        assert_eq!(result.unwrap().stop_reason, acp::StopReason::EndTurn);
     });
 }
 
@@ -223,13 +222,13 @@ fn inprocess_reinitialize_fresh_transport() {
 
         let s1 = transport1
             .client()
-            .new_session(agent_client_protocol::NewSessionRequest::new("."))
+            .new_session(acp::NewSessionRequest::new("."))
             .await
             .unwrap()
             .session_id;
         let s2 = transport2
             .client()
-            .new_session(agent_client_protocol::NewSessionRequest::new("."))
+            .new_session(acp::NewSessionRequest::new("."))
             .await
             .unwrap()
             .session_id;
@@ -260,33 +259,27 @@ fn inprocess_cross_connection_prompt_rejected() {
 
         let _ = transport1
             .client()
-            .initialize(agent_client_protocol::InitializeRequest::new(
-                agent_client_protocol::ProtocolVersion::LATEST,
-            ))
+            .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
             .await
             .unwrap();
         let _ = transport2
             .client()
-            .initialize(agent_client_protocol::InitializeRequest::new(
-                agent_client_protocol::ProtocolVersion::LATEST,
-            ))
+            .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
             .await
             .unwrap();
 
         let session_resp = transport1
             .client()
-            .new_session(agent_client_protocol::NewSessionRequest::new("."))
+            .new_session(acp::NewSessionRequest::new("."))
             .await
             .unwrap();
         let session_id = session_resp.session_id;
 
         let result = transport2
             .client()
-            .prompt(agent_client_protocol::PromptRequest::new(
+            .prompt(acp::PromptRequest::new(
                 session_id,
-                vec![agent_client_protocol::ContentBlock::Text(
-                    agent_client_protocol::TextContent::new("intrude"),
-                )],
+                vec![acp::ContentBlock::Text(acp::TextContent::new("intrude"))],
             ))
             .await;
 
@@ -316,29 +309,25 @@ fn inprocess_cross_connection_close_session_rejected() {
 
         let _ = transport1
             .client()
-            .initialize(agent_client_protocol::InitializeRequest::new(
-                agent_client_protocol::ProtocolVersion::LATEST,
-            ))
+            .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
             .await
             .unwrap();
         let _ = transport2
             .client()
-            .initialize(agent_client_protocol::InitializeRequest::new(
-                agent_client_protocol::ProtocolVersion::LATEST,
-            ))
+            .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
             .await
             .unwrap();
 
         let session_resp = transport1
             .client()
-            .new_session(agent_client_protocol::NewSessionRequest::new("."))
+            .new_session(acp::NewSessionRequest::new("."))
             .await
             .unwrap();
         let session_id = session_resp.session_id;
 
         let result = transport2
             .client()
-            .close_session(agent_client_protocol::CloseSessionRequest::new(session_id))
+            .close_session(acp::CloseSessionRequest::new(session_id))
             .await;
 
         assert!(result.is_err(), "expected cross-connection close to fail");
