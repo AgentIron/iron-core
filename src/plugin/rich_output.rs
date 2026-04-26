@@ -481,7 +481,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("transcript.text must be a non-empty string"));
+        assert!(error
+            .to_string()
+            .contains("transcript.text must be a non-empty string"));
     }
 
     #[test]
@@ -506,7 +508,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("view.id must be a non-empty string"));
+        assert!(error
+            .to_string()
+            .contains("view.id must be a non-empty string"));
     }
 
     #[test]
@@ -529,6 +533,8 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("value must be between 0.0 and 1.0"));
+        assert!(error
+            .to_string()
+            .contains("value must be between 0.0 and 1.0"));
     }
 }

@@ -27,7 +27,8 @@ fn make_additional(path: &str, content: &str) -> AdditionalInstructionFile {
 #[test]
 fn prompt_layer_ordering_baseline_first() {
     let payload = RepoInstructionPayload::default();
-    let result = PromptAssembler::assemble("BASELINE", &payload, &[], Some("SESSION"), None, "RUNTIME");
+    let result =
+        PromptAssembler::assemble("BASELINE", &payload, &[], Some("SESSION"), None, "RUNTIME");
     let baseline_pos = result.find("BASELINE").unwrap();
     let session_pos = result.find("SESSION").unwrap();
     let runtime_pos = result.find("RUNTIME").unwrap();
@@ -41,7 +42,8 @@ fn prompt_layer_ordering_repo_between_baseline_and_session() {
         sources: vec![make_source("AGENTS.md", "repo content")],
         additional_files: vec![],
     };
-    let result = PromptAssembler::assemble("BASELINE", &payload, &[], Some("SESSION"), None, "RUNTIME");
+    let result =
+        PromptAssembler::assemble("BASELINE", &payload, &[], Some("SESSION"), None, "RUNTIME");
     let baseline_pos = result.find("BASELINE").unwrap();
     let repo_pos = result.find("repo content").unwrap();
     let session_pos = result.find("SESSION").unwrap();

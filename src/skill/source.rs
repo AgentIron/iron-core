@@ -1,4 +1,6 @@
-use crate::skill::{LoadedSkill, SkillDiagnostic, SkillLocation, SkillMetadata, SkillOrigin, SkillResourceEntry};
+use crate::skill::{
+    LoadedSkill, SkillDiagnostic, SkillLocation, SkillMetadata, SkillOrigin, SkillResourceEntry,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
@@ -49,7 +51,10 @@ impl FilesystemSkillSource {
     }
 
     /// Parse a SKILL.md file into metadata and body.
-    fn parse_skill_file(&self, path: &Path) -> Option<(SkillMetadata, String, Vec<SkillResourceEntry>)> {
+    fn parse_skill_file(
+        &self,
+        path: &Path,
+    ) -> Option<(SkillMetadata, String, Vec<SkillResourceEntry>)> {
         let content = std::fs::read_to_string(path).ok()?;
 
         // Split frontmatter from body
@@ -61,14 +66,18 @@ impl FilesystemSkillSource {
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "Failed to parse skill frontmatter, using fallback metadata");
                 // Extract skill name from parent directory or filename
-                let skill_name = path.parent()
+                let skill_name = path
+                    .parent()
                     .and_then(|p| p.file_name())
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
                     .to_string();
                 self.diagnostics.lock().unwrap().push(SkillDiagnostic {
                     level: crate::skill::DiagnosticLevel::Warning,
-                    message: format!("Failed to parse frontmatter for '{}': {}. Using fallback metadata.", skill_name, e),
+                    message: format!(
+                        "Failed to parse frontmatter for '{}': {}. Using fallback metadata.",
+                        skill_name, e
+                    ),
                     skill_name: Some(skill_name.clone()),
                 });
                 SkillMetadata {
@@ -103,7 +112,8 @@ impl FilesystemSkillSource {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_file() {
-                    let rel_path = path.strip_prefix(&resources_dir)
+                    let rel_path = path
+                        .strip_prefix(&resources_dir)
                         .unwrap_or(&path)
                         .to_string_lossy()
                         .to_string();
@@ -121,7 +131,7 @@ impl FilesystemSkillSource {
 impl SkillSource for FilesystemSkillSource {
     fn discover(&self) -> HashMap<String, SkillMetadata> {
         let mut skills = HashMap::new();
-        
+
         if !self.root.exists() || !self.root.is_dir() {
             return skills;
         }
@@ -159,20 +169,23 @@ impl SkillSource for FilesystemSkillSource {
     fn load(&self, name: &str) -> Option<LoadedSkill> {
         let skill_dir = self.root.join(name);
         let skill_file = skill_dir.join("SKILL.md");
-        
+
         if !skill_file.exists() {
             return None;
         }
 
         let (mut metadata, body, resources) = self.parse_skill_file(&skill_file)?;
         metadata.origin = self.origin;
-        
+
         Some(LoadedSkill {
             metadata,
             location: Some(SkillLocation {
                 directory: skill_dir.clone(),
                 skill_file,
-                resources_dir: skill_dir.join("resources").exists().then(|| skill_dir.join("resources")),
+                resources_dir: skill_dir
+                    .join("resources")
+                    .exists()
+                    .then(|| skill_dir.join("resources")),
             }),
             body,
             resources,
@@ -256,20 +269,20 @@ impl SkillSource for StaticSkillSource {
 /// Expects frontmatter delimited by `---` at the start of the file.
 fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     let content = content.trim_start();
-    
+
     // Check for --- delimiter
     if !content.starts_with("---") {
         // No frontmatter - entire content is body
         return Some(("", content));
     }
-    
+
     // Find the closing ---
     let after_open = &content[3..];
     let close_idx = after_open.find("---")?;
-    
+
     let frontmatter = after_open[..close_idx].trim();
     let body = after_open[close_idx + 3..].trim_start();
-    
+
     Some((frontmatter, body))
 }
 
@@ -296,12 +309,16 @@ mod tests {
     #[test]
     fn static_source_register_and_load() {
         let mut source = StaticSkillSource::new();
-        source.register_raw("test-skill", "A test skill", "# Instructions\nDo something.");
-        
+        source.register_raw(
+            "test-skill",
+            "A test skill",
+            "# Instructions\nDo something.",
+        );
+
         let skills = source.discover();
         assert_eq!(skills.len(), 1);
         assert!(skills.contains_key("test-skill"));
-        
+
         let loaded = source.load("test-skill").unwrap();
         assert_eq!(loaded.metadata.display_name, "test-skill");
         assert_eq!(loaded.body, "# Instructions\nDo something.");
@@ -309,9 +326,10 @@ mod tests {
 
     #[test]
     fn filesystem_source_discovers_skills_from_directory() {
-        let temp_dir = std::env::temp_dir().join(format!("iron-core-test-skills-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("iron-core-test-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
-        
+
         // Create a skill directory with a valid SKILL.md
         let skill_dir = temp_dir.join("test-skill");
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -319,69 +337,74 @@ mod tests {
             skill_dir.join("SKILL.md"),
             "---\nid: test-skill\nname: Test Skill\ndescription: A test skill\n---\n# Instructions\nDo something."
         ).unwrap();
-        
+
         let source = FilesystemSkillSource::new(&temp_dir, SkillOrigin::ProjectFilesystem);
         let skills = source.discover();
-        
+
         assert_eq!(skills.len(), 1);
         assert!(skills.contains_key("test-skill"));
         let metadata = skills.get("test-skill").unwrap();
         assert_eq!(metadata.display_name, "Test Skill");
         assert_eq!(metadata.description, "A test skill");
-        
+
         let loaded = source.load("test-skill").unwrap();
         assert_eq!(loaded.body, "# Instructions\nDo something.");
-        
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn filesystem_source_handles_malformed_yaml_gracefully() {
-        let temp_dir = std::env::temp_dir().join(format!("iron-core-test-malformed-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("iron-core-test-malformed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
-        
+
         // Create a skill directory with malformed YAML frontmatter
         let skill_dir = temp_dir.join("bad-skill");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nthis is not: valid: yaml: [\n---\n# Instructions\nDo something."
-        ).unwrap();
-        
+            "---\nthis is not: valid: yaml: [\n---\n# Instructions\nDo something.",
+        )
+        .unwrap();
+
         let source = FilesystemSkillSource::new(&temp_dir, SkillOrigin::ProjectFilesystem);
         let skills = source.discover();
-        
+
         // Should still discover the skill with fallback metadata
         assert_eq!(skills.len(), 1);
         assert!(skills.contains_key("bad-skill"));
         let metadata = skills.get("bad-skill").unwrap();
         assert_eq!(metadata.display_name, "bad-skill");
         assert!(metadata.description.contains("unparsable"));
-        
+
         // Should have recorded a diagnostic
         let diagnostics = source.diagnostics();
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].level, crate::skill::DiagnosticLevel::Warning);
-        assert!(diagnostics[0].message.contains("Failed to parse frontmatter"));
-        
+        assert!(diagnostics[0]
+            .message
+            .contains("Failed to parse frontmatter"));
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn filesystem_source_skips_directories_without_skill_md() {
-        let temp_dir = std::env::temp_dir().join(format!("iron-core-test-empty-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("iron-core-test-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
-        
+
         // Create a directory without SKILL.md
         let empty_dir = temp_dir.join("empty-dir");
         std::fs::create_dir_all(&empty_dir).unwrap();
         std::fs::write(empty_dir.join("README.md"), "# Not a skill").unwrap();
-        
+
         let source = FilesystemSkillSource::new(&temp_dir, SkillOrigin::ProjectFilesystem);
         let skills = source.discover();
-        
+
         assert_eq!(skills.len(), 0);
-        
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

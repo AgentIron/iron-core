@@ -1,5 +1,7 @@
-use crate::skill::{origin_precedence, DiagnosticLevel, LoadedSkill, SkillDiagnostic, SkillMetadata};
 use crate::skill::source::SkillSource;
+use crate::skill::{
+    origin_precedence, DiagnosticLevel, LoadedSkill, SkillDiagnostic, SkillMetadata,
+};
 use std::collections::HashMap;
 use tracing::debug;
 
@@ -34,7 +36,7 @@ impl SkillCatalog {
     /// Skills with the same name are resolved using origin precedence.
     pub fn discover(sources: &[Box<dyn SkillSource>]) -> Self {
         let mut catalog = Self::new();
-        
+
         for source in sources.iter() {
             let discovered = source.discover();
             debug!(count = discovered.len(), "Discovered skills from source");
@@ -119,7 +121,7 @@ impl SkillCatalog {
         if let Some(existing) = self.skills.get(&name) {
             let existing_prec = origin_precedence(existing.skill.metadata.origin);
             let new_prec = origin_precedence(skill.metadata.origin);
-            
+
             if existing_prec >= new_prec {
                 self.diagnostics.push(SkillDiagnostic {
                     level: DiagnosticLevel::Info,
@@ -141,7 +143,7 @@ impl SkillCatalog {
                 });
             }
         }
-        
+
         self.skills.insert(name, CatalogEntry { skill });
     }
 }
@@ -155,8 +157,8 @@ impl Default for SkillCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skill::SkillOrigin;
     use crate::skill::source::StaticSkillSource;
+    use crate::skill::SkillOrigin;
 
     fn make_skill(name: &str, origin: SkillOrigin) -> LoadedSkill {
         LoadedSkill {
@@ -181,17 +183,15 @@ mod tests {
     fn catalog_resolves_collisions_by_precedence() {
         let mut user_source = StaticSkillSource::new();
         user_source.register(make_skill("test", SkillOrigin::UserFilesystem));
-        
+
         let mut project_source = StaticSkillSource::new();
         project_source.register(make_skill("test", SkillOrigin::ProjectFilesystem));
-        
-        let sources: Vec<Box<dyn SkillSource>> = vec![
-            Box::new(user_source),
-            Box::new(project_source),
-        ];
-        
+
+        let sources: Vec<Box<dyn SkillSource>> =
+            vec![Box::new(user_source), Box::new(project_source)];
+
         let catalog = SkillCatalog::discover(&sources);
-        
+
         assert_eq!(catalog.len(), 1);
         let skill = catalog.get("test").unwrap();
         assert_eq!(skill.origin, SkillOrigin::ProjectFilesystem);
@@ -201,17 +201,14 @@ mod tests {
     fn catalog_preserves_both_when_no_collision() {
         let mut source1 = StaticSkillSource::new();
         source1.register(make_skill("skill-a", SkillOrigin::UserFilesystem));
-        
+
         let mut source2 = StaticSkillSource::new();
         source2.register(make_skill("skill-b", SkillOrigin::ProjectFilesystem));
-        
-        let sources: Vec<Box<dyn SkillSource>> = vec![
-            Box::new(source1),
-            Box::new(source2),
-        ];
-        
+
+        let sources: Vec<Box<dyn SkillSource>> = vec![Box::new(source1), Box::new(source2)];
+
         let catalog = SkillCatalog::discover(&sources);
-        
+
         assert_eq!(catalog.len(), 2);
         assert!(catalog.contains("skill-a"));
         assert!(catalog.contains("skill-b"));
@@ -221,10 +218,10 @@ mod tests {
     fn catalog_loads_from_correct_source() {
         let mut source = StaticSkillSource::new();
         source.register(make_skill("loadable", SkillOrigin::ClientProvided));
-        
+
         let sources: Vec<Box<dyn SkillSource>> = vec![Box::new(source)];
         let catalog = SkillCatalog::discover(&sources);
-        
+
         let loaded = catalog.load("loadable").unwrap();
         assert_eq!(loaded.metadata.display_name, "loadable");
     }
@@ -233,23 +230,28 @@ mod tests {
     fn catalog_records_collision_diagnostics() {
         let mut user_source = StaticSkillSource::new();
         user_source.register(make_skill("test", SkillOrigin::UserFilesystem));
-        
+
         let mut project_source = StaticSkillSource::new();
         project_source.register(make_skill("test", SkillOrigin::ProjectFilesystem));
-        
-        let sources: Vec<Box<dyn SkillSource>> = vec![
-            Box::new(user_source),
-            Box::new(project_source),
-        ];
-        
+
+        let sources: Vec<Box<dyn SkillSource>> =
+            vec![Box::new(user_source), Box::new(project_source)];
+
         let catalog = SkillCatalog::discover(&sources);
-        
+
         let diagnostics = catalog.diagnostics();
-        assert!(!diagnostics.is_empty(), "Should have recorded collision diagnostics");
-        let has_shadow_diagnostic = diagnostics.iter().any(|d| {
-            d.message.contains("shadowed") || d.message.contains("replaced")
-        });
-        assert!(has_shadow_diagnostic, "Should have a shadow/replace diagnostic: {:?}", diagnostics);
+        assert!(
+            !diagnostics.is_empty(),
+            "Should have recorded collision diagnostics"
+        );
+        let has_shadow_diagnostic = diagnostics
+            .iter()
+            .any(|d| d.message.contains("shadowed") || d.message.contains("replaced"));
+        assert!(
+            has_shadow_diagnostic,
+            "Should have a shadow/replace diagnostic: {:?}",
+            diagnostics
+        );
     }
 
     #[test]
@@ -257,10 +259,10 @@ mod tests {
         let mut source = StaticSkillSource::new();
         source.register(make_skill("skill-a", SkillOrigin::ClientProvided));
         source.register(make_skill("skill-b", SkillOrigin::ClientProvided));
-        
+
         let sources: Vec<Box<dyn SkillSource>> = vec![Box::new(source)];
         let catalog = SkillCatalog::discover(&sources);
-        
+
         let list = catalog.list();
         assert_eq!(list.len(), 2);
         assert!(list.iter().any(|m| m.id == "skill-a"));

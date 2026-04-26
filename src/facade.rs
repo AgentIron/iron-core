@@ -1498,9 +1498,11 @@ impl AgentSession {
             .lock()
             .load_available_skill(name)
             .ok_or_else(|| format!("Skill '{}' not found", name))?;
-        self.durable
-            .lock()
-            .activate_skill(&skill.metadata.id, &skill.body, skill.resources.clone());
+        self.durable.lock().activate_skill(
+            &skill.metadata.id,
+            &skill.body,
+            skill.resources.clone(),
+        );
         Ok(())
     }
 
@@ -1511,7 +1513,9 @@ impl AgentSession {
 
     /// List the names of skills currently active in this session.
     pub fn list_active_skills(&self) -> Vec<String> {
-        self.durable.lock().list_active_skills()
+        self.durable
+            .lock()
+            .list_active_skills()
             .into_iter()
             .map(|s| s.to_string())
             .collect()

@@ -107,12 +107,14 @@ impl PromptRunner {
                     crate::request_builder::build_inference_request_with_effective_tools(
                         config,
                         &messages,
-                        compacted_context.as_ref(),
-                        instructions.as_deref(),
-                        repo_payload.as_ref(),
+                        crate::request_builder::EffectiveToolRequestContext {
+                            compacted_context: compacted_context.as_ref(),
+                            instructions: instructions.as_deref(),
+                            repo_instruction_payload: repo_payload.as_ref(),
+                            python_exec_available: tool_catalog.contains("python_exec"),
+                            skill_instructions: Some(&skill_instructions),
+                        },
                         tool_catalog.definitions(),
-                        tool_catalog.contains("python_exec"),
-                        Some(&skill_instructions),
                     )
                 } else {
                     let tool_registry = self.runtime.tool_registry();
@@ -712,28 +714,30 @@ impl PromptRunner {
             return;
         }
 
-        let (skill, already_active) = {
+        let maybe_skill = {
             let session = durable.lock();
-            match session.load_available_skill(skill_name) {
-                Some(skill) => (skill, session.is_skill_active(skill_name)),
-                None => {
-                    drop(session);
-                    let result = serde_json::json!({
-                        "error": format!("Skill '{}' is not available in this session", skill_name)
-                    });
-                    {
-                        let mut session = durable.lock();
-                        session.fail_tool_call(&call_id, result.clone());
-                    }
-                    sink.emit(PromptLifecycleEvent::ToolCallUpdate {
-                        call_id: call_id.clone(),
-                        tool_name: "activate_skill".to_string(),
-                        status: ToolUpdateStatus::Failed,
-                        output: Some(result),
-                    })
-                    .await;
-                    return;
+            session
+                .load_available_skill(skill_name)
+                .map(|skill| (skill, session.is_skill_active(skill_name)))
+        };
+        let (skill, already_active) = match maybe_skill {
+            Some(skill) => skill,
+            None => {
+                let result = serde_json::json!({
+                    "error": format!("Skill '{}' is not available in this session", skill_name)
+                });
+                {
+                    let mut session = durable.lock();
+                    session.fail_tool_call(&call_id, result.clone());
                 }
+                sink.emit(PromptLifecycleEvent::ToolCallUpdate {
+                    call_id: call_id.clone(),
+                    tool_name: "activate_skill".to_string(),
+                    status: ToolUpdateStatus::Failed,
+                    output: Some(result),
+                })
+                .await;
+                return;
             }
         };
 

@@ -12,7 +12,6 @@
 //! - [`SkillRegistry`] is runtime-owned and manages the lifecycle
 //! - Session-scoped activation is tracked in [`DurableSession`]
 
-
 pub mod catalog;
 pub mod source;
 
@@ -53,7 +52,9 @@ pub struct SkillMetadata {
 }
 
 /// Where a skill was discovered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillOrigin {
     /// Discovered from the project filesystem (`.agents/skills/`).
@@ -183,7 +184,10 @@ impl SessionSkillState {
 }
 
 pub(crate) fn render_skill_content(name: &str, body: &str) -> String {
-    format!("<skill_content name=\"{}\">\n{}\n</skill_content>", name, body)
+    format!(
+        "<skill_content name=\"{}\">\n{}\n</skill_content>",
+        name, body
+    )
 }
 
 #[cfg(test)]
@@ -193,24 +197,28 @@ mod tests {
     #[test]
     fn session_skill_state_activation_is_idempotent() {
         let mut state = SessionSkillState::default();
-        
+
         let record = ActivatedSkillRecord {
             name: "test-skill".to_string(),
             body: "body".to_string(),
             resources: vec![],
         };
-        
+
         state.activate(record.clone());
         assert_eq!(state.active.len(), 1);
-        
+
         state.activate(record);
-        assert_eq!(state.active.len(), 1, "Duplicate activation should be idempotent");
+        assert_eq!(
+            state.active.len(),
+            1,
+            "Duplicate activation should be idempotent"
+        );
     }
 
     #[test]
     fn session_skill_state_deactivation() {
         let mut state = SessionSkillState::default();
-        
+
         state.activate(ActivatedSkillRecord {
             name: "skill-a".to_string(),
             body: "body-a".to_string(),
@@ -221,9 +229,9 @@ mod tests {
             body: "body-b".to_string(),
             resources: vec![],
         });
-        
+
         assert_eq!(state.active.len(), 2);
-        
+
         state.deactivate("skill-a");
         assert_eq!(state.active.len(), 1);
         assert!(!state.is_active("skill-a"));
@@ -233,7 +241,7 @@ mod tests {
     #[test]
     fn session_skill_state_active_skill_instructions() {
         let mut state = SessionSkillState::default();
-        
+
         state.activate(ActivatedSkillRecord {
             name: "skill-a".to_string(),
             body: "Do A".to_string(),
@@ -244,7 +252,7 @@ mod tests {
             body: "Do B".to_string(),
             resources: vec![],
         });
-        
+
         let instructions = state.active_skill_instructions();
         assert!(instructions.contains("<skill_content name=\"skill-a\">"));
         assert!(instructions.contains("Do A"));

@@ -1,0 +1,64 @@
+name: Pull Request
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate-pr-policy:
+    name: Validate PR Policy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Ensure PR references an issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const issuePattern = /(#\d+|https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/\d+)\b/i;
+            const title = pr.title ?? "";
+            const body = pr.body ?? "";
+
+            if (pr.head.ref === "main") {
+              core.setFailed("Pull requests must come from a feature branch, not main.");
+              return;
+            }
+
+            if (!issuePattern.test(`${title}\n${body}`)) {
+              core.setFailed("Pull requests must reference a GitHub issue in the title or body, for example `Closes #123`.");
+            }
+
+  rust:
+    name: Rust Checks
+    runs-on: ubuntu-latest
+    needs: validate-pr-policy
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path Cargo.toml -- --check
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
