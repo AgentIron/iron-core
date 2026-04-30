@@ -4,7 +4,7 @@ use crate::{
     error::RuntimeError,
     tool::ToolRegistry,
 };
-use iron_providers::{InferenceRequest, Message, ToolPolicy};
+use iron_providers::{InferenceRequest, Message, ProviderRegistry, ToolPolicy};
 
 pub struct EffectiveToolRequestContext<'a> {
     pub compacted_context: Option<&'a CompactedContext>,
@@ -205,14 +205,36 @@ fn build_composed_instructions(
         python_exec_available,
     );
 
-    crate::prompt::PromptAssembler::assemble(
+    let provider_guidance = resolve_provider_guidance(config);
+
+    crate::prompt::SystemPromptRenderer::render(&crate::prompt::SystemPromptInputs {
         baseline,
-        &repo_payload,
-        &config.prompt_composition.additional_inline,
+        runtime_context: &runtime_context,
+        repo_payload: &repo_payload,
+        additional_inline: &config.prompt_composition.additional_inline,
         session_instructions,
         skill_instructions,
-        &runtime_context,
-    )
+        provider_guidance: provider_guidance.as_deref(),
+        client_editing_guidance: config.prompt_composition.client_editing_guidance.as_deref(),
+        client_injections: &config.prompt_composition.client_injections,
+        python_exec_available,
+    })
+}
+
+/// Resolve provider-specific guidance from `iron-providers` when a provider name
+/// is configured, falling back to the manually set `provider_guidance` in
+/// `PromptCompositionConfig`.
+fn resolve_provider_guidance(config: &Config) -> Option<String> {
+    if let Some(ref name) = config.provider_name {
+        let registry = ProviderRegistry::default();
+        match registry.system_prompt_fragment(name) {
+            Ok(fragment) => return Some(fragment.to_string()),
+            Err(_) => {
+                // Unknown provider name — fall through to manual guidance
+            }
+        }
+    }
+    config.prompt_composition.provider_guidance.clone()
 }
 
 fn apply_context_window_policy(
