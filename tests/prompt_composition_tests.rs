@@ -2,12 +2,42 @@ use iron_core::{
     config::Config,
     prompt::config::PromptCompositionConfig,
     prompt::{
-        AdditionalInstructionFile, PromptAssembler, RepoInstructionConfig, RepoInstructionFamily,
-        RepoInstructionLoader, RepoInstructionPayload, RepoInstructionSource,
-        RuntimeContextRenderer,
+        AdditionalInstructionFile, ClientPromptFragment, PromptAssembler, PromptSectionOwner,
+        RepoInstructionConfig, RepoInstructionFamily, RepoInstructionLoader,
+        RepoInstructionPayload, RepoInstructionSource, RuntimeContextRenderer, SystemPromptCache,
+        SystemPromptInputs, SystemPromptRenderer, PROMPT_SECTION_ORDER,
     },
 };
+use iron_providers::Message;
 use std::path::PathBuf;
+
+fn section_position(prompt: &str, title: &str) -> usize {
+    prompt
+        .find(title)
+        .unwrap_or_else(|| panic!("missing section title: {title}"))
+}
+
+fn render_system_prompt<'a>(
+    payload: &'a RepoInstructionPayload,
+    runtime_context: &'a str,
+    provider_guidance: Option<&'a str>,
+    client_editing_guidance: Option<&'a str>,
+    client_injections: &'a [ClientPromptFragment],
+    python_exec_available: bool,
+) -> String {
+    SystemPromptRenderer::render(&SystemPromptInputs {
+        baseline: "BASELINE",
+        runtime_context,
+        repo_payload: payload,
+        additional_inline: &[],
+        session_instructions: None,
+        skill_instructions: None,
+        provider_guidance,
+        client_editing_guidance,
+        client_injections,
+        python_exec_available,
+    })
+}
 
 fn make_source(filename: &str, content: &str) -> RepoInstructionSource {
     RepoInstructionSource {
@@ -25,77 +55,117 @@ fn make_additional(path: &str, content: &str) -> AdditionalInstructionFile {
 }
 
 #[test]
-fn prompt_layer_ordering_baseline_first() {
+fn prompt_section_ordering_is_fixed() {
     let payload = RepoInstructionPayload::default();
-    let result =
-        PromptAssembler::assemble("BASELINE", &payload, &[], Some("SESSION"), None, "RUNTIME");
-    let baseline_pos = result.find("BASELINE").unwrap();
-    let session_pos = result.find("SESSION").unwrap();
-    let runtime_pos = result.find("RUNTIME").unwrap();
-    assert!(baseline_pos < session_pos);
-    assert!(session_pos < runtime_pos);
+    let result = render_system_prompt(&payload, "RUNTIME", None, None, &[], false);
+
+    let mut last = 0;
+    for (idx, section) in PROMPT_SECTION_ORDER.iter().enumerate() {
+        let title = format!("## {}. {}", idx + 1, section.metadata().title);
+        let pos = section_position(&result, &title);
+        assert!(pos >= last, "section out of order: {title}");
+        last = pos;
+    }
 }
 
 #[test]
-fn prompt_layer_ordering_repo_between_baseline_and_session() {
+fn prompt_section_metadata_declares_expected_owners() {
+    assert_eq!(PROMPT_SECTION_ORDER.len(), 9);
+    assert_eq!(
+        PROMPT_SECTION_ORDER[0].metadata().owner,
+        PromptSectionOwner::Core
+    );
+    assert_eq!(
+        PROMPT_SECTION_ORDER[6].metadata().owner,
+        PromptSectionOwner::Provider
+    );
+    assert_eq!(
+        PROMPT_SECTION_ORDER[8].metadata().owner,
+        PromptSectionOwner::Client
+    );
+}
+
+#[test]
+fn prompt_preserves_repo_and_session_content_inside_client_injection() {
     let payload = RepoInstructionPayload {
         sources: vec![make_source("AGENTS.md", "repo content")],
         additional_files: vec![],
     };
-    let result =
-        PromptAssembler::assemble("BASELINE", &payload, &[], Some("SESSION"), None, "RUNTIME");
-    let baseline_pos = result.find("BASELINE").unwrap();
-    let repo_pos = result.find("repo content").unwrap();
-    let session_pos = result.find("SESSION").unwrap();
-    let runtime_pos = result.find("RUNTIME").unwrap();
-    assert!(baseline_pos < repo_pos);
-    assert!(repo_pos < session_pos);
-    assert!(session_pos < runtime_pos);
-}
+    let result = SystemPromptRenderer::render(&SystemPromptInputs {
+        baseline: "BASELINE",
+        runtime_context: "RUNTIME",
+        repo_payload: &payload,
+        additional_inline: &["INLINE".to_string()],
+        session_instructions: Some("SESSION"),
+        skill_instructions: Some("SKILLS"),
+        provider_guidance: None,
+        client_editing_guidance: None,
+        client_injections: &[],
+        python_exec_available: false,
+    });
 
-#[test]
-fn prompt_layer_ordering_inline_between_repo_and_session() {
-    let payload = RepoInstructionPayload::default();
-    let result = PromptAssembler::assemble(
-        "BASELINE",
-        &payload,
-        &["INLINE".to_string()],
-        Some("SESSION"),
-        None,
-        "RUNTIME",
-    );
-    let baseline_pos = result.find("BASELINE").unwrap();
+    let client_pos = section_position(&result, "## 9. Client Injection");
+    let repo_pos = result.find("repo content").unwrap();
     let inline_pos = result.find("INLINE").unwrap();
     let session_pos = result.find("SESSION").unwrap();
-    assert!(baseline_pos < inline_pos);
+    let skill_pos = result.find("SKILLS").unwrap();
+    assert!(client_pos < repo_pos);
+    assert!(repo_pos < inline_pos);
     assert!(inline_pos < session_pos);
-}
-
-#[test]
-fn prompt_layer_ordering_skills_between_session_and_runtime() {
-    let payload = RepoInstructionPayload::default();
-    let result = PromptAssembler::assemble(
-        "BASELINE",
-        &payload,
-        &[],
-        Some("SESSION"),
-        Some("<skill_content name=\"review\">\nUse the review checklist\n</skill_content>"),
-        "RUNTIME",
-    );
-    let session_pos = result.find("SESSION").unwrap();
-    let skill_pos = result.find("<skill_content name=\"review\">").unwrap();
-    let runtime_pos = result.find("RUNTIME").unwrap();
     assert!(session_pos < skill_pos);
-    assert!(skill_pos < runtime_pos);
 }
 
 #[test]
-fn absent_layers_omitted() {
+fn provider_guidance_only_appears_in_provider_section() {
     let payload = RepoInstructionPayload::default();
-    let result = PromptAssembler::assemble("BASELINE", &payload, &[], None, None, "");
-    assert!(result.contains("BASELINE"));
-    assert!(!result.contains("<repository_instructions>"));
-    assert!(!result.contains("<runtime_context>"));
+    let result = render_system_prompt(
+        &payload,
+        "RUNTIME",
+        Some("provider fragment"),
+        None,
+        &[],
+        false,
+    );
+    let provider_pos = section_position(&result, "## 7. Provider-Specific Guidance");
+    let communication_pos = section_position(&result, "## 8. Communication & Formatting");
+    let fragment_pos = result.find("provider fragment").unwrap();
+    assert!(provider_pos < fragment_pos);
+    assert!(fragment_pos < communication_pos);
+}
+
+#[test]
+fn client_editing_guidance_overrides_fallback_without_overriding_core() {
+    let payload = RepoInstructionPayload::default();
+    let fallback = render_system_prompt(&payload, "RUNTIME", None, None, &[], false);
+    assert!(fallback.contains("Make the smallest correct change"));
+
+    let custom = render_system_prompt(
+        &payload,
+        "RUNTIME",
+        None,
+        Some("client edit policy"),
+        &[],
+        false,
+    );
+    assert!(custom.contains("client edit policy"));
+    assert!(!custom.contains("Make the smallest correct change"));
+    assert!(custom.contains("## 1. Identity"));
+    assert!(custom.contains("## 6. Safety & Destructive Actions"));
+}
+
+#[test]
+fn client_injection_fragments_render_in_order() {
+    let payload = RepoInstructionPayload::default();
+    let fragments = vec![
+        ClientPromptFragment::titled("First", "alpha"),
+        ClientPromptFragment::new("beta"),
+    ];
+    let result = render_system_prompt(&payload, "RUNTIME", None, None, &fragments, false);
+    let first_pos = result.find("### First").unwrap();
+    let alpha_pos = result.find("alpha").unwrap();
+    let beta_pos = result.find("beta").unwrap();
+    assert!(first_pos < alpha_pos);
+    assert!(alpha_pos < beta_pos);
 }
 
 #[test]
@@ -143,6 +213,9 @@ fn prompt_composition_config_defaults() {
     assert!(config.repo_instructions.enabled);
     assert!(config.additional_files.is_empty());
     assert!(config.additional_inline.is_empty());
+    assert!(config.provider_guidance.is_none());
+    assert!(config.client_editing_guidance.is_none());
+    assert!(config.client_injections.is_empty());
     assert!(config.protected_resources.contains(&".git".to_string()));
     assert!(config.protected_resources.contains(&".ssh".to_string()));
     assert!(config.protected_resources.contains(&".env".to_string()));
@@ -303,7 +376,7 @@ fn baseline_prompt_describes_sandbox_boundary() {
 fn request_builder_composes_instructions() {
     let config = Config::default();
     let registry = iron_core::ToolRegistry::new();
-    let messages: Vec<iron_providers::Message> = vec![];
+    let messages: Vec<Message> = vec![];
     let result = iron_core::request_builder::build_inference_request(
         &config,
         &messages,
@@ -377,11 +450,24 @@ fn prompt_composition_builder_chaining() {
     let config = PromptCompositionConfig::new()
         .with_repo_instructions(RepoInstructionConfig::new().with_enabled(false))
         .with_additional_inline(vec!["inline block".to_string()])
-        .with_protected_resources(vec![".secret".to_string()]);
+        .with_protected_resources(vec![".secret".to_string()])
+        .with_provider_guidance("provider guidance")
+        .with_client_editing_guidance("client editing")
+        .with_client_injections(vec![ClientPromptFragment::titled("Client", "markdown")]);
 
     assert!(!config.repo_instructions.enabled);
     assert_eq!(config.additional_inline, vec!["inline block"]);
     assert_eq!(config.protected_resources, vec![".secret"]);
+    assert_eq!(
+        config.provider_guidance.as_deref(),
+        Some("provider guidance")
+    );
+    assert_eq!(
+        config.client_editing_guidance.as_deref(),
+        Some("client editing")
+    );
+    assert_eq!(config.client_injections[0].title.as_deref(), Some("Client"));
+    assert_eq!(config.client_injections[0].markdown, "markdown");
 }
 
 #[test]
@@ -437,7 +523,7 @@ fn runtime_context_falls_back_to_current_dir_when_no_roots() {
 fn request_builder_uses_configured_workspace_roots() {
     let config = Config::default().with_workspace_roots(vec![PathBuf::from("/configured/root")]);
     let registry = iron_core::ToolRegistry::new();
-    let messages: Vec<iron_providers::Message> = vec![];
+    let messages: Vec<Message> = vec![];
     let result = iron_core::request_builder::build_inference_request(
         &config,
         &messages,
@@ -456,5 +542,167 @@ fn request_builder_uses_configured_workspace_roots() {
         instr.contains("Workspace root: /configured/root"),
         "request builder should pass workspace roots, got: {}",
         instr
+    );
+}
+
+#[test]
+fn request_builder_uses_sectioned_system_prompt() {
+    let prompt_config = PromptCompositionConfig::default()
+        .with_provider_guidance("provider guidance")
+        .with_client_editing_guidance("client editing")
+        .with_client_injections(vec![ClientPromptFragment::new("client fragment")]);
+    let config = Config::default().with_prompt_composition(prompt_config);
+    let registry = iron_core::ToolRegistry::new();
+    let messages: Vec<Message> = vec![];
+    let req = iron_core::request_builder::build_inference_request(
+        &config,
+        &messages,
+        Some("session instructions"),
+        &registry,
+    )
+    .unwrap();
+    let instr = req.instructions.unwrap();
+    assert!(instr.contains("## 1. Identity"));
+    assert!(instr.contains("## 7. Provider-Specific Guidance"));
+    assert!(instr.contains("provider guidance"));
+    assert!(instr.contains("client editing"));
+    assert!(instr.contains("client fragment"));
+    assert!(instr.contains("session instructions"));
+}
+
+#[test]
+fn system_prompt_cache_reuses_output_until_inputs_change_or_invalidate() {
+    let payload = RepoInstructionPayload::default();
+    let mut cache = SystemPromptCache::default();
+    let first = cache
+        .render(&SystemPromptInputs {
+            baseline: "BASELINE",
+            runtime_context: "Working directory: /one",
+            repo_payload: &payload,
+            additional_inline: &[],
+            session_instructions: None,
+            skill_instructions: None,
+            provider_guidance: None,
+            client_editing_guidance: None,
+            client_injections: &[],
+            python_exec_available: false,
+        })
+        .to_string();
+    let second = cache
+        .render(&SystemPromptInputs {
+            baseline: "BASELINE",
+            runtime_context: "Working directory: /one",
+            repo_payload: &payload,
+            additional_inline: &[],
+            session_instructions: None,
+            skill_instructions: None,
+            provider_guidance: None,
+            client_editing_guidance: None,
+            client_injections: &[],
+            python_exec_available: false,
+        })
+        .to_string();
+    assert_eq!(first, second);
+
+    let changed = cache
+        .render(&SystemPromptInputs {
+            baseline: "BASELINE",
+            runtime_context: "Working directory: /two",
+            repo_payload: &payload,
+            additional_inline: &[],
+            session_instructions: None,
+            skill_instructions: None,
+            provider_guidance: None,
+            client_editing_guidance: None,
+            client_injections: &[],
+            python_exec_available: false,
+        })
+        .to_string();
+    assert_ne!(first, changed);
+
+    cache.invalidate_working_directory();
+    let after_invalidate = cache
+        .render(&SystemPromptInputs {
+            baseline: "BASELINE",
+            runtime_context: "Working directory: /two",
+            repo_payload: &payload,
+            additional_inline: &[],
+            session_instructions: None,
+            skill_instructions: None,
+            provider_guidance: None,
+            client_editing_guidance: None,
+            client_injections: &[],
+            python_exec_available: false,
+        })
+        .to_string();
+    assert_eq!(changed, after_invalidate);
+}
+
+#[test]
+fn tool_availability_updates_tool_philosophy() {
+    let payload = RepoInstructionPayload::default();
+    let without_python = render_system_prompt(&payload, "RUNTIME", None, None, &[], false);
+    let with_python = render_system_prompt(&payload, "RUNTIME", None, None, &[], true);
+    assert!(without_python.contains("`python_exec` is not currently available"));
+    assert!(with_python.contains("`python_exec` is available"));
+}
+
+#[test]
+fn provider_name_resolves_fragment_from_iron_providers_registry() {
+    let config = Config::default()
+        .with_provider_name("anthropic")
+        .with_model("claude-3-5-sonnet");
+    let registry = iron_core::ToolRegistry::new();
+    let messages: Vec<Message> = vec![];
+    let req =
+        iron_core::request_builder::build_inference_request(&config, &messages, None, &registry)
+            .unwrap();
+    let instr = req.instructions.unwrap();
+    assert!(
+        instr.contains("## 7. Provider-Specific Guidance"),
+        "provider section should exist"
+    );
+    assert!(
+        instr.contains("Anthropic Messages API"),
+        "should include resolved anthropic fragment"
+    );
+}
+
+#[test]
+fn provider_name_unknown_falls_back_to_manual_guidance() {
+    let prompt_config =
+        PromptCompositionConfig::default().with_provider_guidance("manual provider guidance");
+    let config = Config::default()
+        .with_provider_name("nonexistent-provider")
+        .with_prompt_composition(prompt_config);
+    let registry = iron_core::ToolRegistry::new();
+    let messages: Vec<Message> = vec![];
+    let req =
+        iron_core::request_builder::build_inference_request(&config, &messages, None, &registry)
+            .unwrap();
+    let instr = req.instructions.unwrap();
+    assert!(instr.contains("manual provider guidance"));
+}
+
+#[test]
+fn provider_name_overrides_manual_provider_guidance() {
+    let prompt_config = PromptCompositionConfig::default()
+        .with_provider_guidance("manual guidance that should be ignored");
+    let config = Config::default()
+        .with_provider_name("anthropic")
+        .with_prompt_composition(prompt_config);
+    let registry = iron_core::ToolRegistry::new();
+    let messages: Vec<Message> = vec![];
+    let req =
+        iron_core::request_builder::build_inference_request(&config, &messages, None, &registry)
+            .unwrap();
+    let instr = req.instructions.unwrap();
+    assert!(
+        !instr.contains("manual guidance that should be ignored"),
+        "registry fragment should override manual guidance"
+    );
+    assert!(
+        instr.contains("Anthropic Messages API"),
+        "should include resolved anthropic fragment"
     );
 }

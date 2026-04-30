@@ -48,7 +48,11 @@ impl PromptAssembler {
         parts.join("\n\n")
     }
 
-    fn render_repo_instructions(payload: &RepoInstructionPayload) -> String {
+    pub fn render_repo_instructions(payload: &RepoInstructionPayload) -> String {
+        if payload.sources.is_empty() && payload.additional_files.is_empty() {
+            return String::new();
+        }
+
         let mut section = String::from("<repository_instructions>");
         section.push('\n');
 

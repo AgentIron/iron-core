@@ -41,6 +41,10 @@ pub struct Config {
     pub context_window_policy: ContextWindowPolicy,
     /// Model identifier passed to the provider on each inference request.
     pub model: String,
+    /// Provider name (e.g. "openai", "anthropic") used to look up provider-specific
+    /// system prompt fragments from `iron-providers`. When set, the fragment is
+    /// resolved automatically and overrides `prompt_composition.provider_guidance`.
+    pub provider_name: Option<String>,
     /// Default generation settings applied to every inference request.
     pub default_generation: GenerationConfig,
     /// Default tool policy applied when requests include tools.
@@ -71,6 +75,7 @@ impl Default for Config {
             default_approval_strategy: ApprovalStrategy::PerTool,
             context_window_policy: ContextWindowPolicy::default(),
             model: "gpt-4o".to_string(),
+            provider_name: None,
             default_generation: GenerationConfig::default(),
             default_tool_policy: ToolPolicy::Auto,
             context_management: ContextManagementConfig::default(),
@@ -111,6 +116,13 @@ impl Config {
     /// Set the default model identifier used for inference.
     pub fn with_model<S: Into<String>>(mut self, model: S) -> Self {
         self.model = model.into();
+        self
+    }
+
+    /// Set the provider name used to resolve provider-specific system prompt
+    /// fragments from `iron-providers` (e.g. "openai", "anthropic").
+    pub fn with_provider_name<S: Into<String>>(mut self, name: S) -> Self {
+        self.provider_name = Some(name.into());
         self
     }
 

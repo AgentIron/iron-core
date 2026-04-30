@@ -63,6 +63,9 @@ pub struct PromptCompositionConfig {
     pub additional_files: Vec<PathBuf>,
     pub additional_inline: Vec<String>,
     pub protected_resources: Vec<String>,
+    pub provider_guidance: Option<String>,
+    pub client_editing_guidance: Option<String>,
+    pub client_injections: Vec<ClientPromptFragment>,
 }
 
 impl Default for PromptCompositionConfig {
@@ -77,6 +80,9 @@ impl Default for PromptCompositionConfig {
                 ".env".to_string(),
                 ".envrc".to_string(),
             ],
+            provider_guidance: None,
+            client_editing_guidance: None,
+            client_injections: Vec::new(),
         }
     }
 }
@@ -104,6 +110,43 @@ impl PromptCompositionConfig {
     pub fn with_protected_resources(mut self, resources: Vec<String>) -> Self {
         self.protected_resources = resources;
         self
+    }
+
+    pub fn with_provider_guidance<S: Into<String>>(mut self, guidance: S) -> Self {
+        self.provider_guidance = Some(guidance.into());
+        self
+    }
+
+    pub fn with_client_editing_guidance<S: Into<String>>(mut self, guidance: S) -> Self {
+        self.client_editing_guidance = Some(guidance.into());
+        self
+    }
+
+    pub fn with_client_injections(mut self, fragments: Vec<ClientPromptFragment>) -> Self {
+        self.client_injections = fragments;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientPromptFragment {
+    pub title: Option<String>,
+    pub markdown: String,
+}
+
+impl ClientPromptFragment {
+    pub fn new<S: Into<String>>(markdown: S) -> Self {
+        Self {
+            title: None,
+            markdown: markdown.into(),
+        }
+    }
+
+    pub fn titled<T: Into<String>, M: Into<String>>(title: T, markdown: M) -> Self {
+        Self {
+            title: Some(title.into()),
+            markdown: markdown.into(),
+        }
     }
 }
 
