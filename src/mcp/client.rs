@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use reqwest::header::CONTENT_TYPE;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -36,6 +37,66 @@ fn apply_headers(
         }
     }
     builder
+}
+
+async fn decode_http_rpc_response(response: reqwest::Response) -> Result<JsonRpcResponse, String> {
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if content_type
+        .split(';')
+        .any(|part| part.trim() == "text/event-stream")
+    {
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read SSE response body: {}", e))?;
+        return parse_sse_rpc_response(&body);
+    }
+
+    response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse JSON response: {}", e))
+}
+
+fn parse_sse_rpc_response(body: &str) -> Result<JsonRpcResponse, String> {
+    let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
+
+    for event_block in normalized.split("\n\n") {
+        let mut event_type: Option<&str> = None;
+        let mut data_lines = Vec::new();
+
+        for line in event_block.lines() {
+            if line.starts_with(':') || line.is_empty() {
+                continue;
+            }
+
+            if let Some(rest) = line.strip_prefix("event:") {
+                event_type = Some(rest.trim_start());
+                continue;
+            }
+
+            if let Some(rest) = line.strip_prefix("data:") {
+                data_lines.push(rest.trim_start());
+            }
+        }
+
+        if data_lines.is_empty() || matches!(event_type, Some("ping" | "keepalive")) {
+            continue;
+        }
+
+        let payload = data_lines.join("\n");
+        if let Ok(response) = serde_json::from_str(&payload) {
+            return Ok(response);
+        }
+    }
+
+    Err("Failed to parse SSE response: no JSON-RPC data event found".to_string())
 }
 
 /// Type alias for the pending-response waiter map shared across stdio client tasks.
@@ -666,10 +727,7 @@ impl HttpMcpClient {
             .await
             .map_err(|e| format!("HTTP request failed: {}", e))?;
 
-        let rpc_response: JsonRpcResponse = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+        let rpc_response = decode_http_rpc_response(response).await?;
 
         if rpc_response.id != Some(id) {
             // During bootstrap (initialize), some MCP servers return a

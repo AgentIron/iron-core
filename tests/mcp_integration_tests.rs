@@ -1060,6 +1060,103 @@ async fn start_bootstrap_tolerance_http_server(
     port
 }
 
+async fn start_streamable_http_server() -> u16 {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            tokio::spawn(async move {
+                let (_request_line, _headers, body) =
+                    read_http_request_with_body(&mut socket).await;
+
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let method = request
+                    .get("method")
+                    .and_then(|value| value.as_str())
+                    .expect("request should include method");
+                let request_id = request.get("id").and_then(|value| value.as_u64());
+
+                let response = match method {
+                    "initialize" => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {"tools": {"listChanged": true}},
+                            "serverInfo": {"name": "streamable-http", "version": "1.0"}
+                        }
+                    }),
+                    "tools/list" => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {
+                            "tools": [{
+                                "name": "streamable_tool",
+                                "description": "Streamable HTTP tool",
+                                "inputSchema": {"type": "object", "properties": {}}
+                            }]
+                        }
+                    }),
+                    other => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {"code": -32601, "message": format!("unknown method: {}", other)}
+                    }),
+                };
+
+                let sse_body = format!("event: message\r\ndata: {}\r\n\r\n", response);
+                let http_response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{}",
+                    sse_body.len(),
+                    sse_body
+                );
+                let _ = socket.write_all(http_response.as_bytes()).await;
+            });
+        }
+    });
+
+    port
+}
+
+#[tokio::test]
+async fn test_http_mcp_client_parses_streamable_http_sse_response() {
+    let port = start_streamable_http_server().await;
+
+    let config = McpServerConfig {
+        id: "streamable-http".to_string(),
+        label: "Streamable HTTP".to_string(),
+        transport: McpTransport::Http {
+            config: HttpConfig::new(format!("http://127.0.0.1:{}", port)),
+        },
+        enabled_by_default: true,
+        working_dir: None,
+    };
+
+    let client = iron_core::mcp::create_transport_client("streamable-http", &config)
+        .expect("client creation");
+
+    let initialize = client.initialize().await;
+    assert!(
+        initialize.is_ok(),
+        "initialize should parse SSE response: {:?}",
+        initialize
+    );
+
+    let tools = client
+        .list_tools()
+        .await
+        .expect("tools/list should succeed");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "streamable_tool");
+}
+
 #[tokio::test]
 async fn test_http_mcp_client_initialize_accepts_absent_response_id() {
     let port = start_bootstrap_tolerance_http_server(
