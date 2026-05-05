@@ -35,6 +35,40 @@ pub struct FilesystemSkillSource {
     diagnostics: std::sync::Mutex<Vec<SkillDiagnostic>>,
 }
 
+#[derive(serde::Deserialize)]
+struct SkillFrontmatter {
+    id: Option<String>,
+    #[serde(alias = "name")]
+    display_name: String,
+    description: String,
+    #[serde(default)]
+    auto_activate: bool,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    requires_tools: Vec<String>,
+    #[serde(default)]
+    requires_capabilities: Vec<String>,
+    #[serde(default)]
+    requires_trust: bool,
+}
+
+impl SkillFrontmatter {
+    fn into_metadata(self, derived_id: String, origin: SkillOrigin) -> SkillMetadata {
+        SkillMetadata {
+            id: self.id.unwrap_or(derived_id),
+            display_name: self.display_name,
+            description: self.description,
+            origin,
+            auto_activate: self.auto_activate,
+            tags: self.tags,
+            requires_tools: self.requires_tools,
+            requires_capabilities: self.requires_capabilities,
+            requires_trust: self.requires_trust,
+        }
+    }
+}
+
 impl FilesystemSkillSource {
     /// Create a new filesystem skill source.
     pub fn new(root: impl Into<PathBuf>, origin: SkillOrigin) -> Self {
@@ -59,19 +93,14 @@ impl FilesystemSkillSource {
 
         // Split frontmatter from body
         let (frontmatter, body) = split_frontmatter(&content)?;
+        let derived_id = derive_skill_id(path);
 
         // Parse YAML frontmatter
-        let metadata: SkillMetadata = match serde_yaml::from_str(frontmatter) {
-            Ok(m) => m,
+        let metadata: SkillMetadata = match serde_yaml::from_str::<SkillFrontmatter>(frontmatter) {
+            Ok(m) => m.into_metadata(derived_id, self.origin),
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "Failed to parse skill frontmatter, using fallback metadata");
-                // Extract skill name from parent directory or filename
-                let skill_name = path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
+                let skill_name = derive_skill_id(path);
                 self.diagnostics.lock().unwrap().push(SkillDiagnostic {
                     level: crate::skill::DiagnosticLevel::Warning,
                     message: format!(
@@ -264,6 +293,15 @@ impl SkillSource for StaticSkillSource {
     }
 }
 
+fn derive_skill_id(path: &Path) -> String {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .or_else(|| path.file_stem())
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
 /// Split markdown content into YAML frontmatter and body.
 ///
 /// Expects frontmatter delimited by `---` at the start of the file.
@@ -349,6 +387,71 @@ mod tests {
 
         let loaded = source.load("test-skill").unwrap();
         assert_eq!(loaded.body, "# Instructions\nDo something.");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn filesystem_source_derives_missing_id_from_skill_directory() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "iron-core-test-skills-missing-id-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        let skill_dir = temp_dir.join("architecture-patterns");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: architecture-patterns\ndescription: Implement backend architecture patterns\nrequires_trust: true\n---\n# Instructions\nDo something.",
+        )
+        .unwrap();
+
+        let source = FilesystemSkillSource::new(&temp_dir, SkillOrigin::ProjectFilesystem);
+        let skills = source.discover();
+
+        assert_eq!(skills.len(), 1);
+        assert!(skills.contains_key("architecture-patterns"));
+        let metadata = skills.get("architecture-patterns").unwrap();
+        assert_eq!(metadata.id, "architecture-patterns");
+        assert_eq!(metadata.display_name, "architecture-patterns");
+        assert_eq!(
+            metadata.description,
+            "Implement backend architecture patterns"
+        );
+        assert!(metadata.requires_trust);
+        assert!(source.diagnostics().is_empty());
+
+        let loaded = source.load("architecture-patterns").unwrap();
+        assert_eq!(loaded.metadata.id, "architecture-patterns");
+        assert_eq!(loaded.body, "# Instructions\nDo something.");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn filesystem_source_preserves_explicit_id() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "iron-core-test-skills-explicit-id-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        let skill_dir = temp_dir.join("folder-name");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nid: explicit-id\nname: Explicit Skill\ndescription: A test skill\n---\n# Instructions",
+        )
+        .unwrap();
+
+        let source = FilesystemSkillSource::new(&temp_dir, SkillOrigin::ProjectFilesystem);
+        let skills = source.discover();
+
+        assert_eq!(skills.len(), 1);
+        assert!(skills.contains_key("explicit-id"));
+        assert!(!skills.contains_key("folder-name"));
+        assert!(source.diagnostics().is_empty());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
