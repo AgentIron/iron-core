@@ -7,10 +7,11 @@ use crate::plugin::rich_output::transcript_text as plugin_transcript_text;
 use crate::prompt_lifecycle::{
     ApprovalRequest, ApprovalVerdict, PromptLifecycleEvent, PromptSink, ToolUpdateStatus,
 };
+use crate::provider_credential::ProviderPromptContext;
 use crate::runtime::IronRuntime;
 use agent_client_protocol::schema as acp;
 use futures::StreamExt;
-use iron_providers::ProviderEvent;
+use iron_providers::{Provider, ProviderError, ProviderEvent};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use tracing::{info, trace, warn};
@@ -49,11 +50,80 @@ fn tie_off_cancelled(durable: &Arc<Mutex<DurableSession>>) {
 
 pub(crate) struct PromptRunner {
     runtime: IronRuntime,
+    managed_provider: Option<Box<dyn Provider>>,
+    /// Provider context used for auth-failure retry.
+    provider_context: Option<ProviderPromptContext>,
+    #[cfg(test)]
+    retry_provider_factory: Option<Arc<dyn Fn() -> Box<dyn Provider> + Send + Sync>>,
 }
 
 impl PromptRunner {
     pub(crate) fn new(runtime: IronRuntime) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            managed_provider: None,
+            provider_context: None,
+            #[cfg(test)]
+            retry_provider_factory: None,
+        }
+    }
+
+    pub(crate) fn new_managed(
+        runtime: IronRuntime,
+        provider: Box<dyn Provider>,
+        context: ProviderPromptContext,
+    ) -> Self {
+        Self {
+            runtime,
+            managed_provider: Some(provider),
+            provider_context: Some(context),
+            #[cfg(test)]
+            retry_provider_factory: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_managed_with_retry_provider_for_test(
+        runtime: IronRuntime,
+        provider: Box<dyn Provider>,
+        context: ProviderPromptContext,
+        retry_provider_factory: Arc<dyn Fn() -> Box<dyn Provider> + Send + Sync>,
+    ) -> Self {
+        Self {
+            runtime,
+            managed_provider: Some(provider),
+            provider_context: Some(context),
+            retry_provider_factory: Some(retry_provider_factory),
+        }
+    }
+
+    fn provider(&self) -> &dyn Provider {
+        self.managed_provider
+            .as_ref()
+            .map(|p| p.as_ref())
+            .unwrap_or_else(|| self.runtime.provider())
+    }
+
+    async fn auth_failure_is_api_key_backed(&self) -> bool {
+        let Some(context) = self.provider_context.as_ref() else {
+            return false;
+        };
+        matches!(
+            self.runtime.provider_auth_status_for_context(context).await,
+            Some(crate::provider_credential::ProviderAuthStatus::ConfiguredApiKey)
+        )
+    }
+
+    async fn refreshed_provider_for_retry(
+        &self,
+        context: &ProviderPromptContext,
+    ) -> crate::provider_credential::ProviderAuthResult<Box<dyn Provider>> {
+        #[cfg(test)]
+        if let Some(factory) = &self.retry_provider_factory {
+            return Ok(factory());
+        }
+
+        self.runtime.force_refresh_managed_provider(context).await
     }
 
     pub(crate) async fn run(
@@ -143,21 +213,116 @@ impl PromptRunner {
                 }
             };
 
-            let stream = match self.runtime.provider().infer_stream(request).await {
+            let stream = match self.provider().infer_stream(request.clone()).await {
                 Ok(s) => s,
                 Err(e) => {
-                    warn!(error = %e, "Provider inference failed");
+                    if e.is_authentication()
+                        && self.managed_provider.is_some()
+                        && self.provider_context.is_some()
+                        && !self.auth_failure_is_api_key_backed().await
                     {
-                        let mut session = durable.lock();
-                        session.add_agent_text(format!("[Provider error: {}]", e));
+                        warn!(error = %e, "Provider auth failed, attempting force-refresh and retry");
+                        let context = self.provider_context.as_ref().unwrap();
+                        match self.refreshed_provider_for_retry(context).await {
+                            Ok(refreshed_provider) => {
+                                match refreshed_provider.infer_stream(request.clone()).await {
+                                    Ok(s) => s,
+                                    Err(e2) => {
+                                        warn!(error = %e2, "Provider retry failed after refresh");
+                                        {
+                                            let mut session = durable.lock();
+                                            session.add_agent_text(format!(
+                                                "[Provider auth error: {}]",
+                                                e2
+                                            ));
+                                        }
+                                        return acp::StopReason::EndTurn;
+                                    }
+                                }
+                            }
+                            Err(refresh_err) => {
+                                warn!(error = %refresh_err, "Force-refresh failed, cannot retry");
+                                {
+                                    let mut session = durable.lock();
+                                    session.add_agent_text(format!(
+                                        "[Provider auth error: {} (refresh failed: {})]",
+                                        e, refresh_err
+                                    ));
+                                }
+                                return acp::StopReason::EndTurn;
+                            }
+                        }
+                    } else {
+                        warn!(error = %e, "Provider inference failed");
+                        {
+                            let mut session = durable.lock();
+                            session.add_agent_text(format!("[Provider error: {}]", e));
+                        }
+                        return acp::StopReason::EndTurn;
                     }
-                    return acp::StopReason::EndTurn;
                 }
             };
 
             let step = match self.process_provider_stream(durable, sink, stream).await {
-                Ok(s) => s,
-                Err(e) => return e,
+                ProviderStreamOutcome::Step(step) => step,
+                ProviderStreamOutcome::Stop(reason) => return reason,
+                ProviderStreamOutcome::AuthFailureBeforeOutput(error) => {
+                    if self.managed_provider.is_some()
+                        && self.provider_context.is_some()
+                        && !self.auth_failure_is_api_key_backed().await
+                    {
+                        warn!(error = %error, "Provider stream auth failed before output, attempting force-refresh and retry");
+                        let context = self.provider_context.as_ref().unwrap();
+                        let refreshed_provider = match self
+                            .refreshed_provider_for_retry(context)
+                            .await
+                        {
+                            Ok(provider) => provider,
+                            Err(refresh_err) => {
+                                warn!(error = %refresh_err, "Force-refresh failed, cannot retry stream auth failure");
+                                let mut session = durable.lock();
+                                session.add_agent_text(format!(
+                                    "[Provider auth error: {} (refresh failed: {})]",
+                                    error, refresh_err
+                                ));
+                                return acp::StopReason::EndTurn;
+                            }
+                        };
+
+                        let retry_stream = match refreshed_provider.infer_stream(request).await {
+                            Ok(stream) => stream,
+                            Err(retry_error) => {
+                                warn!(error = %retry_error, "Provider retry failed after refresh");
+                                let mut session = durable.lock();
+                                session.add_agent_text(format!(
+                                    "[Provider auth error: {}]",
+                                    retry_error
+                                ));
+                                return acp::StopReason::EndTurn;
+                            }
+                        };
+
+                        match self
+                            .process_provider_stream(durable, sink, retry_stream)
+                            .await
+                        {
+                            ProviderStreamOutcome::Step(step) => step,
+                            ProviderStreamOutcome::Stop(reason) => return reason,
+                            ProviderStreamOutcome::AuthFailureBeforeOutput(retry_error) => {
+                                let mut session = durable.lock();
+                                session.add_agent_text(format!(
+                                    "[Provider auth error: {}]",
+                                    retry_error
+                                ));
+                                return acp::StopReason::EndTurn;
+                            }
+                        }
+                    } else {
+                        let mut session = durable.lock();
+                        session.add_agent_text(format!("[Provider auth error: {}]", error));
+                        return acp::StopReason::EndTurn;
+                    }
+                }
             };
 
             if step.tool_calls.is_empty() {
@@ -245,29 +410,33 @@ impl PromptRunner {
             'static,
             iron_providers::ProviderResult<ProviderEvent>,
         >,
-    ) -> Result<ProviderStep, acp::StopReason> {
+    ) -> ProviderStreamOutcome {
         let mut tool_calls = Vec::new();
         let mut assistant_output = String::new();
+        let mut emitted_output = false;
 
         while let Some(result) = stream.next().await {
             let event = match result {
                 Ok(e) => e,
-                Err(_) => {
-                    if !assistant_output.is_empty() {
-                        let mut session = durable.lock();
-                        session.add_agent_text(&assistant_output);
-                    }
-                    return Err(acp::StopReason::EndTurn);
+                Err(error) => {
+                    return Self::handle_provider_stream_error(
+                        durable,
+                        &mut assistant_output,
+                        emitted_output,
+                        error,
+                    );
                 }
             };
 
             match event {
                 ProviderEvent::Output { content } => {
+                    emitted_output = true;
                     assistant_output.push_str(&content);
                     sink.emit(PromptLifecycleEvent::Output { text: content })
                         .await;
                 }
                 ProviderEvent::ToolCall { call } => {
+                    emitted_output = true;
                     {
                         let mut session = durable.lock();
                         session.propose_tool_call(
@@ -293,15 +462,16 @@ impl PromptRunner {
                         let mut session = durable.lock();
                         session.add_agent_text(&assistant_output);
                     }
-                    return Err(acp::StopReason::EndTurn);
+                    return ProviderStreamOutcome::Stop(acp::StopReason::EndTurn);
                 }
                 ProviderEvent::Complete => {}
-                ProviderEvent::Error { source: _ } => {
-                    if !assistant_output.is_empty() {
-                        let mut session = durable.lock();
-                        session.add_agent_text(&assistant_output);
-                    }
-                    return Err(acp::StopReason::EndTurn);
+                ProviderEvent::Error { source } => {
+                    return Self::handle_provider_stream_error(
+                        durable,
+                        &mut assistant_output,
+                        emitted_output,
+                        source,
+                    );
                 }
             }
         }
@@ -311,7 +481,30 @@ impl PromptRunner {
             session.add_agent_text(&assistant_output);
         }
 
-        Ok(ProviderStep { tool_calls })
+        ProviderStreamOutcome::Step(ProviderStep { tool_calls })
+    }
+
+    fn handle_provider_stream_error(
+        durable: &Arc<Mutex<DurableSession>>,
+        assistant_output: &mut String,
+        emitted_output: bool,
+        error: ProviderError,
+    ) -> ProviderStreamOutcome {
+        if !emitted_output && error.is_authentication() {
+            return ProviderStreamOutcome::AuthFailureBeforeOutput(error);
+        }
+
+        let mut session = durable.lock();
+        if !assistant_output.is_empty() {
+            session.add_agent_text(assistant_output.as_str());
+            assistant_output.clear();
+        }
+        if error.is_authentication() {
+            session.add_agent_text(format!("[Provider auth error: {}]", error));
+        } else {
+            session.add_agent_text(format!("[Provider error: {}]", error));
+        }
+        ProviderStreamOutcome::Stop(acp::StopReason::EndTurn)
     }
 
     async fn handle_permission_flow(
@@ -1371,7 +1564,7 @@ impl PromptRunner {
             )
         };
 
-        match CompactionEngine::execute(input, self.runtime.provider(), &config.model).await {
+        match CompactionEngine::execute(input, self.provider(), &config.model).await {
             Ok((compacted, tail)) => {
                 let mut session = durable.lock();
                 session.apply_compaction(compacted, tail);
@@ -1428,7 +1621,7 @@ impl PromptRunner {
             )
         };
 
-        match CompactionEngine::execute(input, self.runtime.provider(), &config.model).await {
+        match CompactionEngine::execute(input, self.provider(), &config.model).await {
             Ok((compacted, tail)) => {
                 let mut session = durable.lock();
                 session.apply_compaction(compacted, tail);
@@ -1447,4 +1640,418 @@ impl PromptRunner {
 
 struct ProviderStep {
     tool_calls: Vec<iron_providers::ToolCall>,
+}
+
+enum ProviderStreamOutcome {
+    Step(ProviderStep),
+    Stop(acp::StopReason),
+    AuthFailureBeforeOutput(ProviderError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::durable::{DurableSession, SessionId};
+    use crate::ephemeral::EphemeralTurn;
+    use crate::prompt_lifecycle::PromptLifecycleEvent;
+    use crate::provider_credential::domain::ProviderPromptContext;
+    use crate::runtime::IronRuntime;
+    use futures::stream::{self, BoxStream};
+    use futures::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+
+    struct NopSink;
+
+    impl crate::prompt_lifecycle::PromptSink for NopSink {
+        fn emit(
+            &self,
+            _event: PromptLifecycleEvent,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> {
+            Box::pin(async {})
+        }
+
+        fn request_approval(
+            &self,
+            _request: crate::prompt_lifecycle::ApprovalRequest,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = crate::prompt_lifecycle::ApprovalVerdict>>,
+        > {
+            Box::pin(async { crate::prompt_lifecycle::ApprovalVerdict::AllowOnce })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct AuthFailProvider {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    impl Provider for AuthFailProvider {
+        fn infer(
+            &self,
+            _request: iron_providers::InferenceRequest,
+        ) -> iron_providers::ProviderFuture<'_, Vec<iron_providers::ProviderEvent>> {
+            Box::pin(async move { Ok(vec![iron_providers::ProviderEvent::Complete]) })
+        }
+
+        fn infer_stream(
+            &self,
+            _request: iron_providers::InferenceRequest,
+        ) -> iron_providers::ProviderFuture<
+            '_,
+            BoxStream<'static, iron_providers::ProviderResult<iron_providers::ProviderEvent>>,
+        > {
+            let count = self.call_count.fetch_add(1, AtomicOrdering::SeqCst);
+            Box::pin(async move {
+                if count == 0 {
+                    Err(iron_providers::ProviderError::auth("test auth failure"))
+                } else {
+                    Ok(stream::iter(vec![Ok(iron_providers::ProviderEvent::Complete)]).boxed())
+                }
+            })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TransportFailProvider;
+
+    impl Provider for TransportFailProvider {
+        fn infer(
+            &self,
+            _request: iron_providers::InferenceRequest,
+        ) -> iron_providers::ProviderFuture<'_, Vec<iron_providers::ProviderEvent>> {
+            Box::pin(async move { Ok(vec![iron_providers::ProviderEvent::Complete]) })
+        }
+
+        fn infer_stream(
+            &self,
+            _request: iron_providers::InferenceRequest,
+        ) -> iron_providers::ProviderFuture<
+            '_,
+            BoxStream<'static, iron_providers::ProviderResult<iron_providers::ProviderEvent>>,
+        > {
+            Box::pin(async move {
+                Err(iron_providers::ProviderError::transport(
+                    "connection refused",
+                ))
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct StreamEventsProvider {
+        events: Arc<Vec<iron_providers::ProviderResult<iron_providers::ProviderEvent>>>,
+        call_count: Arc<AtomicUsize>,
+    }
+
+    impl StreamEventsProvider {
+        fn new(events: Vec<iron_providers::ProviderResult<iron_providers::ProviderEvent>>) -> Self {
+            Self {
+                events: Arc::new(events),
+                call_count: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.call_count.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    impl Provider for StreamEventsProvider {
+        fn infer(
+            &self,
+            _request: iron_providers::InferenceRequest,
+        ) -> iron_providers::ProviderFuture<'_, Vec<iron_providers::ProviderEvent>> {
+            Box::pin(async move { Ok(vec![iron_providers::ProviderEvent::Complete]) })
+        }
+
+        fn infer_stream(
+            &self,
+            _request: iron_providers::InferenceRequest,
+        ) -> iron_providers::ProviderFuture<
+            '_,
+            BoxStream<'static, iron_providers::ProviderResult<iron_providers::ProviderEvent>>,
+        > {
+            self.call_count.fetch_add(1, AtomicOrdering::SeqCst);
+            let events = (*self.events).clone();
+            Box::pin(async move { Ok(stream::iter(events).boxed()) })
+        }
+    }
+
+    fn make_session_and_ephemeral() -> (Arc<Mutex<DurableSession>>, Arc<Mutex<EphemeralTurn>>) {
+        let session_id = SessionId::new();
+        let durable = Arc::new(Mutex::new(DurableSession::new(session_id)));
+        let ephemeral = Arc::new(Mutex::new(EphemeralTurn::new(session_id)));
+        ephemeral.lock().start();
+        (durable, ephemeral)
+    }
+
+    fn agent_text(durable: &Arc<Mutex<DurableSession>>) -> String {
+        let session = durable.lock();
+        session
+            .to_transcript()
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                iron_providers::Message::Assistant { content } => Some(content.clone()),
+                _ => None,
+            })
+            .collect::<String>()
+    }
+
+    #[tokio::test]
+    async fn non_managed_no_retry_on_auth_error() {
+        let provider = AuthFailProvider {
+            call_count: Arc::new(AtomicUsize::new(0)),
+        };
+        let runtime = IronRuntime::new(Config::default(), provider);
+        let runner = PromptRunner::new(runtime);
+        let (durable, ephemeral) = make_session_and_ephemeral();
+        let sink = NopSink;
+        let config = Config::default();
+
+        let stop = runner.run(&durable, &ephemeral, &sink, &config, 1).await;
+
+        assert_eq!(stop, acp::StopReason::EndTurn);
+        let agent_text = agent_text(&durable);
+        assert!(agent_text.contains("Provider error"));
+        assert!(!agent_text.contains("refresh"));
+    }
+
+    #[tokio::test]
+    async fn managed_no_retry_on_transport_error() {
+        let runtime = IronRuntime::new(Config::default(), TransportFailProvider);
+        let managed_provider = Box::new(TransportFailProvider) as Box<dyn Provider>;
+        let context = ProviderPromptContext {
+            provider_slug: crate::provider_credential::ProviderSlug::new("codex"),
+            model: "test".into(),
+            api_key: None,
+        };
+        let runner = PromptRunner::new_managed(runtime, managed_provider, context);
+        let (durable, ephemeral) = make_session_and_ephemeral();
+        let sink = NopSink;
+        let config = Config::default();
+
+        let stop = runner.run(&durable, &ephemeral, &sink, &config, 1).await;
+
+        assert_eq!(stop, acp::StopReason::EndTurn);
+        let agent_text = agent_text(&durable);
+        assert!(agent_text.contains("Provider error"));
+        assert!(!agent_text.contains("auth"));
+    }
+
+    #[tokio::test]
+    async fn managed_retry_attempted_on_auth_error_with_credential_store() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let provider = AuthFailProvider {
+            call_count: Arc::new(AtomicUsize::new(0)),
+        };
+        let runtime = IronRuntime::new_with_credential_store(Config::default(), provider, store);
+        let managed_provider = Box::new(AuthFailProvider {
+            call_count: Arc::new(AtomicUsize::new(0)),
+        }) as Box<dyn Provider>;
+        let context = ProviderPromptContext {
+            provider_slug: crate::provider_credential::ProviderSlug::new("codex"),
+            model: "test".into(),
+            api_key: None,
+        };
+        let runner = PromptRunner::new_managed(runtime, managed_provider, context);
+        let (durable, ephemeral) = make_session_and_ephemeral();
+        let sink = NopSink;
+        let config = Config::default();
+
+        let stop = runner.run(&durable, &ephemeral, &sink, &config, 1).await;
+
+        assert_eq!(stop, acp::StopReason::EndTurn);
+        let agent_text = agent_text(&durable);
+        assert!(
+            agent_text.contains("auth error") || agent_text.contains("NotConfigured"),
+            "expected auth error or NotConfigured in transcript, got: {}",
+            agent_text
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_retries_stream_auth_failure_before_output() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let runtime = IronRuntime::new_with_credential_store(
+            Config::default(),
+            StreamEventsProvider::new(vec![Ok(iron_providers::ProviderEvent::Complete)]),
+            store,
+        );
+        let initial_provider = StreamEventsProvider::new(vec![Err(
+            iron_providers::ProviderError::auth("expired access token"),
+        )]);
+        let retry_provider = StreamEventsProvider::new(vec![
+            Ok(iron_providers::ProviderEvent::Output {
+                content: "retry ok".into(),
+            }),
+            Ok(iron_providers::ProviderEvent::Complete),
+        ]);
+        let retry_calls = retry_provider.call_count.clone();
+        let context = ProviderPromptContext {
+            provider_slug: crate::provider_credential::ProviderSlug::new("codex"),
+            model: "test".into(),
+            api_key: None,
+        };
+        let runner = PromptRunner::new_managed_with_retry_provider_for_test(
+            runtime,
+            Box::new(initial_provider.clone()),
+            context,
+            Arc::new(move || Box::new(retry_provider.clone())),
+        );
+        let (durable, ephemeral) = make_session_and_ephemeral();
+        let sink = NopSink;
+
+        let stop = runner
+            .run(&durable, &ephemeral, &sink, &Config::default(), 1)
+            .await;
+
+        assert_eq!(stop, acp::StopReason::EndTurn);
+        assert_eq!(initial_provider.call_count(), 1);
+        assert_eq!(retry_calls.load(AtomicOrdering::SeqCst), 1);
+        assert!(agent_text(&durable).contains("retry ok"));
+    }
+
+    #[tokio::test]
+    async fn managed_does_not_retry_stream_auth_failure_after_output() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let runtime = IronRuntime::new_with_credential_store(
+            Config::default(),
+            StreamEventsProvider::new(vec![Ok(iron_providers::ProviderEvent::Complete)]),
+            store,
+        );
+        let initial_provider = StreamEventsProvider::new(vec![
+            Ok(iron_providers::ProviderEvent::Output {
+                content: "partial".into(),
+            }),
+            Err(iron_providers::ProviderError::auth("expired access token")),
+        ]);
+        let retry_calls = Arc::new(AtomicUsize::new(0));
+        let retry_calls_for_factory = retry_calls.clone();
+        let context = ProviderPromptContext {
+            provider_slug: crate::provider_credential::ProviderSlug::new("codex"),
+            model: "test".into(),
+            api_key: None,
+        };
+        let runner = PromptRunner::new_managed_with_retry_provider_for_test(
+            runtime,
+            Box::new(initial_provider.clone()),
+            context,
+            Arc::new(move || {
+                retry_calls_for_factory.fetch_add(1, AtomicOrdering::SeqCst);
+                Box::new(StreamEventsProvider::new(vec![Ok(
+                    iron_providers::ProviderEvent::Complete,
+                )]))
+            }),
+        );
+        let (durable, ephemeral) = make_session_and_ephemeral();
+        let sink = NopSink;
+
+        let stop = runner
+            .run(&durable, &ephemeral, &sink, &Config::default(), 1)
+            .await;
+
+        let text = agent_text(&durable);
+        assert_eq!(stop, acp::StopReason::EndTurn);
+        assert_eq!(initial_provider.call_count(), 1);
+        assert_eq!(retry_calls.load(AtomicOrdering::SeqCst), 0);
+        assert!(text.contains("partial"));
+        assert!(text.contains("Provider auth error"));
+    }
+
+    #[tokio::test]
+    async fn managed_does_not_retry_api_key_backed_auth_failure() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let runtime = IronRuntime::new_with_credential_store(
+            Config::default(),
+            StreamEventsProvider::new(vec![Ok(iron_providers::ProviderEvent::Complete)]),
+            store,
+        );
+        let initial_provider = StreamEventsProvider::new(vec![Err(
+            iron_providers::ProviderError::auth("bad api key"),
+        )]);
+        let retry_calls = Arc::new(AtomicUsize::new(0));
+        let retry_calls_for_factory = retry_calls.clone();
+        let context = ProviderPromptContext {
+            provider_slug: crate::provider_credential::ProviderSlug::new("kimi-code"),
+            model: "test".into(),
+            api_key: Some("sk-test".into()),
+        };
+        let runner = PromptRunner::new_managed_with_retry_provider_for_test(
+            runtime,
+            Box::new(initial_provider.clone()),
+            context,
+            Arc::new(move || {
+                retry_calls_for_factory.fetch_add(1, AtomicOrdering::SeqCst);
+                Box::new(StreamEventsProvider::new(vec![Ok(
+                    iron_providers::ProviderEvent::Complete,
+                )]))
+            }),
+        );
+        let (durable, ephemeral) = make_session_and_ephemeral();
+        let sink = NopSink;
+
+        let stop = runner
+            .run(&durable, &ephemeral, &sink, &Config::default(), 1)
+            .await;
+
+        assert_eq!(stop, acp::StopReason::EndTurn);
+        assert_eq!(initial_provider.call_count(), 1);
+        assert_eq!(retry_calls.load(AtomicOrdering::SeqCst), 0);
+        assert!(agent_text(&durable).contains("Provider auth error"));
+    }
+
+    #[tokio::test]
+    async fn managed_reports_repeated_auth_failure_after_retry() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let runtime = IronRuntime::new_with_credential_store(
+            Config::default(),
+            StreamEventsProvider::new(vec![Ok(iron_providers::ProviderEvent::Complete)]),
+            store,
+        );
+        let initial_provider = StreamEventsProvider::new(vec![Err(
+            iron_providers::ProviderError::auth("expired access token"),
+        )]);
+        let retry_provider = StreamEventsProvider::new(vec![Err(
+            iron_providers::ProviderError::auth("revoked token"),
+        )]);
+        let context = ProviderPromptContext {
+            provider_slug: crate::provider_credential::ProviderSlug::new("codex"),
+            model: "test".into(),
+            api_key: None,
+        };
+        let runner = PromptRunner::new_managed_with_retry_provider_for_test(
+            runtime,
+            Box::new(initial_provider.clone()),
+            context,
+            Arc::new(move || Box::new(retry_provider.clone())),
+        );
+        let (durable, ephemeral) = make_session_and_ephemeral();
+        let sink = NopSink;
+
+        let stop = runner
+            .run(&durable, &ephemeral, &sink, &Config::default(), 1)
+            .await;
+
+        let text = agent_text(&durable);
+        assert_eq!(stop, acp::StopReason::EndTurn);
+        assert!(text.contains("Provider auth error"));
+        assert!(text.contains("revoked token"));
+    }
 }
