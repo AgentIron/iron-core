@@ -10,6 +10,8 @@ use crate::{
         TimelineEntry,
     },
     error::RuntimeError,
+    provider_credential::domain::{ProviderAuthStatus, ProviderPromptContext, ProviderSlug},
+    provider_credential::store::DynCredentialStore,
     runtime::{ConnectionId, IronRuntime},
     tool::Tool,
 };
@@ -465,6 +467,17 @@ impl IronAgent {
     ) -> Self {
         Self {
             runtime: IronRuntime::from_handle(config, provider, handle),
+        }
+    }
+
+    /// Create a new agent with a credential store for managed provider resolution.
+    pub fn new_with_credential_store<P: Provider + 'static>(
+        config: Config,
+        provider: P,
+        credential_store: DynCredentialStore,
+    ) -> Self {
+        Self {
+            runtime: IronRuntime::new_with_credential_store(config, provider, credential_store),
         }
     }
 
@@ -1284,6 +1297,84 @@ impl AgentSession {
         }
     }
 
+    /// Send a text prompt with a managed provider and await completion.
+    ///
+    /// The managed path resolves credentials from the credential store (or uses
+    /// the API key from `provider_context.api_key`) and retries once on auth
+    /// errors after refreshing the stored OAuth token.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use iron_core::facade::{IronAgent, AgentSession};
+    /// use iron_core::provider_credential::domain::{ProviderPromptContext, ProviderSlug};
+    ///
+    /// let session: AgentSession = /* ... */;
+    /// let context = ProviderPromptContext {
+    ///     provider_slug: ProviderSlug::new("kimi-code"),
+    ///     model: "kimi-for-coding".into(),
+    ///     api_key: None,
+    /// };
+    /// let outcome = session.prompt_managed("Explain closures in Rust", context).await;
+    /// ```
+    pub async fn prompt_managed(
+        &self,
+        text: &str,
+        provider_context: ProviderPromptContext,
+    ) -> PromptOutcome {
+        let acp_session_id = acp::SessionId::new(self.id.to_string());
+        let request = acp::PromptRequest::new(
+            acp_session_id,
+            vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
+        );
+        match self
+            .connection
+            .handle_prompt_managed(request, provider_context)
+            .await
+        {
+            Ok(response) => response.stop_reason.into(),
+            Err(_) => PromptOutcome::EndTurn,
+        }
+    }
+
+    /// Send a multimodal prompt with a managed provider and await completion.
+    ///
+    /// Like [`prompt_managed`](AgentSession::prompt_managed) but accepts
+    /// [`ContentBlock`]s for multimodal input (images, files, etc.).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use iron_core::facade::{AgentSession, ContentBlock};
+    /// use iron_core::provider_credential::domain::{ProviderPromptContext, ProviderSlug};
+    ///
+    /// let session: AgentSession = /* ... */;
+    /// let context = ProviderPromptContext {
+    ///     provider_slug: ProviderSlug::new("kimi-code"),
+    ///     model: "kimi-for-coding".into(),
+    ///     api_key: Some("sk-...".into()),
+    /// };
+    /// let blocks = vec![ContentBlock::Text("Describe this image".into())];
+    /// let outcome = session.prompt_with_blocks_managed(&blocks, context).await;
+    /// ```
+    pub async fn prompt_with_blocks_managed(
+        &self,
+        blocks: &[ContentBlock],
+        provider_context: ProviderPromptContext,
+    ) -> PromptOutcome {
+        let acp_session_id = acp::SessionId::new(self.id.to_string());
+        let acp_blocks: Vec<_> = blocks.iter().map(to_acp_content_block).collect();
+        let request = acp::PromptRequest::new(acp_session_id, acp_blocks);
+        match self
+            .connection
+            .handle_prompt_managed(request, provider_context)
+            .await
+        {
+            Ok(response) => response.stop_reason.into(),
+            Err(_) => PromptOutcome::EndTurn,
+        }
+    }
+
     /// Send a text prompt and return a stream of events.
     ///
     /// This is a convenience wrapper that wraps the text as a single text
@@ -1421,6 +1512,127 @@ impl AgentSession {
         (handle, events)
     }
 
+    /// Send a text prompt with a managed provider and return a stream of events.
+    ///
+    /// The managed path resolves credentials from the credential store (or uses
+    /// the API key from `provider_context.api_key`) and retries once on auth
+    /// errors after refreshing the stored OAuth token.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use iron_core::provider_credential::domain::{ProviderPromptContext, ProviderSlug};
+    ///
+    /// let session: AgentSession = /* ... */;
+    /// let context = ProviderPromptContext {
+    ///     provider_slug: ProviderSlug::new("kimi-code"),
+    ///     model: "kimi-for-coding".into(),
+    ///     api_key: None,
+    /// };
+    /// let (handle, mut events) = session.prompt_stream_managed("Hello", context);
+    /// while let Some(event) = events.next().await {
+    ///     // handle PromptEvent
+    /// }
+    /// ```
+    pub fn prompt_stream_managed(
+        &self,
+        text: &str,
+        provider_context: ProviderPromptContext,
+    ) -> (PromptHandle, PromptEvents) {
+        let acp_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
+        self.prompt_stream_with_acp_blocks_managed(acp_blocks, provider_context)
+    }
+
+    /// Send a multimodal prompt with a managed provider and return a stream of events.
+    ///
+    /// Like [`prompt_stream_managed`](AgentSession::prompt_stream_managed) but
+    /// accepts [`ContentBlock`]s for multimodal input.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use iron_core::facade::{AgentSession, ContentBlock};
+    /// use iron_core::provider_credential::domain::{ProviderPromptContext, ProviderSlug};
+    ///
+    /// let session: AgentSession = /* ... */;
+    /// let context = ProviderPromptContext {
+    ///     provider_slug: ProviderSlug::new("kimi-code"),
+    ///     model: "kimi-for-coding".into(),
+    ///     api_key: None,
+    /// };
+    /// let blocks = vec![ContentBlock::Text("Describe this".into())];
+    /// let (handle, mut events) = session.prompt_stream_with_blocks_managed(&blocks, context);
+    /// ```
+    pub fn prompt_stream_with_blocks_managed(
+        &self,
+        blocks: &[ContentBlock],
+        provider_context: ProviderPromptContext,
+    ) -> (PromptHandle, PromptEvents) {
+        let acp_blocks: Vec<_> = blocks.iter().map(to_acp_content_block).collect();
+        self.prompt_stream_with_acp_blocks_managed(acp_blocks, provider_context)
+    }
+
+    /// Shared internal streaming path for managed providers.
+    fn prompt_stream_with_acp_blocks_managed(
+        &self,
+        acp_blocks: Vec<acp::ContentBlock>,
+        provider_context: ProviderPromptContext,
+    ) -> (PromptHandle, PromptEvents) {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let approval_resolvers: Rc<
+            RefCell<HashMap<String, tokio::sync::oneshot::Sender<PermissionVerdict>>>,
+        > = Rc::new(RefCell::new(HashMap::new()));
+
+        let prompt_key = self.id.to_string();
+        self.active_streams.borrow_mut().insert(
+            prompt_key.clone(),
+            StreamPromptState {
+                event_tx: event_tx.clone(),
+                approval_resolvers: approval_resolvers.clone(),
+                tool_name_index: Rc::new(RefCell::new(HashMap::new())),
+            },
+        );
+
+        let status = Rc::new(RefCell::new(PromptStatus::Running));
+        let handle = PromptHandle {
+            approval_resolvers,
+            session: self.clone(),
+            status: status.clone(),
+        };
+        let events = PromptEvents { rx: event_rx };
+
+        let acp_session_id = acp::SessionId::new(self.id.to_string());
+        let request = acp::PromptRequest::new(acp_session_id, acp_blocks);
+
+        let connection = self.connection.clone();
+        let active_streams = self.active_streams.clone();
+        let status_cell = status.clone();
+
+        tokio::task::spawn_local(async move {
+            let outcome = match connection
+                .handle_prompt_managed(request, provider_context)
+                .await
+            {
+                Ok(response) => response.stop_reason.into(),
+                Err(_) => PromptOutcome::EndTurn,
+            };
+
+            {
+                let mut streams = active_streams.borrow_mut();
+                if let Some(state) = streams.remove(&prompt_key) {
+                    let _ = state.event_tx.send(PromptEvent::Complete { outcome });
+                }
+            }
+
+            *status_cell.borrow_mut() = match outcome {
+                PromptOutcome::Cancelled => PromptStatus::Cancelled,
+                _ => PromptStatus::Completed,
+            };
+        });
+
+        (handle, events)
+    }
+
     /// Cancel any active prompt on this session.
     pub async fn cancel(&self) {
         let acp_session_id = acp::SessionId::new(self.id.to_string());
@@ -1457,6 +1669,44 @@ impl AgentSession {
     /// Set the system instructions for this session.
     pub fn set_instructions(&self, instructions: impl Into<String>) {
         self.durable.lock().set_instructions(instructions);
+    }
+
+    // -- Provider Credential APIs --
+
+    /// Get the auth status for a provider.
+    pub async fn provider_auth_status(&self, slug: &ProviderSlug) -> Option<ProviderAuthStatus> {
+        self.connection.runtime().provider_auth_status(slug).await
+    }
+
+    /// Get the auth status for a provider while considering an app-owned API key.
+    pub async fn provider_auth_status_with_api_key(
+        &self,
+        slug: &ProviderSlug,
+        api_key: Option<&str>,
+    ) -> Option<ProviderAuthStatus> {
+        self.connection
+            .runtime()
+            .provider_auth_status_with_api_key(slug, api_key)
+            .await
+    }
+
+    /// Get the auth status for a managed prompt context.
+    pub async fn provider_auth_status_for_context(
+        &self,
+        context: &ProviderPromptContext,
+    ) -> Option<ProviderAuthStatus> {
+        self.connection
+            .runtime()
+            .provider_auth_status_for_context(context)
+            .await
+    }
+
+    /// Disconnect OAuth for a provider without removing API keys.
+    pub async fn disconnect_provider_oauth(&self, slug: &ProviderSlug) {
+        self.connection
+            .runtime()
+            .disconnect_provider_oauth(slug)
+            .await;
     }
 
     // -- Skill APIs --

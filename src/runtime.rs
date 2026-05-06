@@ -14,6 +14,12 @@ use crate::{
     plugin::registry::{PluginAvailabilitySummary, PluginRegistry},
     plugin::status::{PluginInfo, PluginStatus},
     plugin::wasm_host::WasmHost,
+    provider_credential::domain::{
+        ProviderAuthError, ProviderAuthResult, ProviderAuthStatus, ProviderPromptContext,
+        ProviderSlug,
+    },
+    provider_credential::resolver::CredentialResolver,
+    provider_credential::store::DynCredentialStore,
     skill::source::FilesystemSkillSource,
     skill::SkillOrigin,
     skill::{LoadedSkill, SkillCatalog, SkillDiagnostic},
@@ -46,6 +52,7 @@ struct RuntimeInner {
     is_shutdown: AtomicBool,
     shutdown_tx: watch::Sender<bool>,
     active_tasks: Mutex<Vec<JoinHandle<()>>>,
+    resolver: Option<Arc<CredentialResolver>>,
 }
 
 struct ActivePrompt {
@@ -196,6 +203,7 @@ impl IronRuntime {
             is_shutdown: AtomicBool::new(false),
             shutdown_tx,
             active_tasks: Mutex::new(Vec::new()),
+            resolver: None,
         };
 
         let this = Self {
@@ -216,6 +224,22 @@ impl IronRuntime {
         }
 
         this
+    }
+
+    /// Create a new runtime with a credential store for managed provider resolution.
+    pub fn new_with_credential_store<P>(
+        config: Config,
+        provider: P,
+        credential_store: DynCredentialStore,
+    ) -> Self
+    where
+        P: Provider + 'static,
+    {
+        let mut runtime = Self::new(config, provider);
+        if let Some(inner) = Arc::get_mut(&mut runtime.inner) {
+            inner.resolver = Some(Arc::new(CredentialResolver::new(credential_store)));
+        }
+        runtime
     }
 
     /// Create a new runtime using an existing Tokio runtime handle.
@@ -247,6 +271,7 @@ impl IronRuntime {
             is_shutdown: AtomicBool::new(false),
             shutdown_tx,
             active_tasks: Mutex::new(Vec::new()),
+            resolver: None,
         };
 
         let this = Self {
@@ -269,6 +294,24 @@ impl IronRuntime {
         this
     }
 
+    /// Create a new runtime using an existing Tokio runtime handle, with a
+    /// credential store for managed provider resolution.
+    pub fn from_handle_with_credential_store<P>(
+        config: Config,
+        provider: P,
+        handle: tokio::runtime::Handle,
+        credential_store: DynCredentialStore,
+    ) -> Self
+    where
+        P: Provider + 'static,
+    {
+        let mut runtime = Self::from_handle(config, provider, handle);
+        if let Some(inner) = Arc::get_mut(&mut runtime.inner) {
+            inner.resolver = Some(Arc::new(CredentialResolver::new(credential_store)));
+        }
+        runtime
+    }
+
     /// Borrow the validated runtime configuration.
     pub fn config(&self) -> &Config {
         &self.inner.config
@@ -277,6 +320,98 @@ impl IronRuntime {
     /// Borrow the provider implementation used for inference.
     pub fn provider(&self) -> &dyn Provider {
         self.inner.provider.as_ref()
+    }
+
+    /// Resolve a managed provider for the given prompt context.
+    ///
+    /// This looks up credentials, refreshes if needed, and constructs a
+    /// provider from the built-in registry. Returns an error if no resolver
+    /// is configured or if credential resolution fails.
+    pub async fn resolve_managed_provider(
+        &self,
+        context: &ProviderPromptContext,
+    ) -> ProviderAuthResult<Box<dyn Provider>> {
+        let resolver = self.inner.resolver.as_ref().ok_or_else(|| {
+            ProviderAuthError::NotConfigured(context.provider_slug.as_str().to_string())
+        })?;
+
+        let resolved = resolver.resolve(context, context.api_key.clone()).await?;
+        let runtime_config =
+            iron_providers::RuntimeConfig::from_credential(resolved.provider_credential);
+
+        let registry = iron_providers::ProviderRegistry::default();
+        let provider = registry
+            .get(context.provider_slug.as_str(), runtime_config)
+            .map_err(|_e| ProviderAuthError::UnsupportedCredential {
+                provider: context.provider_slug.as_str().to_string(),
+                mode: resolved.mode,
+            })?;
+
+        Ok(provider)
+    }
+
+    /// Get the client-visible auth status for a provider.
+    pub async fn provider_auth_status(&self, slug: &ProviderSlug) -> Option<ProviderAuthStatus> {
+        self.provider_auth_status_with_api_key(slug, None).await
+    }
+
+    /// Get the client-visible auth status for a provider, considering an
+    /// app-owned API key when present.
+    pub async fn provider_auth_status_with_api_key(
+        &self,
+        slug: &ProviderSlug,
+        api_key: Option<&str>,
+    ) -> Option<ProviderAuthStatus> {
+        let resolver = self.inner.resolver.as_ref()?;
+        Some(resolver.status(slug, api_key).await)
+    }
+
+    /// Get the client-visible auth status for a managed prompt context.
+    pub async fn provider_auth_status_for_context(
+        &self,
+        context: &ProviderPromptContext,
+    ) -> Option<ProviderAuthStatus> {
+        self.provider_auth_status_with_api_key(&context.provider_slug, context.api_key.as_deref())
+            .await
+    }
+
+    /// Disconnect OAuth for a provider without removing API keys.
+    pub async fn disconnect_provider_oauth(&self, slug: &ProviderSlug) {
+        if let Some(resolver) = self.inner.resolver.as_ref() {
+            resolver.disconnect_oauth(slug).await;
+        }
+    }
+
+    /// Force-refresh and resolve a managed provider for the given prompt context.
+    ///
+    /// This always refreshes OAuth tokens (if present) before constructing the
+    /// provider, regardless of expiry. Used for auth-failure retry.
+    pub async fn force_refresh_managed_provider(
+        &self,
+        context: &ProviderPromptContext,
+    ) -> ProviderAuthResult<Box<dyn Provider>> {
+        let resolver = self.inner.resolver.as_ref().ok_or_else(|| {
+            ProviderAuthError::NotConfigured(context.provider_slug.as_str().to_string())
+        })?;
+
+        let resolved = resolver.force_refresh(&context.provider_slug).await?;
+        let runtime_config =
+            iron_providers::RuntimeConfig::from_credential(resolved.provider_credential);
+
+        let registry = iron_providers::ProviderRegistry::default();
+        let provider = registry
+            .get(context.provider_slug.as_str(), runtime_config)
+            .map_err(|_e| ProviderAuthError::UnsupportedCredential {
+                provider: context.provider_slug.as_str().to_string(),
+                mode: resolved.mode,
+            })?;
+
+        Ok(provider)
+    }
+
+    /// Borrow the credential resolver, if configured.
+    pub fn credential_resolver(&self) -> Option<&CredentialResolver> {
+        self.inner.resolver.as_ref().map(|arc| arc.as_ref())
     }
 
     /// Borrow the tool registry.
@@ -1042,6 +1177,7 @@ impl std::fmt::Debug for IronRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider_credential::store::ProviderCredentialStore;
     use crate::skill::source::StaticSkillSource;
     use crate::skill::{LoadedSkill, SkillMetadata};
     use futures::stream::{self, BoxStream};
@@ -1188,5 +1324,251 @@ mod tests {
         assert_eq!(skill.origin, SkillOrigin::UserFilesystem);
 
         let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    // -----------------------------------------------------------------------
+    // Managed provider execution path tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn new_with_credential_store_creates_resolver() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let runtime =
+            IronRuntime::new_with_credential_store(Config::default(), MockProvider, store);
+        assert!(runtime.credential_resolver().is_some());
+    }
+
+    #[tokio::test]
+    async fn provider_auth_status_not_configured() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let runtime =
+            IronRuntime::new_with_credential_store(Config::default(), MockProvider, store);
+        let status = runtime
+            .provider_auth_status(&ProviderSlug::new("codex"))
+            .await;
+        assert_eq!(status, Some(ProviderAuthStatus::NotConfigured));
+    }
+
+    #[tokio::test]
+    async fn provider_auth_status_api_key() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        store
+            .set(
+                &ProviderSlug::new("openai"),
+                crate::provider_credential::StoredCredential::ApiKey("sk-test".into()),
+            )
+            .await;
+        let runtime =
+            IronRuntime::new_with_credential_store(Config::default(), MockProvider, store);
+        let status = runtime
+            .provider_auth_status(&ProviderSlug::new("openai"))
+            .await;
+        assert_eq!(status, Some(ProviderAuthStatus::ConfiguredApiKey));
+    }
+
+    #[tokio::test]
+    async fn provider_auth_status_for_context_uses_api_key() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let runtime =
+            IronRuntime::new_with_credential_store(Config::default(), MockProvider, store);
+        let context = ProviderPromptContext {
+            provider_slug: ProviderSlug::new("kimi-code"),
+            model: "kimi-for-coding".into(),
+            api_key: Some("sk-test".into()),
+        };
+
+        let status = runtime.provider_auth_status_for_context(&context).await;
+
+        assert_eq!(status, Some(ProviderAuthStatus::ConfiguredApiKey));
+    }
+
+    #[tokio::test]
+    async fn provider_auth_status_for_context_reports_unsupported_api_key() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let runtime =
+            IronRuntime::new_with_credential_store(Config::default(), MockProvider, store);
+        let context = ProviderPromptContext {
+            provider_slug: ProviderSlug::new("codex"),
+            model: "codex-model".into(),
+            api_key: Some("sk-test".into()),
+        };
+
+        let status = runtime.provider_auth_status_for_context(&context).await;
+
+        assert_eq!(status, Some(ProviderAuthStatus::UnsupportedCredential));
+    }
+
+    #[tokio::test]
+    async fn disconnect_provider_oauth_removes_oauth_only() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let slug = ProviderSlug::new("kimi-code");
+        store
+            .set(
+                &slug,
+                crate::provider_credential::StoredCredential::OAuthBearer(
+                    crate::provider_credential::OAuthTokenSet {
+                        access_token: "at".into(),
+                        refresh_token: "rt".into(),
+                        expires_at: None,
+                        id_token: None,
+                    },
+                ),
+            )
+            .await;
+        let runtime =
+            IronRuntime::new_with_credential_store(Config::default(), MockProvider, store.clone());
+        runtime.disconnect_provider_oauth(&slug).await;
+        let stored = store.get(&slug).await;
+        assert!(stored.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_managed_provider_api_key() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        // kimi-code is a dual-mode provider in the built-in registry
+        let slug = ProviderSlug::new("kimi-code");
+        store
+            .set(
+                &slug,
+                crate::provider_credential::StoredCredential::ApiKey("sk-test".into()),
+            )
+            .await;
+        let runtime =
+            IronRuntime::new_with_credential_store(Config::default(), MockProvider, store);
+        let context = ProviderPromptContext {
+            provider_slug: slug,
+            model: "kimi-for-coding".into(),
+            api_key: None,
+        };
+        let result = runtime.resolve_managed_provider(&context).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolve_managed_provider_kimi_code_oauth() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let slug = ProviderSlug::new("kimi-code");
+        store
+            .set(
+                &slug,
+                crate::provider_credential::StoredCredential::OAuthBearer(
+                    crate::provider_credential::OAuthTokenSet {
+                        access_token: "access-token".into(),
+                        refresh_token: "refresh-token".into(),
+                        expires_at: None,
+                        id_token: None,
+                    },
+                ),
+            )
+            .await;
+        let runtime =
+            IronRuntime::new_with_credential_store(Config::default(), MockProvider, store);
+        let context = ProviderPromptContext {
+            provider_slug: slug,
+            model: "kimi-for-coding".into(),
+            api_key: None,
+        };
+
+        let result = runtime.resolve_managed_provider(&context).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolve_managed_provider_codex_oauth() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let slug = ProviderSlug::new("codex");
+        store
+            .set(
+                &slug,
+                crate::provider_credential::StoredCredential::OAuthBearer(
+                    crate::provider_credential::OAuthTokenSet {
+                        access_token: "access-token".into(),
+                        refresh_token: "refresh-token".into(),
+                        expires_at: None,
+                        id_token: Some("id-token".into()),
+                    },
+                ),
+            )
+            .await;
+        let runtime =
+            IronRuntime::new_with_credential_store(Config::default(), MockProvider, store);
+        let context = ProviderPromptContext {
+            provider_slug: slug,
+            model: "codex-model".into(),
+            api_key: None,
+        };
+
+        let result = runtime.resolve_managed_provider(&context).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolve_managed_provider_missing() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let runtime =
+            IronRuntime::new_with_credential_store(Config::default(), MockProvider, store);
+        let context = ProviderPromptContext {
+            provider_slug: ProviderSlug::new("codex"),
+            model: "codex-model".into(),
+            api_key: None,
+        };
+        let result = runtime.resolve_managed_provider(&context).await;
+        assert!(matches!(result, Err(ProviderAuthError::NotConfigured(ref s)) if s == "codex"),);
+    }
+
+    #[tokio::test]
+    async fn resolve_managed_provider_with_context_api_key() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let runtime =
+            IronRuntime::new_with_credential_store(Config::default(), MockProvider, store);
+        let context = ProviderPromptContext {
+            provider_slug: ProviderSlug::new("kimi-code"),
+            model: "kimi-for-coding".into(),
+            api_key: Some("sk-test-key".into()),
+        };
+        let result = runtime.resolve_managed_provider(&context).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolve_managed_provider_context_api_key_unsupported() {
+        use crate::provider_credential::store::InMemoryCredentialStore;
+        let store: std::sync::Arc<InMemoryCredentialStore> =
+            std::sync::Arc::new(InMemoryCredentialStore::new());
+        let runtime =
+            IronRuntime::new_with_credential_store(Config::default(), MockProvider, store);
+        let context = ProviderPromptContext {
+            provider_slug: ProviderSlug::new("codex"),
+            model: "codex-model".into(),
+            api_key: Some("sk-test".into()),
+        };
+        let result = runtime.resolve_managed_provider(&context).await;
+        assert!(
+            matches!(result, Err(ProviderAuthError::UnsupportedCredential { ref provider, .. }) if provider == "codex"),
+        );
     }
 }

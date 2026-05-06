@@ -1,11 +1,12 @@
 use crate::durable::{DurableSession, SessionId};
 use crate::prompt_lifecycle::AcpPromptSink;
 use crate::prompt_runner::PromptRunner;
+use crate::provider_credential::domain::ProviderPromptContext;
 use crate::runtime::{ConnectionId, IronRuntime};
 use agent_client_protocol::schema as acp;
 use std::cell::RefCell;
 use std::rc::Rc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub trait ClientChannel {
     fn send_notification(
@@ -222,6 +223,75 @@ impl IronConnection {
         let sink = AcpPromptSink::new(acp_session_id.clone(), client);
 
         let runner = PromptRunner::new(self.runtime.clone());
+        let stop_reason = runner
+            .run(&durable, &ephemeral, &sink, &config, max_iterations)
+            .await;
+
+        self.runtime.finish_prompt(iron_session_id);
+
+        if config.context_management.enabled {
+            runner.maybe_compact_post_turn(&durable, &config).await;
+        }
+
+        Ok(acp::PromptResponse::new(stop_reason))
+    }
+
+    pub async fn handle_prompt_managed(
+        &self,
+        args: acp::PromptRequest,
+        provider_context: ProviderPromptContext,
+    ) -> agent_client_protocol::Result<acp::PromptResponse> {
+        debug!(session_id = %args.session_id, provider = %provider_context.provider_slug.as_str(), "Managed prompt received");
+
+        let (iron_session_id, durable) = self.resolve_owned_session(&args.session_id)?;
+
+        let user_blocks: Vec<crate::durable::ContentBlock> = args
+            .prompt
+            .iter()
+            .map(crate::durable::ContentBlock::from_acp_content)
+            .collect();
+        {
+            let mut session = durable.lock();
+            session.add_user_message(user_blocks);
+        }
+
+        let ephemeral = self
+            .runtime
+            .try_start_prompt(iron_session_id)
+            .map_err(|e| {
+                agent_client_protocol::Error::invalid_params().data(serde_json::json!({
+                    "session_id": args.session_id.to_string(),
+                    "error": e.to_string()
+                }))
+            })?;
+
+        let acp_session_id = args.session_id.clone();
+        let client = self.client_channel();
+        let config = self.runtime.config().clone();
+        let max_iterations = config.max_iterations;
+
+        let sink = AcpPromptSink::new(acp_session_id.clone(), client);
+
+        // Resolve the managed provider for this prompt
+        let provider = match self
+            .runtime
+            .resolve_managed_provider(&provider_context)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(error = %e, "Failed to resolve managed provider");
+                {
+                    let mut session = durable.lock();
+                    session.add_agent_text(format!("[Auth error: {}]", e));
+                }
+                self.runtime.finish_prompt(iron_session_id);
+                return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
+            }
+        };
+
+        let runner = PromptRunner::new_managed(self.runtime.clone(), provider, provider_context);
+
         let stop_reason = runner
             .run(&durable, &ephemeral, &sink, &config, max_iterations)
             .await;
