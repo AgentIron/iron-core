@@ -1,0 +1,1 @@
+{"nodes": [], "edges": [{"source": "session_effective_tool_view", "target": "python_exec", "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "openspec/changes/archive/2026-04-09-session-scoped-mcp-support/tasks.md"}], "hyperedges": []}

@@ -1,0 +1,1 @@
+{"nodes": [], "edges": [{"source": "improve_python_exec_guidance", "target": "python_tool_namespace", "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "openspec/changes/archive/2026-04-09-improve-python-exec-guidance/proposal.md"}], "hyperedges": []}

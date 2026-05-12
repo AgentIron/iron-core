@@ -1,0 +1,1 @@
+{"nodes": [], "edges": [{"source": "support_rich_wasm_plugin_output", "target": "wasm_integration_plugins_rich_spec", "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "openspec/changes/archive/2026-04-20-support-rich-wasm-plugin-output/tasks.md", "source_location": null, "weight": 1.0}], "hyperedges": []}

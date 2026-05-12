@@ -1,0 +1,1 @@
+{"nodes": [], "edges": [{"source": "support_runtime_auth_interactions", "target": "wasm_integration_plugins_auth_spec", "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "openspec/changes/archive/2026-04-20-support-runtime-auth-interactions/tasks.md", "source_location": null, "weight": 1.0}], "hyperedges": []}

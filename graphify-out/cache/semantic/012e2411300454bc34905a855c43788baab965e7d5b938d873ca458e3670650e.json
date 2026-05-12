@@ -1,0 +1,1 @@
+{"nodes": [], "edges": [{"source": "session_tool_catalog", "target": "wasm_host", "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "openspec/changes/archive/2026-04-20-fully-implement-mcp-and-wasm-plugins/specs/wasm-integration-plugins/spec.md", "source_location": null, "weight": 1.0}], "hyperedges": []}

@@ -1,0 +1,1 @@
+{"nodes": [], "edges": [{"source": "improve_builtin_tool_efficiency", "target": "multiedit_capability", "relation": "implements", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "openspec/changes/archive/2026-04-20-improve-builtin-tool-efficiency/tasks.md", "source_location": null, "weight": 1.0}], "hyperedges": []}
