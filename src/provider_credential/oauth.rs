@@ -53,7 +53,7 @@ pub fn v1_oauth_metadata(slug: &ProviderSlug) -> Option<OAuthProviderMetadata> {
             issuer: "https://auth.kimi.com".to_string(),
             device_authorization_endpoint: "/oauth/device/code".to_string(),
             token_endpoint: "/oauth/token".to_string(),
-            client_id: "kimi-code-device".to_string(),
+            client_id: "17e5f671-d194-4dfb-9706-5516cb48c098".to_string(),
             scopes: vec![
                 "openid".to_string(),
                 "profile".to_string(),
@@ -398,7 +398,7 @@ mod tests {
     fn v1_metadata_kimi_code() {
         let meta = v1_oauth_metadata(&ProviderSlug::new("kimi-code")).unwrap();
         assert_eq!(meta.issuer, "https://auth.kimi.com");
-        assert_eq!(meta.client_id, "kimi-code-device");
+        assert_eq!(meta.client_id, "17e5f671-d194-4dfb-9706-5516cb48c098");
         assert_eq!(
             meta.device_authorization_url(),
             "https://auth.kimi.com/oauth/device/code"
