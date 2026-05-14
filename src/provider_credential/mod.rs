@@ -19,7 +19,8 @@ pub use domain::{
 };
 pub use oauth::{
     poll_token_exchange, refresh_access_token, start_device_code_flow, v1_oauth_metadata,
-    DeviceCodeInteraction, DeviceCodeStartResult, OAuthProviderMetadata, TokenExchangeResult,
+    DeviceCodeInteraction, DeviceCodeStartResult, OAuthFlowKind, OAuthProviderMetadata,
+    TokenExchangeResult,
 };
 pub use resolver::{CredentialResolver, CredentialSupport, REFRESH_MARGIN};
 pub use store::{

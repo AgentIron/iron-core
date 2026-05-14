@@ -9,7 +9,7 @@ For the high-level supported architecture, see [architecture-overview.md](./arch
 ```toml
 [dependencies]
 iron-core = { git = "https://github.com/AgentIron/iron-core", branch = "main" }
-iron-providers = "0.1.1"
+iron-providers = "0.1.12"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
