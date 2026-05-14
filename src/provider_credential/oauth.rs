@@ -5,8 +5,26 @@
 //! refresh. Clients own the login UX; core owns the metadata and exchange logic.
 
 use crate::provider_credential::domain::{OAuthTokenSet, ProviderAuthError, ProviderSlug};
-use serde::Deserialize;
-use std::time::{Duration, SystemTime};
+use reqwest::header::{CONTENT_TYPE, USER_AGENT};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const CODEX_DEVICE_AUTH_USERCODE_ENDPOINT: &str = "/api/accounts/deviceauth/usercode";
+const CODEX_DEVICE_AUTH_TOKEN_ENDPOINT: &str = "/api/accounts/deviceauth/token";
+const CODEX_DEVICE_VERIFICATION_URI: &str = "https://auth.openai.com/codex/device";
+const CODEX_DEVICE_AUTH_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
+const CODEX_ORIGINATOR: &str = "openclaw";
+const CODEX_USER_AGENT: &str = "openclaw/iron-core";
+
+/// OAuth flow variant used by a provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthFlowKind {
+    /// RFC 8628 device-code grant.
+    GenericDeviceCode,
+    /// OpenAI Codex-specific device auth flow.
+    OpenAiCodexDeviceAuth,
+}
 
 /// V1 OAuth metadata for a provider.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +41,8 @@ pub struct OAuthProviderMetadata {
     pub client_id: String,
     /// Requested scopes.
     pub scopes: Vec<String>,
+    /// Provider-specific flow implementation.
+    pub flow_kind: OAuthFlowKind,
 }
 
 impl OAuthProviderMetadata {
@@ -60,11 +80,12 @@ pub fn v1_oauth_metadata(slug: &ProviderSlug) -> Option<OAuthProviderMetadata> {
                 "email".to_string(),
                 "offline_access".to_string(),
             ],
+            flow_kind: OAuthFlowKind::GenericDeviceCode,
         }),
         "codex" => Some(OAuthProviderMetadata {
             slug: slug.clone(),
             issuer: "https://auth.openai.com".to_string(),
-            device_authorization_endpoint: "/oauth/device/code".to_string(),
+            device_authorization_endpoint: CODEX_DEVICE_AUTH_USERCODE_ENDPOINT.to_string(),
             token_endpoint: "/oauth/token".to_string(),
             client_id: "app_EMoamEEZ73f0CkXaXp7hrann".to_string(),
             scopes: vec![
@@ -73,6 +94,7 @@ pub fn v1_oauth_metadata(slug: &ProviderSlug) -> Option<OAuthProviderMetadata> {
                 "email".to_string(),
                 "offline_access".to_string(),
             ],
+            flow_kind: OAuthFlowKind::OpenAiCodexDeviceAuth,
         }),
         _ => None,
     }
@@ -126,6 +148,18 @@ pub async fn start_device_code_flow(
     metadata: &OAuthProviderMetadata,
     client: &reqwest::Client,
 ) -> Result<DeviceCodeStartResult, ProviderAuthError> {
+    match metadata.flow_kind {
+        OAuthFlowKind::GenericDeviceCode => start_generic_device_code_flow(metadata, client).await,
+        OAuthFlowKind::OpenAiCodexDeviceAuth => {
+            start_codex_device_auth_flow(metadata, client).await
+        }
+    }
+}
+
+async fn start_generic_device_code_flow(
+    metadata: &OAuthProviderMetadata,
+    client: &reqwest::Client,
+) -> Result<DeviceCodeStartResult, ProviderAuthError> {
     let body = encode_form(&[
         ("client_id", metadata.client_id.as_str()),
         ("scope", metadata.scopes.join(" ").as_str()),
@@ -175,6 +209,88 @@ pub async fn start_device_code_flow(
     })
 }
 
+async fn start_codex_device_auth_flow(
+    metadata: &OAuthProviderMetadata,
+    client: &reqwest::Client,
+) -> Result<DeviceCodeStartResult, ProviderAuthError> {
+    let response = client
+        .post(metadata.device_authorization_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header("originator", CODEX_ORIGINATOR)
+        .header(USER_AGENT, CODEX_USER_AGENT)
+        .json(&serde_json::json!({ "client_id": metadata.client_id.as_str() }))
+        .send()
+        .await
+        .map_err(|e| ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("Codex device-auth start request failed: {}", e),
+        })?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("failed to read Codex device-auth response: {}", e),
+        })?;
+
+    if !status.is_success() {
+        return Err(ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("Codex device-auth start failed ({}): {}", status, body),
+        });
+    }
+
+    let parsed: Value =
+        serde_json::from_str(&body).map_err(|e| ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("failed to parse Codex device-auth response: {}", e),
+        })?;
+
+    let device_auth_id = parsed
+        .get("device_auth_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: "Codex device-auth response missing device_auth_id".to_string(),
+        })?
+        .to_string();
+    let user_code = parsed
+        .get("user_code")
+        .or_else(|| parsed.get("usercode"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: "Codex device-auth response missing user_code".to_string(),
+        })?
+        .to_string();
+    let expires_in_secs = parsed
+        .get("expires_in")
+        .and_then(Value::as_u64)
+        .or_else(|| codex_expires_at_to_secs(parsed.get("expires_at")))
+        .unwrap_or(600);
+    let state = CodexDeviceAuthState {
+        device_auth_id,
+        user_code: user_code.clone(),
+    };
+    let device_code =
+        serde_json::to_string(&state).map_err(|e| ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("failed to encode Codex device-auth state: {}", e),
+        })?;
+
+    Ok(DeviceCodeStartResult {
+        device_code,
+        interaction: DeviceCodeInteraction {
+            verification_uri: CODEX_DEVICE_VERIFICATION_URI.to_string(),
+            user_code,
+            expires_in_secs,
+            interval_secs: parsed.get("interval").and_then(Value::as_u64).unwrap_or(5),
+        },
+    })
+}
+
 /// Result of starting a device-code flow.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceCodeStartResult {
@@ -189,6 +305,21 @@ pub struct DeviceCodeStartResult {
 /// This should be called repeatedly (respecting `interval_secs`) until it
 /// returns either tokens or a terminal error.
 pub async fn poll_token_exchange(
+    metadata: &OAuthProviderMetadata,
+    device_code: &str,
+    client: &reqwest::Client,
+) -> Result<TokenExchangeResult, ProviderAuthError> {
+    match metadata.flow_kind {
+        OAuthFlowKind::GenericDeviceCode => {
+            poll_generic_token_exchange(metadata, device_code, client).await
+        }
+        OAuthFlowKind::OpenAiCodexDeviceAuth => {
+            poll_codex_device_auth_exchange(metadata, device_code, client).await
+        }
+    }
+}
+
+async fn poll_generic_token_exchange(
     metadata: &OAuthProviderMetadata,
     device_code: &str,
     client: &reqwest::Client,
@@ -226,8 +357,8 @@ pub async fn poll_token_exchange(
             reason: format!("failed to parse token response: {}", e),
         })?;
 
-    if let Some(error) = parsed.error {
-        let reason = match error.as_str() {
+    if let Some(error) = parsed.error.as_deref() {
+        let reason = match error {
             "authorization_pending" => "authorization pending".to_string(),
             "slow_down" => "polling too fast".to_string(),
             "expired_token" => "device code expired".to_string(),
@@ -247,23 +378,143 @@ pub async fn poll_token_exchange(
         });
     }
 
-    let access_token = parsed
-        .access_token
-        .ok_or_else(|| ProviderAuthError::RefreshFailed {
+    let access_token =
+        parsed
+            .access_token
+            .clone()
+            .ok_or_else(|| ProviderAuthError::RefreshFailed {
+                provider: metadata.slug.as_str().to_string(),
+                reason: "token response missing access_token".to_string(),
+            })?;
+
+    Ok(token_response_to_result(parsed, access_token))
+}
+
+async fn poll_codex_device_auth_exchange(
+    metadata: &OAuthProviderMetadata,
+    device_code: &str,
+    client: &reqwest::Client,
+) -> Result<TokenExchangeResult, ProviderAuthError> {
+    let state: CodexDeviceAuthState =
+        serde_json::from_str(device_code).map_err(|e| ProviderAuthError::RefreshFailed {
             provider: metadata.slug.as_str().to_string(),
-            reason: "token response missing access_token".to_string(),
+            reason: format!("invalid Codex device-auth state: {}", e),
         })?;
 
-    let expires_at = parsed
-        .expires_in
-        .map(|secs| SystemTime::now() + Duration::from_secs(secs));
+    let response = client
+        .post(resolve_url(
+            &metadata.issuer,
+            CODEX_DEVICE_AUTH_TOKEN_ENDPOINT,
+        ))
+        .header(CONTENT_TYPE, "application/json")
+        .header("originator", CODEX_ORIGINATOR)
+        .header(USER_AGENT, CODEX_USER_AGENT)
+        .json(&serde_json::json!({
+            "device_auth_id": state.device_auth_id,
+            "user_code": state.user_code,
+        }))
+        .send()
+        .await
+        .map_err(|e| ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("Codex device-auth poll request failed: {}", e),
+        })?;
 
-    Ok(TokenExchangeResult {
-        access_token,
-        refresh_token: parsed.refresh_token.unwrap_or_default(),
-        expires_at,
-        id_token: parsed.id_token,
-    })
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("failed to read Codex device-auth poll response: {}", e),
+        })?;
+
+    if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::NOT_FOUND {
+        return Err(ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: "authorization pending".to_string(),
+        });
+    }
+
+    if !status.is_success() {
+        return Err(ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("Codex device-auth poll failed ({}): {}", status, body),
+        });
+    }
+
+    let parsed: CodexAuthorizationResponse =
+        serde_json::from_str(&body).map_err(|e| ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("failed to parse Codex device-auth poll response: {}", e),
+        })?;
+
+    exchange_codex_authorization_code(metadata, parsed, client).await
+}
+
+async fn exchange_codex_authorization_code(
+    metadata: &OAuthProviderMetadata,
+    authorization: CodexAuthorizationResponse,
+    client: &reqwest::Client,
+) -> Result<TokenExchangeResult, ProviderAuthError> {
+    let body = encode_form(&[
+        ("grant_type", "authorization_code"),
+        ("code", authorization.authorization_code.as_str()),
+        ("redirect_uri", CODEX_DEVICE_AUTH_REDIRECT_URI),
+        ("client_id", metadata.client_id.as_str()),
+        ("code_verifier", authorization.code_verifier.as_str()),
+    ]);
+
+    let response = client
+        .post(metadata.token_url())
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("Codex token exchange request failed: {}", e),
+        })?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("failed to read Codex token exchange response: {}", e),
+        })?;
+
+    let parsed: TokenResponse =
+        serde_json::from_str(&body).map_err(|e| ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("failed to parse Codex token exchange response: {}", e),
+        })?;
+
+    if let Some(error) = parsed.error.as_deref() {
+        return Err(ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("Codex token exchange error: {}", error),
+        });
+    }
+
+    if !status.is_success() {
+        return Err(ProviderAuthError::RefreshFailed {
+            provider: metadata.slug.as_str().to_string(),
+            reason: format!("Codex token exchange failed ({}): {}", status, body),
+        });
+    }
+
+    let access_token =
+        parsed
+            .access_token
+            .clone()
+            .ok_or_else(|| ProviderAuthError::RefreshFailed {
+                provider: metadata.slug.as_str().to_string(),
+                reason: "Codex token response missing access_token".to_string(),
+            })?;
+
+    Ok(token_response_to_result(parsed, access_token))
 }
 
 /// Refresh an OAuth access token using a refresh token.
@@ -308,23 +559,30 @@ pub async fn refresh_access_token(
             reason: format!("failed to parse refresh response: {}", e),
         })?;
 
-    let access_token = parsed
-        .access_token
-        .ok_or_else(|| ProviderAuthError::RefreshFailed {
-            provider: metadata.slug.as_str().to_string(),
-            reason: "refresh response missing access_token".to_string(),
-        })?;
+    let access_token =
+        parsed
+            .access_token
+            .clone()
+            .ok_or_else(|| ProviderAuthError::RefreshFailed {
+                provider: metadata.slug.as_str().to_string(),
+                reason: "refresh response missing access_token".to_string(),
+            })?;
 
+    Ok(token_response_to_result(parsed, access_token))
+}
+
+fn token_response_to_result(parsed: TokenResponse, access_token: String) -> TokenExchangeResult {
     let expires_at = parsed
         .expires_in
-        .map(|secs| SystemTime::now() + Duration::from_secs(secs));
+        .map(|secs| SystemTime::now() + Duration::from_secs(secs))
+        .or_else(|| jwt_expiration(&access_token));
 
-    Ok(TokenExchangeResult {
+    TokenExchangeResult {
         access_token,
         refresh_token: parsed.refresh_token.unwrap_or_default(),
         expires_at,
         id_token: parsed.id_token,
-    })
+    }
 }
 
 /// Result of a successful token exchange or refresh.
@@ -388,11 +646,74 @@ struct TokenResponse {
     error: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct CodexDeviceAuthState {
+    device_auth_id: String,
+    user_code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexAuthorizationResponse {
+    authorization_code: String,
+    code_verifier: String,
+}
+
+fn codex_expires_at_to_secs(value: Option<&Value>) -> Option<u64> {
+    let expires_at = value?;
+    let expires = if let Some(timestamp) = expires_at.as_u64() {
+        UNIX_EPOCH + Duration::from_secs(timestamp)
+    } else if let Some(timestamp) = expires_at.as_str() {
+        let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
+        SystemTime::from(parsed)
+    } else {
+        return None;
+    };
+    expires
+        .duration_since(SystemTime::now())
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+fn jwt_expiration(access_token: &str) -> Option<SystemTime> {
+    let payload = access_token.split('.').nth(1)?;
+    let decoded = decode_base64_url(payload)?;
+    let parsed: Value = serde_json::from_slice(&decoded).ok()?;
+    parsed
+        .get("exp")
+        .and_then(Value::as_u64)
+        .map(|exp| UNIX_EPOCH + Duration::from_secs(exp))
+}
+
+fn decode_base64_url(input: &str) -> Option<Vec<u8>> {
+    let mut output = Vec::new();
+    let mut buffer = 0_u32;
+    let mut bits = 0_u8;
+    for byte in input.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            b'=' => break,
+            _ => return None,
+        } as u32;
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            output.push(((buffer >> bits) & 0xff) as u8);
+        }
+    }
+    Some(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
 
     #[test]
     fn v1_metadata_kimi_code() {
@@ -411,6 +732,11 @@ mod tests {
         let meta = v1_oauth_metadata(&ProviderSlug::new("codex")).unwrap();
         assert_eq!(meta.issuer, "https://auth.openai.com");
         assert_eq!(meta.client_id, "app_EMoamEEZ73f0CkXaXp7hrann");
+        assert_eq!(meta.flow_kind, OAuthFlowKind::OpenAiCodexDeviceAuth);
+        assert_eq!(
+            meta.device_authorization_url(),
+            "https://auth.openai.com/api/accounts/deviceauth/usercode"
+        );
     }
 
     #[test]
@@ -511,6 +837,31 @@ mod tests {
         format!("http://{}", address)
     }
 
+    async fn serve_requests(
+        responses: Vec<(&'static str, String)>,
+    ) -> (String, mpsc::UnboundedReceiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0_u8; 4096];
+                let bytes_read = socket.read(&mut buffer).await.unwrap();
+                tx.send(String::from_utf8_lossy(&buffer[..bytes_read]).into_owned())
+                    .unwrap();
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (format!("http://{}", address), rx)
+    }
+
     fn test_metadata(issuer: String) -> OAuthProviderMetadata {
         OAuthProviderMetadata {
             slug: ProviderSlug::new("codex"),
@@ -519,6 +870,19 @@ mod tests {
             token_endpoint: "/token".into(),
             client_id: "client".into(),
             scopes: vec!["openid".into(), "offline_access".into()],
+            flow_kind: OAuthFlowKind::GenericDeviceCode,
+        }
+    }
+
+    fn codex_test_metadata(issuer: String) -> OAuthProviderMetadata {
+        OAuthProviderMetadata {
+            slug: ProviderSlug::new("codex"),
+            issuer,
+            device_authorization_endpoint: CODEX_DEVICE_AUTH_USERCODE_ENDPOINT.into(),
+            token_endpoint: "/oauth/token".into(),
+            client_id: "client".into(),
+            scopes: vec!["openid".into(), "offline_access".into()],
+            flow_kind: OAuthFlowKind::OpenAiCodexDeviceAuth,
         }
     }
 
@@ -547,6 +911,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_codex_device_auth_posts_json_headers_and_returns_interaction() {
+        let (issuer, mut requests) = serve_requests(vec![(
+            "200 OK",
+            r#"{
+                    "device_auth_id": "device-auth-123",
+                    "usercode": "CODE-123",
+                    "expires_in": 900,
+                    "interval": 4
+                }"#
+            .to_string(),
+        )])
+        .await;
+        let metadata = codex_test_metadata(issuer);
+
+        let result = start_device_code_flow(&metadata, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        let request = requests.recv().await.unwrap();
+        assert!(request.starts_with("POST /api/accounts/deviceauth/usercode HTTP/1.1"));
+        assert!(request.contains("content-type: application/json"));
+        assert!(request.contains("originator: openclaw"));
+        assert!(request.contains("user-agent: openclaw/iron-core"));
+        assert!(request.contains(r#"{"client_id":"client"}"#));
+
+        let state: CodexDeviceAuthState = serde_json::from_str(&result.device_code).unwrap();
+        assert_eq!(state.device_auth_id, "device-auth-123");
+        assert_eq!(state.user_code, "CODE-123");
+        assert_eq!(
+            result.interaction.verification_uri,
+            CODEX_DEVICE_VERIFICATION_URI
+        );
+        assert_eq!(result.interaction.user_code, "CODE-123");
+        assert_eq!(result.interaction.expires_in_secs, 900);
+        assert_eq!(result.interaction.interval_secs, 4);
+    }
+
+    #[tokio::test]
     async fn poll_token_exchange_success() {
         let issuer = serve_once(
             "200 OK",
@@ -567,6 +969,76 @@ mod tests {
         assert_eq!(result.access_token, "access-from-device");
         assert_eq!(result.refresh_token, "refresh-from-device");
         assert_eq!(result.id_token, Some("id-from-device".into()));
+        assert!(result.expires_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn poll_codex_device_auth_treats_403_as_pending() {
+        let (issuer, mut requests) = serve_requests(vec![(
+            "403 Forbidden",
+            r#"{"error":"pending"}"#.to_string(),
+        )])
+        .await;
+        let metadata = codex_test_metadata(issuer);
+        let state = serde_json::to_string(&CodexDeviceAuthState {
+            device_auth_id: "device-auth-123".into(),
+            user_code: "CODE-123".into(),
+        })
+        .unwrap();
+
+        let result = poll_token_exchange(&metadata, &state, &reqwest::Client::new()).await;
+
+        let request = requests.recv().await.unwrap();
+        assert!(request.starts_with("POST /api/accounts/deviceauth/token HTTP/1.1"));
+        assert!(request.contains("originator: openclaw"));
+        assert!(request.contains(r#""device_auth_id":"device-auth-123""#));
+        assert!(request.contains(r#""user_code":"CODE-123""#));
+        assert!(matches!(
+            result,
+            Err(ProviderAuthError::RefreshFailed { reason, .. }) if reason == "authorization pending"
+        ));
+    }
+
+    #[tokio::test]
+    async fn poll_codex_device_auth_exchanges_authorization_code_for_tokens() {
+        let jwt_with_exp = "header.eyJleHAiOjQxMDI0NDQ4MDB9.signature";
+        let token_body = format!(
+            r#"{{"access_token":"{}","refresh_token":"refresh-token","id_token":"id-token"}}"#,
+            jwt_with_exp
+        );
+        let (issuer, mut requests) = serve_requests(vec![
+            (
+                "200 OK",
+                r#"{"authorization_code":"auth-code","code_verifier":"verifier-123"}"#.to_string(),
+            ),
+            ("200 OK", token_body),
+        ])
+        .await;
+        let metadata = codex_test_metadata(issuer);
+        let state = serde_json::to_string(&CodexDeviceAuthState {
+            device_auth_id: "device-auth-123".into(),
+            user_code: "CODE-123".into(),
+        })
+        .unwrap();
+
+        let result = poll_token_exchange(&metadata, &state, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        let poll_request = requests.recv().await.unwrap();
+        let exchange_request = requests.recv().await.unwrap();
+        assert!(poll_request.starts_with("POST /api/accounts/deviceauth/token HTTP/1.1"));
+        assert!(exchange_request.starts_with("POST /oauth/token HTTP/1.1"));
+        assert!(exchange_request.contains("grant_type=authorization_code"));
+        assert!(exchange_request.contains("code=auth-code"));
+        assert!(exchange_request
+            .contains("redirect_uri=https%3A%2F%2Fauth.openai.com%2Fdeviceauth%2Fcallback"));
+        assert!(exchange_request.contains("client_id=client"));
+        assert!(exchange_request.contains("code_verifier=verifier-123"));
+
+        assert_eq!(result.access_token, jwt_with_exp);
+        assert_eq!(result.refresh_token, "refresh-token");
+        assert_eq!(result.id_token, Some("id-token".into()));
         assert!(result.expires_at.is_some());
     }
 

@@ -28,7 +28,7 @@ Use the git dependency for now:
 ```toml
 [dependencies]
 iron-core = { git = "https://github.com/AgentIron/iron-core", branch = "main" }
-iron-providers = "0.1.1"
+iron-providers = "0.1.12"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
@@ -40,7 +40,7 @@ If you need the built-in `python_exec` tool, enable the feature explicitly:
 ```toml
 [dependencies]
 iron-core = { git = "https://github.com/AgentIron/iron-core", branch = "main", features = ["embedded-python"] }
-iron-providers = "0.1.1"
+iron-providers = "0.1.12"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
