@@ -71,15 +71,10 @@ pub fn v1_oauth_metadata(slug: &ProviderSlug) -> Option<OAuthProviderMetadata> {
         "kimi-code" => Some(OAuthProviderMetadata {
             slug: slug.clone(),
             issuer: "https://auth.kimi.com".to_string(),
-            device_authorization_endpoint: "/oauth/device/code".to_string(),
-            token_endpoint: "/oauth/token".to_string(),
+            device_authorization_endpoint: "/api/oauth/device_authorization".to_string(),
+            token_endpoint: "/api/oauth/token".to_string(),
             client_id: "17e5f671-d194-4dfb-9706-5516cb48c098".to_string(),
-            scopes: vec![
-                "openid".to_string(),
-                "profile".to_string(),
-                "email".to_string(),
-                "offline_access".to_string(),
-            ],
+            scopes: vec![],
             flow_kind: OAuthFlowKind::GenericDeviceCode,
         }),
         "codex" => Some(OAuthProviderMetadata {
@@ -722,9 +717,10 @@ mod tests {
         assert_eq!(meta.client_id, "17e5f671-d194-4dfb-9706-5516cb48c098");
         assert_eq!(
             meta.device_authorization_url(),
-            "https://auth.kimi.com/oauth/device/code"
+            "https://auth.kimi.com/api/oauth/device_authorization"
         );
-        assert_eq!(meta.token_url(), "https://auth.kimi.com/oauth/token");
+        assert_eq!(meta.token_url(), "https://auth.kimi.com/api/oauth/token");
+        assert!(meta.scopes.is_empty());
     }
 
     #[test]
