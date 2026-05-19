@@ -413,7 +413,9 @@ async fn start_fake_sse_server() -> FakeSseServer {
                         };
 
                         socket
-                            .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                            .write_all(
+                                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
                             .await
                             .unwrap();
 
@@ -832,16 +834,23 @@ async fn stdio_call_tool_preserves_server_error_details_and_correlates_responses
 
 #[tokio::test]
 async fn sse_startup_failure_fails_fast() {
-    let unused_port = {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap().port()
-    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            let _ = read_http_request(&mut socket).await;
+            socket
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        }
+    });
 
     let config = McpServerConfig {
         id: "broken-sse".to_string(),
         label: "Broken SSE".to_string(),
         transport: McpTransport::HttpSse {
-            config: HttpConfig::new(format!("http://127.0.0.1:{}", unused_port)),
+            config: HttpConfig::new(format!("http://{}", addr)),
         },
         enabled_by_default: true,
         working_dir: None,
@@ -860,6 +869,7 @@ async fn sse_startup_failure_fails_fast() {
     );
 
     client.close().await;
+    handle.await.unwrap();
 }
 
 /// Fake SSE server that can handle multiple concurrent POST requests and
@@ -903,7 +913,9 @@ async fn start_concurrent_sse_server() -> FakeSseServer {
 
                         // Return 202 immediately
                         socket
-                            .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                            .write_all(
+                                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
                             .await
                             .unwrap();
 
@@ -1312,7 +1324,9 @@ async fn start_sse_server_null_id() -> FakeSseServer {
                         };
 
                         socket
-                            .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                            .write_all(
+                                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
                             .await
                             .unwrap();
 
@@ -1418,7 +1432,9 @@ async fn start_sse_server_explicit_null_id() -> FakeSseServer {
                         };
 
                         socket
-                            .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                            .write_all(
+                                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
                             .await
                             .unwrap();
 
