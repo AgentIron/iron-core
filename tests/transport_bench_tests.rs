@@ -1,14 +1,37 @@
+use futures::StreamExt;
 use iron_core::{
     runtime::IronRuntime,
     transport::{create_in_process_transport, InProcessClientHandler, InProcessTransport},
     Config,
 };
-use iron_providers::{OpenAiConfig, OpenAiProvider};
+use iron_providers::{Provider, ProviderEvent};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Instant;
 
 use agent_client_protocol::schema as acp;
+
+#[derive(Clone, Copy)]
+struct TestProvider;
+
+impl Provider for TestProvider {
+    fn infer(
+        &self,
+        _request: iron_providers::InferenceRequest,
+    ) -> iron_providers::ProviderFuture<'_, Vec<ProviderEvent>> {
+        Box::pin(async { Ok(vec![ProviderEvent::Complete]) })
+    }
+
+    fn infer_stream(
+        &self,
+        _request: iron_providers::InferenceRequest,
+    ) -> iron_providers::ProviderFuture<
+        '_,
+        futures::stream::BoxStream<'static, iron_providers::ProviderResult<ProviderEvent>>,
+    > {
+        Box::pin(async { Ok(futures::stream::iter(vec![Ok(ProviderEvent::Complete)]).boxed()) })
+    }
+}
 
 struct NopClient;
 
@@ -37,9 +60,7 @@ impl InProcessClientHandler for NopClient {
 
 fn make_runtime() -> IronRuntime {
     let config = Config::new().with_model("test-model");
-    let provider = OpenAiProvider::new(OpenAiConfig::new("test-key".into()))
-        .expect("test provider config should be valid");
-    IronRuntime::new(config, provider)
+    IronRuntime::new(config, TestProvider)
 }
 
 async fn setup() -> InProcessTransport {

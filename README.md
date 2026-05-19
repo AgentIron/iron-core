@@ -28,7 +28,7 @@ Use the git dependency for now:
 ```toml
 [dependencies]
 iron-core = { git = "https://github.com/AgentIron/iron-core", branch = "main" }
-iron-providers = "0.1.12"
+iron-providers = "0.2.2"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
@@ -40,7 +40,7 @@ If you need the built-in `python_exec` tool, enable the feature explicitly:
 ```toml
 [dependencies]
 iron-core = { git = "https://github.com/AgentIron/iron-core", branch = "main", features = ["embedded-python"] }
-iron-providers = "0.1.12"
+iron-providers = "0.2.2"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
@@ -49,13 +49,16 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 ```rust,ignore
 use iron_core::{Config, FunctionTool, IronAgent, PromptEvent, ToolDefinition};
-use iron_providers::{OpenAiConfig, OpenAiProvider};
+use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
 use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::new().with_model("gpt-4o");
-    let provider = OpenAiProvider::new(OpenAiConfig::new(std::env::var("OPENAI_API_KEY")?));
+    let provider = ProviderConnection::from_profile(
+        ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"),
+        RuntimeConfig::new(std::env::var("OPENAI_API_KEY")?),
+    )?;
     let agent = IronAgent::new(config, provider);
 
     agent.register_tool(FunctionTool::new(
