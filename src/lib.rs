@@ -254,16 +254,17 @@ pub use plugin::{
 };
 
 pub use iron_providers::{
-    GenerationConfig, InferenceRequest, OpenAiConfig, OpenAiConfigSource, OpenAiProvider, Provider,
-    ProviderError, ProviderEvent, RuntimeConfigSource, ToolCall, ToolPolicy, Transcript,
+    GenerationConfig, InferenceRequest, Provider, ProviderConnection, ProviderCredential,
+    ProviderError, ProviderEvent, ProviderRegistry, RuntimeConfig, RuntimeConfigSource, ToolCall,
+    ToolPolicy, Transcript,
 };
 
 pub mod prelude {
     pub use crate::{
         AgentConnection, AgentSession, ApprovalStrategy, Config, ConfigSource, ContentBlock,
-        ContextWindowPolicy, GenerationConfig, IronAgent, OpenAiConfig, OpenAiConfigSource,
-        OpenAiProvider, PermissionVerdict, PromptEvent, PromptEvents, PromptHandle, PromptOutcome,
-        Provider, RuntimeConfigSource, RuntimeError, RuntimeResult, SessionId, Tool,
-        ToolDefinition, ToolPolicy, ToolRegistry, Transcript,
+        ContextWindowPolicy, GenerationConfig, IronAgent, PermissionVerdict, PromptEvent,
+        PromptEvents, PromptHandle, PromptOutcome, Provider, ProviderConnection,
+        ProviderCredential, ProviderRegistry, RuntimeConfig, RuntimeConfigSource, RuntimeError,
+        RuntimeResult, SessionId, Tool, ToolDefinition, ToolPolicy, ToolRegistry, Transcript,
     };
 }

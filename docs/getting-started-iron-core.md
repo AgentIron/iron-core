@@ -9,7 +9,7 @@ For the high-level supported architecture, see [architecture-overview.md](./arch
 ```toml
 [dependencies]
 iron-core = { git = "https://github.com/AgentIron/iron-core", branch = "main" }
-iron-providers = "0.1.12"
+iron-providers = "0.2.2"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
@@ -28,10 +28,14 @@ crates.io release exists.
 
 ```rust
 use iron_core::{Config, IronAgent, PromptEvent};
-use iron_providers::{OpenAiConfig, OpenAiProvider};
+use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
 
 let config = Config::new().with_model("gpt-4o");
-let provider = OpenAiProvider::new(OpenAiConfig::new("sk-example".to_string()));
+let provider = ProviderConnection::from_profile(
+    ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"),
+    RuntimeConfig::new("sk-example"),
+)
+.expect("provider config should be valid");
 let agent = IronAgent::new(config, provider);
 ```
 

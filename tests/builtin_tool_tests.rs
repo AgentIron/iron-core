@@ -1,10 +1,34 @@
+use futures::StreamExt;
 use iron_core::builtin::{
     register_builtin_tools, BuiltinErrorCode, BuiltinToolConfig, BuiltinToolError,
     BuiltinToolPolicy, NetworkPolicy, ShellAvailability,
 };
 use iron_core::tool::{Tool, ToolRegistry};
+use iron_providers::{Provider, ProviderEvent};
 use std::path::PathBuf;
 use tempfile::TempDir;
+
+#[derive(Clone, Copy)]
+struct TestProvider;
+
+impl Provider for TestProvider {
+    fn infer(
+        &self,
+        _request: iron_providers::InferenceRequest,
+    ) -> iron_providers::ProviderFuture<'_, Vec<ProviderEvent>> {
+        Box::pin(async { Ok(vec![ProviderEvent::Complete]) })
+    }
+
+    fn infer_stream(
+        &self,
+        _request: iron_providers::InferenceRequest,
+    ) -> iron_providers::ProviderFuture<
+        '_,
+        futures::stream::BoxStream<'static, iron_providers::ProviderResult<ProviderEvent>>,
+    > {
+        Box::pin(async { Ok(futures::stream::iter(vec![Ok(ProviderEvent::Complete)]).boxed()) })
+    }
+}
 
 fn temp_config() -> (TempDir, BuiltinToolConfig) {
     let tmp = TempDir::new().unwrap();
@@ -540,11 +564,7 @@ fn meta_continuation_includes_offset() {
 #[test]
 fn smoke_test_register_all_builtin_tools_via_agent() {
     let config = iron_core::Config::default();
-    let provider = iron_providers::OpenAiProvider::new(iron_providers::OpenAiConfig::new(
-        "test-key".to_string(),
-    ))
-    .expect("test provider config should be valid");
-    let agent = iron_core::IronAgent::new(config, provider);
+    let agent = iron_core::IronAgent::new(config, TestProvider);
 
     let tmp = TempDir::new().unwrap();
     let builtin_config = BuiltinToolConfig::new(vec![tmp.path().to_path_buf()]);

@@ -428,10 +428,14 @@ struct StreamPromptState {
 ///
 /// ```ignore
 /// use iron_core::{IronAgent, Config};
-/// use iron_providers::{OpenAiProvider, OpenAiConfig};
+/// use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
 ///
 /// let config = Config::default();
-/// let provider = OpenAiProvider::new(OpenAiConfig::new("sk-...".into()));
+/// let provider = ProviderConnection::from_profile(
+///     ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"),
+///     RuntimeConfig::new("sk-..."),
+/// )
+/// .expect("provider config should be valid");
 /// let agent = IronAgent::new(config, provider);
 ///
 /// // Register custom tools

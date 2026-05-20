@@ -1018,6 +1018,8 @@ impl HttpSseMcpClient {
                     }
                 }
             }
+
+            waiters.lock().await.clear();
         });
 
         *task_guard = Some(handle);
