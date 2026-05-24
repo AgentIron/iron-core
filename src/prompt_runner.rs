@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::context::compaction::{CompactionEngine, CompactionReason};
+use crate::connection::SharedClientChannel;
 use crate::durable::DurableSession;
 use crate::ephemeral::EphemeralTurn;
 use crate::mcp::SessionToolCatalog;
@@ -14,7 +14,7 @@ use futures::StreamExt;
 use iron_providers::{Provider, ProviderError, ProviderEvent};
 use parking_lot::Mutex;
 use std::sync::Arc;
-use tracing::{info, trace, warn};
+use tracing::{trace, warn};
 
 const MAX_TOOL_RESULT_SIZE: usize = 10 * 1024 * 1024;
 
@@ -152,10 +152,6 @@ impl PromptRunner {
 
             trace!(iteration, "Starting inference iteration");
 
-            if config.context_management.enabled {
-                self.maybe_compact_hard_fit(durable, config).await;
-            }
-
             let session_id = {
                 let session = durable.lock();
                 session.id
@@ -168,35 +164,72 @@ impl PromptRunner {
             let request = {
                 let session = durable.lock();
                 let instructions = session.instructions.clone();
-                let compacted_context = session.compacted_context.clone();
+                let compressed_blocks = session.compressed_blocks.clone();
                 let repo_payload = session.repo_instruction_payload.clone();
-                let messages = session.to_transcript().messages;
+                let include_visible_ids = tool_catalog
+                    .as_ref()
+                    .map(|catalog| {
+                        catalog
+                            .definitions()
+                            .iter()
+                            .any(|def| def.name == crate::context::compaction::COMPRESS_TOOL_NAME)
+                    })
+                    .unwrap_or(false);
+                let messages = session
+                    .to_transcript_with_visible_ids(include_visible_ids)
+                    .messages;
                 let skill_instructions = session.active_skill_instructions();
                 drop(session);
+
+                let compression_available = tool_catalog
+                    .as_ref()
+                    .map(|catalog| catalog.contains(crate::context::compaction::COMPRESS_TOOL_NAME))
+                    .unwrap_or(false);
+                let tool_registry = self.runtime.tool_registry();
+                let snapshot = crate::context::ActiveContextAccountant::estimate_snapshot(
+                    instructions.as_deref(),
+                    &compressed_blocks,
+                    &messages,
+                    &tool_registry,
+                    None,
+                    config.context_management.context_window_hint,
+                );
+                let context_pressure = snapshot.pressure_with_thresholds(
+                    config.context_management.soft_threshold,
+                    config.context_management.medium_threshold,
+                    config.context_management.strong_threshold,
+                    config.context_management.critical_threshold,
+                );
 
                 if let Some(tool_catalog) = tool_catalog.as_ref() {
                     crate::request_builder::build_inference_request_with_effective_tools(
                         config,
                         &messages,
                         crate::request_builder::EffectiveToolRequestContext {
-                            compacted_context: compacted_context.as_ref(),
+                            compressed_blocks: &compressed_blocks,
                             instructions: instructions.as_deref(),
                             repo_instruction_payload: repo_payload.as_ref(),
                             python_exec_available: tool_catalog.contains("python_exec"),
                             skill_instructions: Some(&skill_instructions),
+                            compression_available,
+                            context_pressure,
                         },
                         tool_catalog.definitions(),
                     )
                 } else {
-                    let tool_registry = self.runtime.tool_registry();
                     crate::request_builder::build_inference_request_with_context_and_repo(
                         config,
                         &messages,
-                        compacted_context.as_ref(),
-                        instructions.as_deref(),
-                        repo_payload.as_ref(),
+                        crate::request_builder::EffectiveToolRequestContext {
+                            compressed_blocks: &compressed_blocks,
+                            instructions: instructions.as_deref(),
+                            repo_instruction_payload: repo_payload.as_ref(),
+                            python_exec_available: tool_registry.contains("python_exec"),
+                            skill_instructions: Some(&skill_instructions),
+                            compression_available,
+                            context_pressure,
+                        },
                         &tool_registry,
-                        Some(&skill_instructions),
                     )
                 }
             };
@@ -216,13 +249,17 @@ impl PromptRunner {
             let stream = match self.provider().infer_stream(request.clone()).await {
                 Ok(s) => s,
                 Err(e) => {
-                    if e.is_authentication()
+                    let retry_context = if e.is_authentication()
                         && self.managed_provider.is_some()
-                        && self.provider_context.is_some()
                         && !self.auth_failure_is_api_key_backed().await
                     {
+                        self.provider_context.as_ref()
+                    } else {
+                        None
+                    };
+
+                    if let Some(context) = retry_context {
                         warn!(error = %e, "Provider auth failed, attempting force-refresh and retry");
-                        let context = self.provider_context.as_ref().unwrap();
                         match self.refreshed_provider_for_retry(context).await {
                             Ok(refreshed_provider) => {
                                 match refreshed_provider.infer_stream(request.clone()).await {
@@ -267,12 +304,16 @@ impl PromptRunner {
                 ProviderStreamOutcome::Step(step) => step,
                 ProviderStreamOutcome::Stop(reason) => return reason,
                 ProviderStreamOutcome::AuthFailureBeforeOutput(error) => {
-                    if self.managed_provider.is_some()
-                        && self.provider_context.is_some()
+                    let retry_context = if self.managed_provider.is_some()
                         && !self.auth_failure_is_api_key_backed().await
                     {
+                        self.provider_context.as_ref()
+                    } else {
+                        None
+                    };
+
+                    if let Some(context) = retry_context {
                         warn!(error = %error, "Provider stream auth failed before output, attempting force-refresh and retry");
-                        let context = self.provider_context.as_ref().unwrap();
                         let refreshed_provider = match self
                             .refreshed_provider_for_retry(context)
                             .await
@@ -817,8 +858,86 @@ impl PromptRunner {
             return;
         }
 
+        if call.tool_name == crate::context::compaction::COMPRESS_TOOL_NAME {
+            self.execute_compress_tool(durable, sink, call).await;
+            return;
+        }
+
         self.execute_standard_tool(durable, sink, call, tool_catalog.as_ref())
             .await;
+    }
+
+    async fn execute_compress_tool(
+        &self,
+        durable: &Arc<Mutex<DurableSession>>,
+        sink: &dyn PromptSink,
+        call: iron_providers::ToolCall,
+    ) {
+        let call_id = call.call_id.clone();
+        let tool_name = call.tool_name.clone();
+        let config = self.runtime.config();
+
+        let result = {
+            let mut session = durable.lock();
+            match crate::context::CompressTool::parse_arguments(&call.arguments).and_then(
+                |(topic, ranges)| {
+                    crate::context::CompressTool::execute(
+                        &mut session,
+                        topic,
+                        ranges,
+                        config.context_management.soft_threshold,
+                        config.context_management.medium_threshold,
+                        config.context_management.strong_threshold,
+                        config.context_management.critical_threshold,
+                    )
+                },
+            ) {
+                Ok(result) => {
+                    let output = serde_json::json!({
+                        "status": "compressed",
+                        "blocks_created": result.blocks_created.iter().map(|block| {
+                            serde_json::json!({
+                                "id": block.id,
+                                "topic": block.topic,
+                                "source_range": block.source_range,
+                            })
+                        }).collect::<Vec<_>>(),
+                        "context_pressure": result.pressure_state,
+                    });
+                    session.complete_tool_call(&call_id, output.clone());
+                    Ok(output)
+                }
+                Err(error) => {
+                    let output = serde_json::json!({
+                        "status": "rejected",
+                        "error": error,
+                    });
+                    session.fail_tool_call(&call_id, output.clone());
+                    Err(output)
+                }
+            }
+        };
+
+        match result {
+            Ok(output) => {
+                sink.emit(PromptLifecycleEvent::ToolCallUpdate {
+                    call_id,
+                    tool_name,
+                    status: ToolUpdateStatus::Completed,
+                    output: Some(output),
+                })
+                .await;
+            }
+            Err(output) => {
+                sink.emit(PromptLifecycleEvent::ToolCallUpdate {
+                    call_id,
+                    tool_name,
+                    status: ToolUpdateStatus::Failed,
+                    output: Some(output),
+                })
+                .await;
+            }
+        }
     }
 
     async fn execute_standard_tool(
@@ -1541,99 +1660,44 @@ impl PromptRunner {
         &self,
         durable: &Arc<Mutex<DurableSession>>,
         config: &Config,
+        client: &SharedClientChannel,
+        acp_session_id: &acp::SessionId,
     ) {
-        let should = {
-            let session = durable.lock();
-            CompactionEngine::should_compact(
-                session.uncompacted_tokens,
-                config.context_management.maintenance_threshold,
-                config.context_management.enabled,
-            ) && session.is_idle()
-        };
-
-        if !should {
+        if !config.context_management.enabled {
             return;
         }
 
-        let input = {
+        let pressure = {
             let session = durable.lock();
-            CompactionEngine::prepare(
-                &session,
-                &config.context_management.tail_retention,
-                CompactionReason::Maintenance,
-            )
-        };
-
-        match CompactionEngine::execute(input, self.provider(), &config.model).await {
-            Ok((compacted, tail)) => {
-                let mut session = durable.lock();
-                session.apply_compaction(compacted, tail);
-                info!(
-                    session_id = %session.id,
-                    tokens = session.uncompacted_tokens,
-                    "Post-turn maintenance compaction applied"
-                );
-            }
-            Err(e) => {
-                warn!("Post-turn compaction failed: {}", e);
-            }
-        }
-    }
-
-    async fn maybe_compact_hard_fit(&self, durable: &Arc<Mutex<DurableSession>>, config: &Config) {
-        let window = match config.context_management.context_window_hint {
-            Some(w) => w,
-            None => return,
-        };
-
-        let needs_compaction = {
-            let session = durable.lock();
-            if !session.is_idle() {
-                return;
-            }
-            let instructions = session.instructions.clone();
-            let compacted = session.compacted_context.clone();
-            let transcript = session.to_transcript();
-            drop(session);
-
-            let tool_registry = self.runtime.tool_registry();
-            let snapshot = crate::context::ContextTelemetry::for_session(
-                instructions.as_deref(),
-                compacted.as_ref(),
-                &transcript.messages,
-                &tool_registry,
+            let messages = session.to_transcript().messages;
+            let snapshot = crate::context::ActiveContextAccountant::estimate_snapshot(
+                session.instructions.as_deref(),
+                &session.compressed_blocks,
+                &messages,
+                &crate::tool::ToolRegistry::new(),
                 None,
-                Some(window),
+                config.context_management.context_window_hint,
             );
-            snapshot.total_tokens > window
-        };
-
-        if !needs_compaction {
-            return;
-        }
-
-        let input = {
-            let session = durable.lock();
-            CompactionEngine::prepare(
-                &session,
-                &config.context_management.tail_retention,
-                CompactionReason::HardFit,
+            snapshot.pressure_with_thresholds(
+                config.context_management.soft_threshold,
+                config.context_management.medium_threshold,
+                config.context_management.strong_threshold,
+                config.context_management.critical_threshold,
             )
         };
 
-        match CompactionEngine::execute(input, self.provider(), &config.model).await {
-            Ok((compacted, tail)) => {
+        if matches!(pressure, crate::context::ContextPressure::Critical) {
+            let error_text = "Context pressure remains critical. Compression did not reduce usage below the threshold. Please start a new session to continue.";
+            {
                 let mut session = durable.lock();
-                session.apply_compaction(compacted, tail);
-                info!(
-                    session_id = %session.id,
-                    tokens = session.uncompacted_tokens,
-                    "Hard-fit compaction applied"
-                );
+                session.add_agent_text(error_text.to_string());
             }
-            Err(e) => {
-                warn!("Hard-fit compaction failed: {}", e);
-            }
+
+            let update = acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                acp::ContentBlock::Text(acp::TextContent::new(error_text)),
+            ));
+            let notification = acp::SessionNotification::new(acp_session_id.clone(), update);
+            let _ = client.send_notification(notification).await;
         }
     }
 }

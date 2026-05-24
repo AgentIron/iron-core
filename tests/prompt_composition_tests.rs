@@ -36,6 +36,8 @@ fn render_system_prompt<'a>(
         client_editing_guidance,
         client_injections,
         python_exec_available,
+        compression_available: false,
+        context_pressure: iron_core::ContextPressure::None,
     })
 }
 
@@ -102,6 +104,8 @@ fn prompt_preserves_repo_and_session_content_inside_client_injection() {
         client_editing_guidance: None,
         client_injections: &[],
         python_exec_available: false,
+        compression_available: false,
+        context_pressure: iron_core::ContextPressure::None,
     });
 
     let client_pos = section_position(&result, "## 9. Client Injection");
@@ -406,7 +410,7 @@ fn handoff_excludes_repo_payload() {
 
     let config = ContextManagementConfig::default();
     let bundle =
-        HandoffExporter::export(&session, "test-model", None, vec![], &config, None).unwrap();
+        HandoffExporter::export(&session, "test-model", &[], vec![], &config, None).unwrap();
     assert_eq!(
         bundle.instructions,
         Some("portable instructions".to_string())
@@ -586,6 +590,8 @@ fn system_prompt_cache_reuses_output_until_inputs_change_or_invalidate() {
             client_editing_guidance: None,
             client_injections: &[],
             python_exec_available: false,
+            compression_available: false,
+            context_pressure: iron_core::ContextPressure::None,
         })
         .to_string();
     let second = cache
@@ -600,6 +606,8 @@ fn system_prompt_cache_reuses_output_until_inputs_change_or_invalidate() {
             client_editing_guidance: None,
             client_injections: &[],
             python_exec_available: false,
+            compression_available: false,
+            context_pressure: iron_core::ContextPressure::None,
         })
         .to_string();
     assert_eq!(first, second);
@@ -616,6 +624,8 @@ fn system_prompt_cache_reuses_output_until_inputs_change_or_invalidate() {
             client_editing_guidance: None,
             client_injections: &[],
             python_exec_available: false,
+            compression_available: false,
+            context_pressure: iron_core::ContextPressure::None,
         })
         .to_string();
     assert_ne!(first, changed);
@@ -633,6 +643,8 @@ fn system_prompt_cache_reuses_output_until_inputs_change_or_invalidate() {
             client_editing_guidance: None,
             client_injections: &[],
             python_exec_available: false,
+            compression_available: false,
+            context_pressure: iron_core::ContextPressure::None,
         })
         .to_string();
     assert_eq!(changed, after_invalidate);

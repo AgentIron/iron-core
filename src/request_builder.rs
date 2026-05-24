@@ -1,17 +1,19 @@
 use crate::{
     config::{Config, ContextWindowPolicy},
-    context::models::CompactedContext,
+    context::models::CompressedBlock,
     error::RuntimeError,
     tool::ToolRegistry,
 };
 use iron_providers::{InferenceRequest, Message, ProviderRegistry, ToolPolicy};
 
 pub struct EffectiveToolRequestContext<'a> {
-    pub compacted_context: Option<&'a CompactedContext>,
+    pub compressed_blocks: &'a [CompressedBlock],
     pub instructions: Option<&'a str>,
     pub repo_instruction_payload: Option<&'a crate::prompt::config::RepoInstructionPayload>,
     pub python_exec_available: bool,
     pub skill_instructions: Option<&'a str>,
+    pub compression_available: bool,
+    pub context_pressure: crate::context::ContextPressure,
 }
 
 /// Build an inference request using an effective tool view.
@@ -26,8 +28,10 @@ pub fn build_inference_request_with_effective_tools(
     apply_context_window_policy(config, &mut pruned)?;
 
     let mut provider_messages = Vec::new();
-    if let Some(summary) = compacted_context_message(context.compacted_context) {
-        provider_messages.push(summary);
+    for block in context.compressed_blocks {
+        provider_messages.push(Message::Assistant {
+            content: block.render_to_text(),
+        });
     }
     provider_messages.extend(pruned);
 
@@ -56,6 +60,8 @@ pub fn build_inference_request_with_effective_tools(
         context.repo_instruction_payload,
         context.python_exec_available,
         context.skill_instructions,
+        context.compression_available,
+        context.context_pressure,
     );
     if !composed.is_empty() {
         request = request.with_instructions(composed);
@@ -73,29 +79,39 @@ pub fn build_inference_request(
     build_inference_request_with_context_and_repo(
         config,
         messages,
-        None,
-        instructions,
-        None,
+        EffectiveToolRequestContext {
+            compressed_blocks: &[],
+            instructions,
+            repo_instruction_payload: None,
+            python_exec_available: tool_registry.contains("python_exec"),
+            skill_instructions: None,
+            compression_available: false,
+            context_pressure: crate::context::ContextPressure::None,
+        },
         tool_registry,
-        None,
     )
 }
 
 pub fn build_inference_request_with_context(
     config: &Config,
     messages: &[Message],
-    compacted_context: Option<&CompactedContext>,
+    compressed_blocks: &[CompressedBlock],
     instructions: Option<&str>,
     tool_registry: &ToolRegistry,
 ) -> Result<InferenceRequest, RuntimeError> {
     build_inference_request_with_context_and_repo(
         config,
         messages,
-        compacted_context,
-        instructions,
-        None,
+        EffectiveToolRequestContext {
+            compressed_blocks,
+            instructions,
+            repo_instruction_payload: None,
+            python_exec_available: tool_registry.contains("python_exec"),
+            skill_instructions: None,
+            compression_available: false,
+            context_pressure: crate::context::ContextPressure::None,
+        },
         tool_registry,
-        None,
     )
 }
 
@@ -109,29 +125,33 @@ pub fn build_inference_request_with_repo(
     build_inference_request_with_context_and_repo(
         config,
         messages,
-        None,
-        instructions,
-        repo_instruction_payload,
+        EffectiveToolRequestContext {
+            compressed_blocks: &[],
+            instructions,
+            repo_instruction_payload,
+            python_exec_available: tool_registry.contains("python_exec"),
+            skill_instructions: None,
+            compression_available: false,
+            context_pressure: crate::context::ContextPressure::None,
+        },
         tool_registry,
-        None,
     )
 }
 
 pub fn build_inference_request_with_context_and_repo(
     config: &Config,
     messages: &[Message],
-    compacted_context: Option<&CompactedContext>,
-    instructions: Option<&str>,
-    repo_instruction_payload: Option<&crate::prompt::config::RepoInstructionPayload>,
+    context: EffectiveToolRequestContext<'_>,
     tool_registry: &ToolRegistry,
-    skill_instructions: Option<&str>,
 ) -> Result<InferenceRequest, RuntimeError> {
     let mut pruned = messages.to_vec();
     apply_context_window_policy(config, &mut pruned)?;
 
     let mut provider_messages = Vec::new();
-    if let Some(summary) = compacted_context_message(compacted_context) {
-        provider_messages.push(summary);
+    for block in context.compressed_blocks {
+        provider_messages.push(Message::Assistant {
+            content: block.render_to_text(),
+        });
     }
     provider_messages.extend(pruned);
 
@@ -152,10 +172,12 @@ pub fn build_inference_request_with_context_and_repo(
 
     let composed = build_composed_instructions(
         config,
-        instructions,
-        repo_instruction_payload,
-        python_exec_available,
-        skill_instructions,
+        context.instructions,
+        context.repo_instruction_payload,
+        context.python_exec_available || python_exec_available,
+        context.skill_instructions,
+        context.compression_available,
+        context.context_pressure,
     );
     if !composed.is_empty() {
         request = request.with_instructions(composed);
@@ -164,23 +186,14 @@ pub fn build_inference_request_with_context_and_repo(
     Ok(request)
 }
 
-fn compacted_context_message(compacted_context: Option<&CompactedContext>) -> Option<Message> {
-    let rendered = compacted_context?.render_to_text();
-    if rendered.is_empty() {
-        return None;
-    }
-
-    Some(Message::Assistant {
-        content: format!("[Compacted session context]\n{}", rendered),
-    })
-}
-
 fn build_composed_instructions(
     config: &Config,
     session_instructions: Option<&str>,
     repo_instruction_payload: Option<&crate::prompt::config::RepoInstructionPayload>,
     python_exec_available: bool,
     skill_instructions: Option<&str>,
+    compression_available: bool,
+    context_pressure: crate::context::ContextPressure,
 ) -> String {
     let baseline = crate::prompt::baseline::BASELINE_PROMPT;
 
@@ -218,6 +231,8 @@ fn build_composed_instructions(
         client_editing_guidance: config.prompt_composition.client_editing_guidance.as_deref(),
         client_injections: &config.prompt_composition.client_injections,
         python_exec_available,
+        compression_available,
+        context_pressure,
     })
 }
 

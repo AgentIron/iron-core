@@ -90,7 +90,7 @@
 //! - **`compacted_context`**: a structured semantic summary maintained by
 //!   compaction. Future prompts are assembled from this summary plus the retained
 //!   recent tail, rather than replaying the full pre-compaction transcript. See
-//!   [`CompactedContext`].
+//!   [`CompressedBlock`].
 //!
 //! - **`handoff_bundle`**: a portable continuity payload for cross-session transfer
 //!   that excludes source tool capabilities and runtime state. Export via
@@ -194,11 +194,10 @@ pub use config::{
 };
 pub use connection::IronConnection;
 pub use context::{
-    ActiveContextAccountant, ActiveContextSnapshot, CompactedContext, CompactionCheckpoint,
-    CompactionEngine, CompactionInput, CompactionReason, ContextCategory, ContextCategoryUsage,
-    ContextQuality, ContextTelemetry, Decision, HandoffBundle, HandoffBundleMetadata,
-    HandoffExportConfig, HandoffExporter, HandoffImporter, PortabilityNote, TailRetentionPolicy,
-    TailRetentionRule, UnresolvedQuestion, HANDOFF_DEFAULT_TARGET_TOKENS,
+    ActiveContextAccountant, ActiveContextSnapshot, CompressRange, CompressResult, CompressTool,
+    CompressedBlock, ContextCategory, ContextCategoryUsage, ContextPressure, ContextQuality,
+    ContextTelemetry, HandoffBundle, HandoffBundleMetadata, HandoffExportConfig, HandoffExporter,
+    HandoffImporter, TailRetentionPolicy, TailRetentionRule, HANDOFF_DEFAULT_TARGET_TOKENS,
 };
 pub use durable::{
     ContentBlock, DurableScriptRecord, DurableSession, DurableToolRecord, ScriptRecordStatus,

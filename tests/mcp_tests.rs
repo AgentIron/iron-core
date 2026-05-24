@@ -203,7 +203,7 @@ fn mcp_state_not_included_in_handoff() {
     let bundle = HandoffExporter::export(
         &session_guard,
         "test-model",
-        None,
+        &[],
         vec![],
         &config.context_management,
         None,

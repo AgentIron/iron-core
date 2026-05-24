@@ -3,7 +3,6 @@ use crate::{
     capability::{CapabilityBackend, CapabilityDescriptor, CapabilityId},
     config::Config,
     connection::{ClientChannel, IronConnection},
-    context::compaction::{CompactionCheckpoint, CompactionEngine, CompactionReason},
     context::handoff::{HandoffExporter, HandoffImporter},
     durable::{
         ContentBlock, DurableSession, DurableToolRecord, SessionId, StructuredMessage,
@@ -1778,7 +1777,7 @@ impl AgentSession {
         let tail = session.to_transcript();
         crate::context::ContextTelemetry::for_session(
             session.instructions.as_deref(),
-            session.compacted_context.as_ref(),
+            &session.compressed_blocks,
             &tail.messages,
             tool_registry,
             current_prompt,
@@ -1798,9 +1797,9 @@ impl AgentSession {
         self.durable.lock().uncompacted_tokens
     }
 
-    /// Get the compacted context, if any.
-    pub fn compacted_context(&self) -> Option<crate::context::models::CompactedContext> {
-        self.durable.lock().compacted_context.clone()
+    /// Get the compressed blocks.
+    pub fn compressed_blocks(&self) -> Vec<crate::context::models::CompressedBlock> {
+        self.durable.lock().compressed_blocks.clone()
     }
 
     /// Create a checkpoint by compacting the session context.
@@ -1812,7 +1811,7 @@ impl AgentSession {
     ///
     /// Returns an error if the session is not idle or if context management
     /// is not enabled.
-    pub async fn checkpoint(&self, _checkpoint: CompactionCheckpoint) -> Result<(), String> {
+    pub async fn checkpoint(&self) -> Result<(), String> {
         if !self.is_idle() {
             return Err("Cannot checkpoint: session is not idle".into());
         }
@@ -1822,24 +1821,9 @@ impl AgentSession {
             return Err("Context management is not enabled".into());
         }
 
-        let input = {
-            let session = self.durable.lock();
-            CompactionEngine::prepare(
-                &session,
-                &config.context_management.tail_retention,
-                CompactionReason::Checkpoint,
-            )
-        };
-
-        let provider = self.connection.runtime().provider();
-        let (compacted, tail) = CompactionEngine::execute(input, provider, &config.model).await?;
-
-        {
-            let mut session = self.durable.lock();
-            session.apply_compaction(compacted, tail);
-        }
-
-        Ok(())
+        // Checkpointing is now model-driven via the compress tool.
+        // Hidden runtime compaction has been removed.
+        Err("Checkpoint is not yet implemented with model-driven compression".into())
     }
 
     /// Export a handoff bundle for transferring this session to another agent.
@@ -1862,20 +1846,17 @@ impl AgentSession {
 
         let config = self.connection.runtime().config().clone();
 
-        let (compacted, tail) = {
+        let (compressed_blocks, tail) = {
             let session = self.durable.lock();
-            let (_older, tail) = CompactionEngine::split_session(
-                &session,
-                &config.context_management.tail_retention,
-            );
-            (session.compacted_context.clone(), tail)
+            let tail = session.messages.clone();
+            (session.compressed_blocks.clone(), tail)
         };
 
         let session = self.durable.lock();
         HandoffExporter::export(
             &session,
             model,
-            compacted.as_ref(),
+            &compressed_blocks,
             tail,
             &config.context_management,
             provider_name,
