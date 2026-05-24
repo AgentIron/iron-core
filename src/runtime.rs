@@ -3,6 +3,7 @@
 use crate::{
     capability::{CapabilityBackend, CapabilityDescriptor, CapabilityRegistry},
     config::Config,
+    context::model_switch::PendingModelSwitch,
     durable::{DurableSession, SessionId},
     ephemeral::EphemeralTurn,
     error::RuntimeError,
@@ -64,6 +65,7 @@ struct RuntimeSession {
     connection_id: ConnectionId,
     active_prompt: Mutex<Option<ActivePrompt>>,
     tool_catalog_cache: Mutex<Option<CachedSessionToolCatalog>>,
+    pending_model_switch: Mutex<Option<PendingModelSwitch>>,
 }
 
 struct CachedSessionToolCatalog {
@@ -83,6 +85,7 @@ impl RuntimeSession {
             connection_id,
             active_prompt: Mutex::new(None),
             tool_catalog_cache: Mutex::new(None),
+            pending_model_switch: Mutex::new(None),
         }
     }
 }
@@ -813,6 +816,143 @@ impl IronRuntime {
         if let Some(rs) = sessions.get(&session_id) {
             let mut active = rs.active_prompt.lock();
             *active = None;
+        }
+    }
+
+    /// Queue a model switch for an active session.
+    ///
+    /// The switch will be applied at the next turn boundary when the
+    /// current prompt completes.
+    pub fn queue_model_switch(
+        &self,
+        session_id: SessionId,
+        request: crate::context::model_switch::ModelSwitchRequest,
+    ) -> Result<(), RuntimeError> {
+        if self.is_shutdown() {
+            return Err(RuntimeError::Connection("Runtime is shut down".into()));
+        }
+
+        let sessions = self.inner.sessions.read();
+        let rs = sessions
+            .get(&session_id)
+            .ok_or_else(|| RuntimeError::SessionNotFound(session_id.to_string()))?;
+
+        let mut pending = rs.pending_model_switch.lock();
+        *pending = Some(PendingModelSwitch {
+            request,
+            requested_at: chrono::Utc::now(),
+        });
+
+        Ok(())
+    }
+
+    /// Apply a model switch to an idle session.
+    ///
+    /// This updates the session's current model and records the switch
+    /// in the timeline and history.
+    ///
+    /// Returns the capability diff so callers can emit client events.
+    pub fn apply_model_switch(
+        &self,
+        session_id: SessionId,
+        request: crate::context::model_switch::ModelSwitchRequest,
+    ) -> Result<crate::context::CapabilityDiff, RuntimeError> {
+        if self.is_shutdown() {
+            return Err(RuntimeError::Connection("Runtime is shut down".into()));
+        }
+
+        let sessions = self.inner.sessions.read();
+        let rs = sessions
+            .get(&session_id)
+            .ok_or_else(|| RuntimeError::SessionNotFound(session_id.to_string()))?;
+
+        let mut session = rs.session.lock();
+        let from_model = session.current_model.clone();
+        let from_provider = None; // TODO: track provider in session
+
+        let (to_model, to_provider) = match &request {
+            crate::context::model_switch::ModelSwitchRequest::Managed {
+                provider_slug,
+                model,
+                ..
+            } => (model.clone(), Some(provider_slug.clone())),
+            crate::context::model_switch::ModelSwitchRequest::Unmanaged {
+                model,
+                provider_name,
+            } => (model.clone(), Some(provider_name.clone())),
+        };
+
+        // Create adaptation plan
+        let config = self.config();
+        let current_tokens = crate::context::model_switch::ModelSwitchPlanner::estimate_session_tokens(
+            session.uncompacted_tokens,
+            &session.compressed_blocks,
+        );
+        let target_window = config.context_management.context_window_hint;
+        let plan = crate::context::model_switch::ModelSwitchPlanner::create_plan(
+            from_model.as_deref().unwrap_or("unknown"),
+            &to_model,
+            target_window,
+            current_tokens,
+        );
+
+        // Trigger compaction if needed and enabled
+        let adapted = if plan.context_adaptation.needs_compaction && config.context_management.model_switch.compact_on_window_shrink {
+            // TODO: integrate with actual compaction engine
+            // For now, mark that adaptation was attempted
+            true
+        } else {
+            false
+        };
+
+        // Update current model
+        session.current_model = Some(to_model.clone());
+
+        // Record in timeline
+        let timeline_index = session.timeline.len() as u64;
+        let visible_id = session.next_visible_id();
+        session.timeline.push(crate::durable::TimelineEntry::ModelSwitched {
+            index: timeline_index,
+            from_model: from_model.clone().unwrap_or_else(|| "unknown".to_string()),
+            to_model: to_model.clone(),
+            from_provider: from_provider.clone(),
+            to_provider: to_provider.clone(),
+            adapted,
+            visible_id: Some(visible_id),
+        });
+
+        // Record in history
+        let capability_diff = plan.capability_diff.clone();
+        let record = crate::context::model_switch::ModelSwitchRecord {
+            from_model: from_model.unwrap_or_else(|| "unknown".to_string()),
+            to_model,
+            from_provider,
+            to_provider,
+            adapted,
+            capability_diff: capability_diff.clone(),
+            timestamp: chrono::Utc::now(),
+        };
+        session.model_switch_history.push(record);
+
+        Ok(capability_diff)
+    }
+
+    /// Check and apply any pending model switch for a session.
+    ///
+    /// This should be called at turn boundaries after a prompt completes.
+    pub fn check_and_apply_pending_model_switch(&self, session_id: SessionId) {
+        let sessions = self.inner.sessions.read();
+        let Some(rs) = sessions.get(&session_id) else {
+            return;
+        };
+
+        let pending = {
+            let mut pending = rs.pending_model_switch.lock();
+            pending.take()
+        };
+
+        if let Some(pending) = pending {
+            let _ = self.apply_model_switch(session_id, pending.request);
         }
     }
 

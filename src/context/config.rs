@@ -18,6 +18,9 @@ pub struct ContextManagementConfig {
     pub medium_threshold: f64,
     pub strong_threshold: f64,
     pub critical_threshold: f64,
+    /// Configuration for model switching context adaptation
+    #[serde(default)]
+    pub model_switch: ModelSwitchConfig,
 }
 
 impl Default for ContextManagementConfig {
@@ -32,6 +35,7 @@ impl Default for ContextManagementConfig {
             medium_threshold: DEFAULT_MEDIUM_THRESHOLD,
             strong_threshold: DEFAULT_STRONG_THRESHOLD,
             critical_threshold: DEFAULT_CRITICAL_THRESHOLD,
+            model_switch: ModelSwitchConfig::default(),
         }
     }
 }
@@ -120,7 +124,13 @@ impl ContextManagementConfig {
             );
         }
         self.tail_retention.validate()?;
-        self.handoff_export.validate()
+        self.handoff_export.validate()?;
+        self.model_switch.validate()
+    }
+
+    pub fn with_model_switch_config(mut self, config: ModelSwitchConfig) -> Self {
+        self.model_switch = config;
+        self
     }
 }
 
@@ -216,5 +226,61 @@ impl TailRetentionPolicy {
             }
         }
         Ok(())
+    }
+}
+
+/// Configuration for model switching context adaptation
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelSwitchConfig {
+    /// Whether to compact context before switching to a smaller window
+    pub compact_on_window_shrink: bool,
+    /// Default number of messages to retain in tail after compaction
+    pub default_tail_messages: usize,
+    /// Minimum context window before erroring (in tokens)
+    pub minimum_window_tokens: usize,
+    /// Whether to generate a session briefing on provider change
+    pub briefing_on_provider_change: bool,
+}
+
+impl Default for ModelSwitchConfig {
+    fn default() -> Self {
+        Self {
+            compact_on_window_shrink: true,
+            default_tail_messages: 20,
+            minimum_window_tokens: 4000,
+            briefing_on_provider_change: true,
+        }
+    }
+}
+
+impl ModelSwitchConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.default_tail_messages == 0 {
+            return Err("default_tail_messages must be greater than 0".into());
+        }
+        if self.minimum_window_tokens == 0 {
+            return Err("minimum_window_tokens must be greater than 0".into());
+        }
+        Ok(())
+    }
+
+    pub fn with_compact_on_window_shrink(mut self, enabled: bool) -> Self {
+        self.compact_on_window_shrink = enabled;
+        self
+    }
+
+    pub fn with_default_tail_messages(mut self, messages: usize) -> Self {
+        self.default_tail_messages = messages;
+        self
+    }
+
+    pub fn with_minimum_window_tokens(mut self, tokens: usize) -> Self {
+        self.minimum_window_tokens = tokens;
+        self
+    }
+
+    pub fn with_briefing_on_provider_change(mut self, enabled: bool) -> Self {
+        self.briefing_on_provider_change = enabled;
+        self
     }
 }

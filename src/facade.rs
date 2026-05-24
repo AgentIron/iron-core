@@ -183,6 +183,30 @@ pub enum PromptEvent {
         /// New auth state.
         new_state: crate::plugin::auth::AuthState,
     },
+    /// A model switch has been applied to the session.
+    ///
+    /// Emitted when a model switch completes, either immediately (for idle
+    /// sessions) or at turn boundary (for queued switches).
+    ModelSwitched {
+        /// The model that was active before the switch.
+        from_model: String,
+        /// The model that is now active.
+        to_model: String,
+        /// Whether context was adapted during the switch.
+        adapted: bool,
+        /// Capability differences between the old and new models.
+        capability_diff: crate::context::CapabilityDiff,
+    },
+    /// A model switch has been queued for the next turn boundary.
+    ///
+    /// Emitted when a switch is requested while the session has an active
+    /// prompt. The switch will be applied when the current turn completes.
+    ModelSwitchPending {
+        /// The model that will become active after the switch.
+        target_model: String,
+        /// The provider slug for the target model (if managed).
+        target_provider: Option<String>,
+    },
     /// The prompt has completed.
     Complete {
         /// The final outcome of the prompt.
@@ -1268,6 +1292,14 @@ impl AgentSession {
         }
     }
 
+    fn emit_model_switch_event(&self, event: PromptEvent) {
+        let session_key = self.id.to_string();
+        let streams = self.active_streams.borrow();
+        if let Some(state) = streams.get(&session_key) {
+            let _ = state.event_tx.send(event);
+        }
+    }
+
     /// Get the unique identifier for this session.
     pub fn id(&self) -> SessionId {
         self.id
@@ -1782,6 +1814,8 @@ impl AgentSession {
             tool_registry,
             current_prompt,
             context_window_hint,
+            session.current_model.as_deref(),
+            session.model_switch_history.len(),
         )
     }
 
@@ -1893,6 +1927,88 @@ impl AgentSession {
     /// Get list of plugins enabled for this session.
     pub fn list_enabled_plugins(&self) -> Vec<String> {
         self.durable.lock().list_enabled_plugins()
+    }
+
+    /// Request a model switch for this session.
+    ///
+    /// If the session is idle, the switch is applied immediately.
+    /// If the session has an active prompt, the switch is queued and
+    /// applied at the next turn boundary.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The model switch request (managed or unmanaged)
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the switch was queued or applied successfully,
+    /// or an error if the switch request is invalid.
+    pub fn switch_model(
+        &self,
+        request: crate::context::model_switch::ModelSwitchRequest,
+    ) -> Result<(), String> {
+        let runtime = self.connection.runtime();
+
+        if self.is_idle() {
+            let capability_diff = runtime
+                .apply_model_switch(self.id, request.clone())
+                .map_err(|e| e.to_string())?;
+
+            // Extract model info for the event
+            let (to_model, _to_provider) = match &request {
+                crate::context::model_switch::ModelSwitchRequest::Managed {
+                    provider_slug,
+                    model,
+                    ..
+                } => (model.clone(), Some(provider_slug.clone())),
+                crate::context::model_switch::ModelSwitchRequest::Unmanaged {
+                    model,
+                    provider_name,
+                } => (model.clone(), Some(provider_name.clone())),
+            };
+
+            let from_model = self
+                .durable
+                .lock()
+                .current_model
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+
+            self.emit_model_switch_event(PromptEvent::ModelSwitched {
+                from_model,
+                to_model,
+                adapted: capability_diff.window_shrink.is_some()
+                    || !capability_diff.hidden_tools.is_empty()
+                    || !capability_diff.unsupported_modalities.is_empty(),
+                capability_diff,
+            });
+
+            Ok(())
+        } else {
+            runtime
+                .queue_model_switch(self.id, request.clone())
+                .map_err(|e| e.to_string())?;
+
+            // Emit pending event
+            let (target_model, target_provider) = match &request {
+                crate::context::model_switch::ModelSwitchRequest::Managed {
+                    provider_slug,
+                    model,
+                    ..
+                } => (model.clone(), Some(provider_slug.clone())),
+                crate::context::model_switch::ModelSwitchRequest::Unmanaged {
+                    model,
+                    provider_name,
+                } => (model.clone(), Some(provider_name.clone())),
+            };
+
+            self.emit_model_switch_event(PromptEvent::ModelSwitchPending {
+                target_model,
+                target_provider,
+            });
+
+            Ok(())
+        }
     }
 
     /// Start a direct client-initiated auth flow for a plugin.

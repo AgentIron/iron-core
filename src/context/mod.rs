@@ -10,6 +10,7 @@ pub mod accounting;
 pub mod compaction;
 pub mod config;
 pub mod handoff;
+pub mod model_switch;
 pub mod models;
 pub mod telemetry;
 
@@ -22,5 +23,9 @@ pub use config::{
     ContextManagementConfig, HandoffExportConfig, TailRetentionPolicy, TailRetentionRule,
 };
 pub use handoff::{HandoffBundle, HandoffBundleMetadata, HandoffExporter, HandoffImporter};
+pub use model_switch::{
+    CapabilityDiff, ContextAdaptationPlan, ModelSwitchPlan, ModelSwitchRecord, ModelSwitchRequest,
+    PendingModelSwitch,
+};
 pub use models::{CompressedBlock, HANDOFF_DEFAULT_TARGET_TOKENS};
 pub use telemetry::ContextTelemetry;

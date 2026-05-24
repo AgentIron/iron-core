@@ -162,6 +162,18 @@ pub enum TimelineEntry {
         #[serde(skip_serializing_if = "Option::is_none")]
         visible_id: Option<String>,
     },
+    ModelSwitched {
+        index: u64,
+        from_model: String,
+        to_model: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_provider: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        to_provider: Option<String>,
+        adapted: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        visible_id: Option<String>,
+    },
 }
 
 impl TimelineEntry {
@@ -170,7 +182,8 @@ impl TimelineEntry {
             Self::UserMessage { index, .. }
             | Self::AgentMessage { index, .. }
             | Self::ToolCallStarted { index, .. }
-            | Self::ToolCallTerminal { index, .. } => *index,
+            | Self::ToolCallTerminal { index, .. }
+            | Self::ModelSwitched { index, .. } => *index,
         }
     }
 
@@ -179,7 +192,8 @@ impl TimelineEntry {
             Self::UserMessage { visible_id, .. }
             | Self::AgentMessage { visible_id, .. }
             | Self::ToolCallStarted { visible_id, .. }
-            | Self::ToolCallTerminal { visible_id, .. } => visible_id.as_deref(),
+            | Self::ToolCallTerminal { visible_id, .. }
+            | Self::ModelSwitched { visible_id, .. } => visible_id.as_deref(),
         }
     }
 
@@ -188,7 +202,8 @@ impl TimelineEntry {
             Self::UserMessage { visible_id, .. }
             | Self::AgentMessage { visible_id, .. }
             | Self::ToolCallStarted { visible_id, .. }
-            | Self::ToolCallTerminal { visible_id, .. } => {
+            | Self::ToolCallTerminal { visible_id, .. }
+            | Self::ModelSwitched { visible_id, .. } => {
                 *visible_id = Some(id);
             }
         }
@@ -204,6 +219,10 @@ impl TimelineEntry {
             } => Some(*tool_record_index),
             _ => None,
         }
+    }
+
+    pub fn is_model_switched(&self) -> bool {
+        matches!(self, Self::ModelSwitched { .. })
     }
 }
 
@@ -365,6 +384,12 @@ pub struct DurableSession {
     /// Counter for generating stable visible timeline IDs.
     #[serde(default)]
     pub next_visible_id: u64,
+    /// Current model identifier for this session
+    #[serde(default)]
+    pub current_model: Option<String>,
+    /// History of model switches for this session
+    #[serde(default)]
+    pub model_switch_history: Vec<crate::context::model_switch::ModelSwitchRecord>,
 }
 
 impl DurableSession {
@@ -385,10 +410,12 @@ impl DurableSession {
             skill_state: crate::skill::SessionSkillState::default(),
             available_skills: Vec::new(),
             next_visible_id: 1,
+            current_model: None,
+            model_switch_history: Vec::new(),
         }
     }
 
-    fn next_visible_id(&mut self) -> String {
+    pub fn next_visible_id(&mut self) -> String {
         let id = format!("m{:04}", self.next_visible_id);
         self.next_visible_id += 1;
         id
@@ -835,6 +862,25 @@ impl DurableSession {
                         });
                     }
                 }
+                TimelineEntry::ModelSwitched {
+                    from_model,
+                    to_model,
+                    from_provider,
+                    to_provider,
+                    adapted,
+                    visible_id,
+                    ..
+                } => {
+                    timeline.push(TimelineEntry::ModelSwitched {
+                        index,
+                        from_model,
+                        to_model,
+                        from_provider,
+                        to_provider,
+                        adapted,
+                        visible_id,
+                    });
+                }
             }
         }
 
@@ -990,6 +1036,9 @@ impl DurableSession {
                             });
                         }
                     }
+                }
+                TimelineEntry::ModelSwitched { .. } => {
+                    // Model switches are metadata, not provider-facing messages
                 }
             }
         }

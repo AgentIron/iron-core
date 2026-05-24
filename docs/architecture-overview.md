@@ -66,6 +66,58 @@ Prompt-layer composition is handled separately from transcript compaction:
 - transcript retention is controlled by `ContextWindowPolicy`
 - summarization/compaction lives under `context_management`
 
+### Model Switching Architecture
+
+Model switching is implemented as a continuation export/import that preserves session identity:
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│  User Request   │────▶│  Export/Import   │────▶│  New Runtime    │
+│  switch_model() │     │  Planning        │     │  Session        │
+└─────────────────┘     └──────────────────┘     └─────────────────┘
+                               │
+                               ▼
+                    ┌──────────────────────┐
+                    │  Context Adaptation  │
+                    │  - Size estimation   │
+                    │  - Compaction        │
+                    │  - Tail retention    │
+                    └──────────────────────┘
+                               │
+                               ▼
+                    ┌──────────────────────┐
+                    │  Capability Recon    │
+                    │  - Tool filtering    │
+                    │  - Modality check    │
+                    │  - Window comparison │
+                    └──────────────────────┘
+```
+
+Key components:
+
+- `ModelSwitchPlanner`: Creates adaptation plans comparing source/target constraints
+- `CapabilityDiff`: Records capability differences (tools, modalities, window size)
+- `ModelSwitchRequest`: Enum for managed vs unmanaged provider switches
+- `TimelineEntry::ModelSwitched`: Records switch events in session timeline
+
+Switching happens at turn boundaries:
+
+1. **Idle**: Switch applies immediately, next prompt uses new model
+2. **Active**: Switch queues until turn completes, preserving in-flight state
+
+Context adaptation triggers when target window < current context:
+
+1. Estimate current token count
+2. Compact older messages if needed
+3. Retain configurable tail of recent messages
+4. Inject session briefing for provider changes
+
+Capability reconciliation is permissive by default:
+
+- Unavailable tools are hidden from the catalog
+- Unsupported modalities are reported but don't block
+- Context too large after compaction returns an error
+
 ## Practical Guidance
 
 Use this architecture split when making changes:
@@ -79,4 +131,6 @@ Use this architecture split when making changes:
 - [Getting Started](./getting-started-iron-core.md)
 - [Prompt Composition](./prompt-composition.md)
 - [Integration Plugins](./integration-plugins.md)
+- [Model Switching](./model-switching.md)
+- [Model Switching Examples](./model-switching-examples.md)
 - [Architecture Cleanup Checklist](./architecture-cleanup-checklist.md)

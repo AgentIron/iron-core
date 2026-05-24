@@ -306,6 +306,8 @@ impl CompressTool {
             &ToolRegistry::new(),
             None,
             None,
+            session.current_model.as_deref(),
+            session.model_switch_history.len(),
         );
         let pressure = snapshot.pressure_with_thresholds(
             soft_threshold,
