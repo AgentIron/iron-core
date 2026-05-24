@@ -220,13 +220,16 @@ impl PromptRunner {
                     crate::request_builder::build_inference_request_with_context_and_repo(
                         config,
                         &messages,
-                        &compressed_blocks,
-                        instructions.as_deref(),
-                        repo_payload.as_ref(),
+                        crate::request_builder::EffectiveToolRequestContext {
+                            compressed_blocks: &compressed_blocks,
+                            instructions: instructions.as_deref(),
+                            repo_instruction_payload: repo_payload.as_ref(),
+                            python_exec_available: tool_registry.contains("python_exec"),
+                            skill_instructions: Some(&skill_instructions),
+                            compression_available,
+                            context_pressure,
+                        },
                         &tool_registry,
-                        Some(&skill_instructions),
-                        compression_available,
-                        context_pressure,
                     )
                 }
             };
@@ -246,13 +249,17 @@ impl PromptRunner {
             let stream = match self.provider().infer_stream(request.clone()).await {
                 Ok(s) => s,
                 Err(e) => {
-                    if e.is_authentication()
+                    let retry_context = if e.is_authentication()
                         && self.managed_provider.is_some()
-                        && self.provider_context.is_some()
                         && !self.auth_failure_is_api_key_backed().await
                     {
+                        self.provider_context.as_ref()
+                    } else {
+                        None
+                    };
+
+                    if let Some(context) = retry_context {
                         warn!(error = %e, "Provider auth failed, attempting force-refresh and retry");
-                        let context = self.provider_context.as_ref().unwrap();
                         match self.refreshed_provider_for_retry(context).await {
                             Ok(refreshed_provider) => {
                                 match refreshed_provider.infer_stream(request.clone()).await {
@@ -297,12 +304,16 @@ impl PromptRunner {
                 ProviderStreamOutcome::Step(step) => step,
                 ProviderStreamOutcome::Stop(reason) => return reason,
                 ProviderStreamOutcome::AuthFailureBeforeOutput(error) => {
-                    if self.managed_provider.is_some()
-                        && self.provider_context.is_some()
+                    let retry_context = if self.managed_provider.is_some()
                         && !self.auth_failure_is_api_key_backed().await
                     {
+                        self.provider_context.as_ref()
+                    } else {
+                        None
+                    };
+
+                    if let Some(context) = retry_context {
                         warn!(error = %error, "Provider stream auth failed before output, attempting force-refresh and retry");
-                        let context = self.provider_context.as_ref().unwrap();
                         let refreshed_provider = match self
                             .refreshed_provider_for_retry(context)
                             .await
@@ -1656,23 +1667,24 @@ impl PromptRunner {
             return;
         }
 
-        let session = durable.lock();
-        let messages = session.to_transcript().messages;
-        let snapshot = crate::context::ActiveContextAccountant::estimate_snapshot(
-            session.instructions.as_deref(),
-            &session.compressed_blocks,
-            &messages,
-            &crate::tool::ToolRegistry::new(),
-            None,
-            config.context_management.context_window_hint,
-        );
-        let pressure = snapshot.pressure_with_thresholds(
-            config.context_management.soft_threshold,
-            config.context_management.medium_threshold,
-            config.context_management.strong_threshold,
-            config.context_management.critical_threshold,
-        );
-        drop(session);
+        let pressure = {
+            let session = durable.lock();
+            let messages = session.to_transcript().messages;
+            let snapshot = crate::context::ActiveContextAccountant::estimate_snapshot(
+                session.instructions.as_deref(),
+                &session.compressed_blocks,
+                &messages,
+                &crate::tool::ToolRegistry::new(),
+                None,
+                config.context_management.context_window_hint,
+            );
+            snapshot.pressure_with_thresholds(
+                config.context_management.soft_threshold,
+                config.context_management.medium_threshold,
+                config.context_management.strong_threshold,
+                config.context_management.critical_threshold,
+            )
+        };
 
         if matches!(pressure, crate::context::ContextPressure::Critical) {
             let error_text = "Context pressure remains critical. Compression did not reduce usage below the threshold. Please start a new session to continue.";

@@ -1,7 +1,7 @@
 use agent_client_protocol::schema as acp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub u64);
@@ -745,11 +745,11 @@ impl DurableSession {
                 _ => None,
             };
             if let Some(old_index) = old_message_index {
-                if !message_map.contains_key(&old_index) {
+                if let Entry::Vacant(entry) = message_map.entry(old_index) {
                     if let Some(message) = self.messages.get(old_index).cloned() {
                         let new_index = messages.len();
                         messages.push(message);
-                        message_map.insert(old_index, new_index);
+                        entry.insert(new_index);
                     }
                 }
             }
@@ -759,11 +759,11 @@ impl DurableSession {
         let mut tool_records = Vec::new();
         for entry in &retained_entries {
             if let Some(old_index) = entry.tool_record_index() {
-                if !tool_record_map.contains_key(&old_index) {
+                if let Entry::Vacant(entry) = tool_record_map.entry(old_index) {
                     if let Some(record) = self.tool_records.get(old_index).cloned() {
                         let new_index = tool_records.len();
                         tool_records.push(record);
-                        tool_record_map.insert(old_index, new_index);
+                        entry.insert(new_index);
                     }
                 }
             }

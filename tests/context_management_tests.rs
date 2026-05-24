@@ -1264,7 +1264,7 @@ fn provider_request_includes_compressed_blocks() {
             .transcript
             .messages
             .iter()
-            .map(|m| provider_message_text(m))
+            .map(provider_message_text)
             .collect();
 
         assert!(
@@ -1347,7 +1347,7 @@ fn provider_request_excludes_compressed_transcript() {
             .transcript
             .messages
             .iter()
-            .map(|m| provider_message_text(m))
+            .map(provider_message_text)
             .collect();
 
         assert!(
@@ -1619,7 +1619,7 @@ fn compact_command_replaces_user_message() {
             .transcript
             .messages
             .iter()
-            .map(|m| provider_message_text(m))
+            .map(provider_message_text)
             .collect();
 
         assert!(
