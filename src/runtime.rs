@@ -884,10 +884,11 @@ impl IronRuntime {
 
         // Create adaptation plan
         let config = self.config();
-        let current_tokens = crate::context::model_switch::ModelSwitchPlanner::estimate_session_tokens(
-            session.uncompacted_tokens,
-            &session.compressed_blocks,
-        );
+        let current_tokens =
+            crate::context::model_switch::ModelSwitchPlanner::estimate_session_tokens(
+                session.uncompacted_tokens,
+                &session.compressed_blocks,
+            );
         let target_window = config.context_management.context_window_hint;
         let plan = crate::context::model_switch::ModelSwitchPlanner::create_plan(
             from_model.as_deref().unwrap_or("unknown"),
@@ -897,7 +898,12 @@ impl IronRuntime {
         );
 
         // Trigger compaction if needed and enabled
-        let adapted = if plan.context_adaptation.needs_compaction && config.context_management.model_switch.compact_on_window_shrink {
+        let adapted = if plan.context_adaptation.needs_compaction
+            && config
+                .context_management
+                .model_switch
+                .compact_on_window_shrink
+        {
             // TODO: integrate with actual compaction engine
             // For now, mark that adaptation was attempted
             true
@@ -911,15 +917,17 @@ impl IronRuntime {
         // Record in timeline
         let timeline_index = session.timeline.len() as u64;
         let visible_id = session.next_visible_id();
-        session.timeline.push(crate::durable::TimelineEntry::ModelSwitched {
-            index: timeline_index,
-            from_model: from_model.clone().unwrap_or_else(|| "unknown".to_string()),
-            to_model: to_model.clone(),
-            from_provider: from_provider.clone(),
-            to_provider: to_provider.clone(),
-            adapted,
-            visible_id: Some(visible_id),
-        });
+        session
+            .timeline
+            .push(crate::durable::TimelineEntry::ModelSwitched {
+                index: timeline_index,
+                from_model: from_model.clone().unwrap_or_else(|| "unknown".to_string()),
+                to_model: to_model.clone(),
+                from_provider: from_provider.clone(),
+                to_provider: to_provider.clone(),
+                adapted,
+                visible_id: Some(visible_id),
+            });
 
         // Record in history
         let capability_diff = plan.capability_diff.clone();

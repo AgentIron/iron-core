@@ -167,7 +167,12 @@ impl ModelSwitchPlanner {
         current_tokens: usize,
     ) -> ModelSwitchPlan {
         Self::create_plan_with_capabilities(
-            source_model, target_model, target_window, current_tokens, None, None,
+            source_model,
+            target_model,
+            target_window,
+            current_tokens,
+            None,
+            None,
         )
     }
 
@@ -395,14 +400,12 @@ mod tests {
 
     #[test]
     fn test_estimate_session_tokens() {
-        let blocks = vec![
-            crate::context::models::CompressedBlock::new(
-                "c0001",
-                "Test topic",
-                "m0001-m0010",
-                "a".repeat(400),
-            ),
-        ];
+        let blocks = vec![crate::context::models::CompressedBlock::new(
+            "c0001",
+            "Test topic",
+            "m0001-m0010",
+            "a".repeat(400),
+        )];
         let tokens = ModelSwitchPlanner::estimate_session_tokens(1000, &blocks);
         assert_eq!(tokens, 1100); // 1000 + 400/4
     }

@@ -12,8 +12,8 @@
 //! available integrations and tools.
 
 use crate::context::config::ContextManagementConfig;
-use crate::context::models::CompressedBlock;
 use crate::context::model_switch::ModelSwitchRecord;
+use crate::context::models::CompressedBlock;
 use crate::durable::{DurableSession, SessionId, StructuredMessage};
 use crate::skill::SessionSkillState;
 use serde::{Deserialize, Serialize};
@@ -179,15 +179,17 @@ impl HandoffImporter {
         // Recreate timeline entries from model switch history
         for record in &bundle.model_switch_history {
             let timeline_index = target.timeline.len() as u64;
-            target.timeline.push(crate::durable::TimelineEntry::ModelSwitched {
-                index: timeline_index,
-                from_model: record.from_model.clone(),
-                to_model: record.to_model.clone(),
-                from_provider: record.from_provider.clone(),
-                to_provider: record.to_provider.clone(),
-                adapted: record.adapted,
-                visible_id: None,
-            });
+            target
+                .timeline
+                .push(crate::durable::TimelineEntry::ModelSwitched {
+                    index: timeline_index,
+                    from_model: record.from_model.clone(),
+                    to_model: record.to_model.clone(),
+                    from_provider: record.from_provider.clone(),
+                    to_provider: record.to_provider.clone(),
+                    adapted: record.adapted,
+                    visible_id: None,
+                });
         }
 
         // Note: MCP server and plugin enablement are NOT imported as part of handoff.
@@ -232,15 +234,17 @@ impl HandoffImporter {
         // Recreate timeline entries from model switch history
         for record in &bundle.model_switch_history {
             let timeline_index = session.timeline.len() as u64;
-            session.timeline.push(crate::durable::TimelineEntry::ModelSwitched {
-                index: timeline_index,
-                from_model: record.from_model.clone(),
-                to_model: record.to_model.clone(),
-                from_provider: record.from_provider.clone(),
-                to_provider: record.to_provider.clone(),
-                adapted: record.adapted,
-                visible_id: None,
-            });
+            session
+                .timeline
+                .push(crate::durable::TimelineEntry::ModelSwitched {
+                    index: timeline_index,
+                    from_model: record.from_model.clone(),
+                    to_model: record.to_model.clone(),
+                    from_provider: record.from_provider.clone(),
+                    to_provider: record.to_provider.clone(),
+                    adapted: record.adapted,
+                    visible_id: None,
+                });
         }
 
         // Note: MCP server and plugin enablement are NOT imported as part of handoff.

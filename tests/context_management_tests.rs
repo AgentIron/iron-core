@@ -59,7 +59,8 @@ fn telemetry_with_messages_counts_tail_category() {
         Message::user("How are you?"),
     ];
     let registry = ToolRegistry::new();
-    let snapshot = ContextTelemetry::for_session(None, &[], &messages, &registry, None, None, None, 0);
+    let snapshot =
+        ContextTelemetry::for_session(None, &[], &messages, &registry, None, None, None, 0);
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
         .categories
@@ -117,7 +118,8 @@ fn telemetry_with_compressed_blocks_counts_category() {
     )];
 
     let registry = ToolRegistry::new();
-    let snapshot = ContextTelemetry::for_session(None, &blocks, &[], &registry, None, None, None, 0);
+    let snapshot =
+        ContextTelemetry::for_session(None, &blocks, &[], &registry, None, None, None, 0);
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
         .categories
@@ -1892,7 +1894,11 @@ fn model_switch_idle_session_applies_immediately() {
         // Verify timeline has ModelSwitched entry
         let timeline = session.timeline();
         let switch_entries: Vec<_> = timeline.iter().filter(|e| e.is_model_switched()).collect();
-        assert_eq!(switch_entries.len(), 1, "Should have one model switch entry");
+        assert_eq!(
+            switch_entries.len(),
+            1,
+            "Should have one model switch entry"
+        );
     });
 }
 
@@ -1938,7 +1944,11 @@ fn model_switch_active_session_queues_switch() {
         assert!(session.is_idle());
         let timeline = session.timeline();
         let switch_entries: Vec<_> = timeline.iter().filter(|e| e.is_model_switched()).collect();
-        assert_eq!(switch_entries.len(), 1, "Switch should be applied after turn completes");
+        assert_eq!(
+            switch_entries.len(),
+            1,
+            "Switch should be applied after turn completes"
+        );
     });
 }
 
@@ -1971,10 +1981,16 @@ fn model_switch_handoff_bundle_roundtrip() {
         let _ = session.switch_model(request);
 
         // Export handoff bundle
-        let bundle = session.export_handoff("gpt-4o", Some("openai")).await.unwrap();
+        let bundle = session
+            .export_handoff("gpt-4o", Some("openai"))
+            .await
+            .unwrap();
 
         // Verify bundle has model switch history
-        assert!(!bundle.model_switch_history.is_empty(), "Bundle should contain switch history");
+        assert!(
+            !bundle.model_switch_history.is_empty(),
+            "Bundle should contain switch history"
+        );
         assert_eq!(bundle.model_switch_history[0].to_model, "gpt-4o");
 
         // Create new session from handoff
@@ -1982,7 +1998,14 @@ fn model_switch_handoff_bundle_roundtrip() {
 
         // Verify imported session has the switch history
         let imported_timeline = imported.timeline();
-        let switch_entries: Vec<_> = imported_timeline.iter().filter(|e| e.is_model_switched()).collect();
-        assert_eq!(switch_entries.len(), 1, "Imported session should have switch history");
+        let switch_entries: Vec<_> = imported_timeline
+            .iter()
+            .filter(|e| e.is_model_switched())
+            .collect();
+        assert_eq!(
+            switch_entries.len(),
+            1,
+            "Imported session should have switch history"
+        );
     });
 }

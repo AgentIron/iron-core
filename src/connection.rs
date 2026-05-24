@@ -246,7 +246,8 @@ impl IronConnection {
         self.runtime.finish_prompt(iron_session_id);
 
         // Check for pending model switches at turn boundary
-        self.runtime.check_and_apply_pending_model_switch(iron_session_id);
+        self.runtime
+            .check_and_apply_pending_model_switch(iron_session_id);
 
         if config.context_management.enabled {
             runner
@@ -318,7 +319,8 @@ impl IronConnection {
                 }
                 self.runtime.finish_prompt(iron_session_id);
                 // Check for pending model switches at turn boundary
-                self.runtime.check_and_apply_pending_model_switch(iron_session_id);
+                self.runtime
+                    .check_and_apply_pending_model_switch(iron_session_id);
                 return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
             }
         };
@@ -332,7 +334,8 @@ impl IronConnection {
         self.runtime.finish_prompt(iron_session_id);
 
         // Check for pending model switches at turn boundary
-        self.runtime.check_and_apply_pending_model_switch(iron_session_id);
+        self.runtime
+            .check_and_apply_pending_model_switch(iron_session_id);
 
         if config.context_management.enabled {
             runner
