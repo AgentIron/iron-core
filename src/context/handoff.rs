@@ -12,6 +12,7 @@
 //! available integrations and tools.
 
 use crate::context::config::ContextManagementConfig;
+use crate::context::model_switch::ModelSwitchRecord;
 use crate::context::models::CompressedBlock;
 use crate::durable::{DurableSession, SessionId, StructuredMessage};
 use crate::skill::SessionSkillState;
@@ -37,6 +38,8 @@ pub struct HandoffBundle {
     pub recent_tail: Vec<StructuredMessage>,
     pub skill_state: SessionSkillState,
     pub metadata: HandoffBundleMetadata,
+    /// Model switch history preserved across handoffs
+    pub model_switch_history: Vec<ModelSwitchRecord>,
 }
 
 pub struct HandoffExporter;
@@ -116,6 +119,7 @@ impl HandoffExporter {
                 source_session_id: session.id.to_string(),
                 size_estimate_tokens: size_estimate,
             },
+            model_switch_history: session.model_switch_history.clone(),
         };
 
         if config.handoff_export.include_portability_notes && !loss_notes.is_empty() {
@@ -169,6 +173,25 @@ impl HandoffImporter {
         // Restore skill state so activated skills survive handoff
         target.skill_state = bundle.skill_state;
 
+        // Restore model switch history
+        target.model_switch_history = bundle.model_switch_history.clone();
+
+        // Recreate timeline entries from model switch history
+        for record in &bundle.model_switch_history {
+            let timeline_index = target.timeline.len() as u64;
+            target
+                .timeline
+                .push(crate::durable::TimelineEntry::ModelSwitched {
+                    index: timeline_index,
+                    from_model: record.from_model.clone(),
+                    to_model: record.to_model.clone(),
+                    from_provider: record.from_provider.clone(),
+                    to_provider: record.to_provider.clone(),
+                    adapted: record.adapted,
+                    visible_id: None,
+                });
+        }
+
         // Note: MCP server and plugin enablement are NOT imported as part of handoff.
         // The destination runtime determines its own tool availability.
 
@@ -204,6 +227,25 @@ impl HandoffImporter {
 
         // Restore skill state so activated skills survive handoff
         session.skill_state = bundle.skill_state;
+
+        // Restore model switch history
+        session.model_switch_history = bundle.model_switch_history.clone();
+
+        // Recreate timeline entries from model switch history
+        for record in &bundle.model_switch_history {
+            let timeline_index = session.timeline.len() as u64;
+            session
+                .timeline
+                .push(crate::durable::TimelineEntry::ModelSwitched {
+                    index: timeline_index,
+                    from_model: record.from_model.clone(),
+                    to_model: record.to_model.clone(),
+                    from_provider: record.from_provider.clone(),
+                    to_provider: record.to_provider.clone(),
+                    adapted: record.adapted,
+                    visible_id: None,
+                });
+        }
 
         // Note: MCP server and plugin enablement are NOT imported as part of handoff.
         // The destination runtime determines its own tool availability.

@@ -86,6 +86,10 @@ pub struct ActiveContextSnapshot {
     pub context_window_limit: Option<usize>,
     pub quality: ContextQuality,
     pub categories: Vec<ContextCategoryUsage>,
+    /// Current model identifier for this session
+    pub current_model: Option<String>,
+    /// Number of model switches that have occurred
+    pub model_switch_count: usize,
 }
 
 impl ActiveContextSnapshot {
@@ -114,6 +118,11 @@ impl ActiveContextSnapshot {
     }
 }
 
+pub struct SessionModelInfo<'a> {
+    pub current_model: Option<&'a str>,
+    pub model_switch_count: usize,
+}
+
 pub struct ActiveContextAccountant;
 
 impl ActiveContextAccountant {
@@ -124,6 +133,7 @@ impl ActiveContextAccountant {
         tool_registry: &ToolRegistry,
         current_prompt: Option<&str>,
         context_window_hint: Option<usize>,
+        model_info: SessionModelInfo<'_>,
     ) -> ActiveContextSnapshot {
         let mut categories = Vec::new();
         let mut total = 0usize;
@@ -209,6 +219,8 @@ impl ActiveContextAccountant {
             context_window_limit: context_window_hint,
             quality: overall_quality,
             categories,
+            current_model: model_info.current_model.map(|m| m.to_string()),
+            model_switch_count: model_info.model_switch_count,
         }
     }
 
@@ -243,6 +255,7 @@ impl ContextTelemetry {
         tool_registry: &ToolRegistry,
         current_prompt: Option<&str>,
         context_window_hint: Option<usize>,
+        model_info: SessionModelInfo<'_>,
     ) -> ActiveContextSnapshot {
         ActiveContextAccountant::estimate_snapshot(
             instructions,
@@ -251,6 +264,7 @@ impl ContextTelemetry {
             tool_registry,
             current_prompt,
             context_window_hint,
+            model_info,
         )
     }
 }

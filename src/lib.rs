@@ -194,10 +194,12 @@ pub use config::{
 };
 pub use connection::IronConnection;
 pub use context::{
-    ActiveContextAccountant, ActiveContextSnapshot, CompressRange, CompressResult, CompressTool,
-    CompressedBlock, ContextCategory, ContextCategoryUsage, ContextPressure, ContextQuality,
-    ContextTelemetry, HandoffBundle, HandoffBundleMetadata, HandoffExportConfig, HandoffExporter,
-    HandoffImporter, TailRetentionPolicy, TailRetentionRule, HANDOFF_DEFAULT_TARGET_TOKENS,
+    ActiveContextAccountant, ActiveContextSnapshot, CapabilityDiff, CompressRange, CompressResult,
+    CompressTool, CompressedBlock, ContextAdaptationPlan, ContextCategory, ContextCategoryUsage,
+    ContextPressure, ContextQuality, ContextTelemetry, HandoffBundle, HandoffBundleMetadata,
+    HandoffExportConfig, HandoffExporter, HandoffImporter, ModelSwitchPlan, ModelSwitchRecord,
+    ModelSwitchRequest, PendingModelSwitch, SessionModelInfo, TailRetentionPolicy,
+    TailRetentionRule, HANDOFF_DEFAULT_TARGET_TOKENS,
 };
 pub use durable::{
     ContentBlock, DurableScriptRecord, DurableSession, DurableToolRecord, ScriptRecordStatus,

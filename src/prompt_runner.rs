@@ -193,6 +193,10 @@ impl PromptRunner {
                     &tool_registry,
                     None,
                     config.context_management.context_window_hint,
+                    crate::context::SessionModelInfo {
+                        current_model: None,
+                        model_switch_count: 0,
+                    },
                 );
                 let context_pressure = snapshot.pressure_with_thresholds(
                     config.context_management.soft_threshold,
@@ -1677,6 +1681,10 @@ impl PromptRunner {
                 &crate::tool::ToolRegistry::new(),
                 None,
                 config.context_management.context_window_hint,
+                crate::context::SessionModelInfo {
+                    current_model: session.current_model.as_deref(),
+                    model_switch_count: session.model_switch_history.len(),
+                },
             );
             snapshot.pressure_with_thresholds(
                 config.context_management.soft_threshold,

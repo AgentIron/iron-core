@@ -4,7 +4,7 @@ use iron_core::{
     ActiveContextAccountant, ActiveContextSnapshot, CompressRange, CompressTool, CompressedBlock,
     ContextCategory, ContextManagementConfig, ContextQuality, ContextTelemetry, DurableSession,
     HandoffBundle, HandoffExportConfig, HandoffExporter, HandoffImporter, SessionId,
-    TailRetentionPolicy, TailRetentionRule, ToolRegistry,
+    SessionModelInfo, TailRetentionPolicy, TailRetentionRule, ToolRegistry,
 };
 use iron_providers::Message;
 
@@ -20,7 +20,18 @@ fn make_session_with_messages(n: usize) -> DurableSession {
 #[test]
 fn telemetry_empty_session_reports_unknown_quality() {
     let registry = ToolRegistry::new();
-    let snapshot = ContextTelemetry::for_session(None, &[], &[], &registry, None, None);
+    let snapshot = ContextTelemetry::for_session(
+        None,
+        &[],
+        &[],
+        &registry,
+        None,
+        None,
+        SessionModelInfo {
+            current_model: None,
+            model_switch_count: 0,
+        },
+    );
     assert_eq!(snapshot.total_tokens, 0);
     assert_eq!(snapshot.quality, ContextQuality::Unknown);
     assert!(snapshot.categories.is_empty());
@@ -37,6 +48,10 @@ fn telemetry_with_instructions_counts_category() {
         &registry,
         None,
         Some(128_000),
+        SessionModelInfo {
+            current_model: None,
+            model_switch_count: 0,
+        },
     );
     assert!(snapshot.total_tokens > 0);
     assert_eq!(snapshot.quality, ContextQuality::Estimated);
@@ -57,7 +72,18 @@ fn telemetry_with_messages_counts_tail_category() {
         Message::user("How are you?"),
     ];
     let registry = ToolRegistry::new();
-    let snapshot = ContextTelemetry::for_session(None, &[], &messages, &registry, None, None);
+    let snapshot = ContextTelemetry::for_session(
+        None,
+        &[],
+        &messages,
+        &registry,
+        None,
+        None,
+        SessionModelInfo {
+            current_model: None,
+            model_switch_count: 0,
+        },
+    );
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
         .categories
@@ -77,7 +103,18 @@ fn telemetry_with_tools_counts_tool_definitions_category() {
         Ok(serde_json::json!({}))
     }));
 
-    let snapshot = ContextTelemetry::for_session(None, &[], &[], &registry, None, None);
+    let snapshot = ContextTelemetry::for_session(
+        None,
+        &[],
+        &[],
+        &registry,
+        None,
+        None,
+        SessionModelInfo {
+            current_model: None,
+            model_switch_count: 0,
+        },
+    );
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
         .categories
@@ -95,6 +132,10 @@ fn telemetry_with_current_prompt_counts_prompt_category() {
         &registry,
         Some("What is the weather?"),
         None,
+        SessionModelInfo {
+            current_model: None,
+            model_switch_count: 0,
+        },
     );
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
@@ -113,7 +154,18 @@ fn telemetry_with_compressed_blocks_counts_category() {
     )];
 
     let registry = ToolRegistry::new();
-    let snapshot = ContextTelemetry::for_session(None, &blocks, &[], &registry, None, None);
+    let snapshot = ContextTelemetry::for_session(
+        None,
+        &blocks,
+        &[],
+        &registry,
+        None,
+        None,
+        SessionModelInfo {
+            current_model: None,
+            model_switch_count: 0,
+        },
+    );
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
         .categories
@@ -144,6 +196,10 @@ fn telemetry_totals_match_category_sum() {
         &registry,
         Some("User prompt"),
         Some(128_000),
+        SessionModelInfo {
+            current_model: None,
+            model_switch_count: 0,
+        },
     );
 
     let category_sum: usize = snapshot.categories.iter().map(|c| c.tokens).sum();
@@ -168,6 +224,8 @@ fn telemetry_without_context_window_has_no_fullness() {
         context_window_limit: None,
         quality: ContextQuality::Estimated,
         categories: vec![],
+        current_model: None,
+        model_switch_count: 0,
     };
     assert!(snapshot.fullness().is_none());
 }
@@ -1844,5 +1902,158 @@ fn post_turn_compaction_skipped_when_under_threshold() {
 
         assert!(session.compressed_blocks().is_empty());
         assert!(session.uncompacted_tokens() > 0);
+    });
+}
+
+// =========================================================================
+// Model Switching Integration Tests
+// =========================================================================
+
+#[test]
+fn model_switch_idle_session_applies_immediately() {
+    use iron_core::{Config, IronAgent, ModelSwitchRequest};
+    use iron_providers::ProviderEvent;
+
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::Output {
+                content: "Hello!".into(),
+            },
+            ProviderEvent::Complete,
+        ]]);
+
+        let agent = IronAgent::new(Config::new(), provider);
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        // Send a prompt to establish conversation
+        let _ = session.prompt("hello").await;
+        assert!(session.is_idle());
+
+        // Switch model while idle
+        let request = ModelSwitchRequest::Managed {
+            provider_slug: "openai".into(),
+            model: "gpt-4o".into(),
+            api_key: None,
+        };
+        let result = session.switch_model(request);
+        assert!(result.is_ok(), "Switch should succeed on idle session");
+
+        // Verify timeline has ModelSwitched entry
+        let timeline = session.timeline();
+        let switch_entries: Vec<_> = timeline.iter().filter(|e| e.is_model_switched()).collect();
+        assert_eq!(
+            switch_entries.len(),
+            1,
+            "Should have one model switch entry"
+        );
+    });
+}
+
+#[test]
+fn model_switch_active_session_queues_switch() {
+    use iron_core::{Config, IronAgent, ModelSwitchRequest};
+    use iron_providers::ProviderEvent;
+
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::Output {
+                content: "Long response that takes time".into(),
+            },
+            ProviderEvent::Complete,
+        ]]);
+
+        let agent = IronAgent::new(Config::new(), provider);
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        // Start a streaming prompt (this makes the session active)
+        let (_handle, mut events) = session.prompt_stream("hello");
+
+        // While prompt is active, try to switch model
+        let request = ModelSwitchRequest::Managed {
+            provider_slug: "anthropic".into(),
+            model: "claude-3-sonnet".into(),
+            api_key: None,
+        };
+
+        // Switch should queue (not fail)
+        let result = session.switch_model(request);
+        assert!(result.is_ok(), "Switch should queue on active session");
+
+        // Wait for prompt to complete
+        while let Some(event) = events.next().await {
+            if matches!(event, iron_core::PromptEvent::Complete { .. }) {
+                break;
+            }
+        }
+
+        // After prompt completes, switch should be applied
+        assert!(session.is_idle());
+        let timeline = session.timeline();
+        let switch_entries: Vec<_> = timeline.iter().filter(|e| e.is_model_switched()).collect();
+        assert_eq!(
+            switch_entries.len(),
+            1,
+            "Switch should be applied after turn completes"
+        );
+    });
+}
+
+#[test]
+fn model_switch_handoff_bundle_roundtrip() {
+    use iron_core::{Config, IronAgent, ModelSwitchRequest};
+    use iron_providers::ProviderEvent;
+
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::Output {
+                content: "Hello!".into(),
+            },
+            ProviderEvent::Complete,
+        ]]);
+
+        let agent = IronAgent::new(Config::new(), provider);
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        // Send a prompt
+        let _ = session.prompt("hello").await;
+
+        // Switch model
+        let request = ModelSwitchRequest::Managed {
+            provider_slug: "openai".into(),
+            model: "gpt-4o".into(),
+            api_key: None,
+        };
+        let _ = session.switch_model(request);
+
+        // Export handoff bundle
+        let bundle = session
+            .export_handoff("gpt-4o", Some("openai"))
+            .await
+            .unwrap();
+
+        // Verify bundle has model switch history
+        assert!(
+            !bundle.model_switch_history.is_empty(),
+            "Bundle should contain switch history"
+        );
+        assert_eq!(bundle.model_switch_history[0].to_model, "gpt-4o");
+
+        // Create new session from handoff
+        let imported = conn.create_session_from_handoff(bundle).unwrap();
+
+        // Verify imported session has the switch history
+        let imported_timeline = imported.timeline();
+        let switch_entries: Vec<_> = imported_timeline
+            .iter()
+            .filter(|e| e.is_model_switched())
+            .collect();
+        assert_eq!(
+            switch_entries.len(),
+            1,
+            "Imported session should have switch history"
+        );
     });
 }
