@@ -1814,8 +1814,10 @@ impl AgentSession {
             tool_registry,
             current_prompt,
             context_window_hint,
-            session.current_model.as_deref(),
-            session.model_switch_history.len(),
+            crate::context::SessionModelInfo {
+                current_model: session.current_model.as_deref(),
+                model_switch_count: session.model_switch_history.len(),
+            },
         )
     }
 

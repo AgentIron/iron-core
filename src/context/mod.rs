@@ -16,7 +16,7 @@ pub mod telemetry;
 
 pub use accounting::{
     ActiveContextAccountant, ActiveContextSnapshot, ContextCategory, ContextCategoryUsage,
-    ContextPressure, ContextQuality,
+    ContextPressure, ContextQuality, SessionModelInfo,
 };
 pub use compaction::{CompressRange, CompressResult, CompressTool};
 pub use config::{

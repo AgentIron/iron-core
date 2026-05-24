@@ -4,7 +4,7 @@ use iron_core::{
     ActiveContextAccountant, ActiveContextSnapshot, CompressRange, CompressTool, CompressedBlock,
     ContextCategory, ContextManagementConfig, ContextQuality, ContextTelemetry, DurableSession,
     HandoffBundle, HandoffExportConfig, HandoffExporter, HandoffImporter, SessionId,
-    TailRetentionPolicy, TailRetentionRule, ToolRegistry,
+    SessionModelInfo, TailRetentionPolicy, TailRetentionRule, ToolRegistry,
 };
 use iron_providers::Message;
 
@@ -20,7 +20,7 @@ fn make_session_with_messages(n: usize) -> DurableSession {
 #[test]
 fn telemetry_empty_session_reports_unknown_quality() {
     let registry = ToolRegistry::new();
-    let snapshot = ContextTelemetry::for_session(None, &[], &[], &registry, None, None, None, 0);
+    let snapshot = ContextTelemetry::for_session(None, &[], &[], &registry, None, None, SessionModelInfo { current_model: None, model_switch_count: 0 });
     assert_eq!(snapshot.total_tokens, 0);
     assert_eq!(snapshot.quality, ContextQuality::Unknown);
     assert!(snapshot.categories.is_empty());
@@ -37,8 +37,7 @@ fn telemetry_with_instructions_counts_category() {
         &registry,
         None,
         Some(128_000),
-        None,
-        0,
+        SessionModelInfo { current_model: None, model_switch_count: 0 },
     );
     assert!(snapshot.total_tokens > 0);
     assert_eq!(snapshot.quality, ContextQuality::Estimated);
@@ -60,7 +59,7 @@ fn telemetry_with_messages_counts_tail_category() {
     ];
     let registry = ToolRegistry::new();
     let snapshot =
-        ContextTelemetry::for_session(None, &[], &messages, &registry, None, None, None, 0);
+        ContextTelemetry::for_session(None, &[], &messages, &registry, None, None, SessionModelInfo { current_model: None, model_switch_count: 0 });
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
         .categories
@@ -80,7 +79,7 @@ fn telemetry_with_tools_counts_tool_definitions_category() {
         Ok(serde_json::json!({}))
     }));
 
-    let snapshot = ContextTelemetry::for_session(None, &[], &[], &registry, None, None, None, 0);
+    let snapshot = ContextTelemetry::for_session(None, &[], &[], &registry, None, None, SessionModelInfo { current_model: None, model_switch_count: 0 });
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
         .categories
@@ -98,8 +97,7 @@ fn telemetry_with_current_prompt_counts_prompt_category() {
         &registry,
         Some("What is the weather?"),
         None,
-        None,
-        0,
+        SessionModelInfo { current_model: None, model_switch_count: 0 },
     );
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
@@ -119,7 +117,7 @@ fn telemetry_with_compressed_blocks_counts_category() {
 
     let registry = ToolRegistry::new();
     let snapshot =
-        ContextTelemetry::for_session(None, &blocks, &[], &registry, None, None, None, 0);
+        ContextTelemetry::for_session(None, &blocks, &[], &registry, None, None, SessionModelInfo { current_model: None, model_switch_count: 0 });
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
         .categories
@@ -150,8 +148,7 @@ fn telemetry_totals_match_category_sum() {
         &registry,
         Some("User prompt"),
         Some(128_000),
-        None,
-        0,
+        SessionModelInfo { current_model: None, model_switch_count: 0 },
     );
 
     let category_sum: usize = snapshot.categories.iter().map(|c| c.tokens).sum();
