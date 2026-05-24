@@ -175,6 +175,14 @@ impl SessionToolCatalog {
             definitions.push(def);
         }
 
+        if Self::compress_tool_available_for_session(session)
+            && !definitions
+                .iter()
+                .any(|def| def.name == crate::context::compaction::COMPRESS_TOOL_NAME)
+        {
+            definitions.push(crate::context::CompressTool::definition());
+        }
+
         // Add MCP tools for enabled and usable servers
         for server in mcp_registry.list_servers() {
             let server_id = server.config.id.clone();
@@ -276,6 +284,10 @@ impl SessionToolCatalog {
             definitions,
             tool_map: Arc::new(tool_map),
         }
+    }
+
+    fn compress_tool_available_for_session(session: &DurableSession) -> bool {
+        session.uncompacted_tokens > 0 || !session.compressed_blocks.is_empty()
     }
 
     /// Get all tool definitions visible to the model for this session.
@@ -1013,6 +1025,20 @@ mod tests {
         let session = DurableSession::new(SessionId::new());
         let catalog = build_catalog(&session);
         assert!(catalog.is_empty());
+    }
+
+    #[test]
+    fn catalog_exposes_compress_when_session_has_context() {
+        let mut session = DurableSession::new(SessionId::new());
+        session.add_user_text("context that can eventually be compressed");
+
+        let catalog = build_catalog(&session);
+
+        assert!(!catalog.contains(crate::context::compaction::COMPRESS_TOOL_NAME));
+        assert!(catalog
+            .get_definition(crate::context::compaction::COMPRESS_TOOL_NAME)
+            .is_some());
+        assert!(!catalog.requires_approval(crate::context::compaction::COMPRESS_TOOL_NAME));
     }
 
     #[test]

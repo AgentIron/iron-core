@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_MAINTENANCE_THRESHOLD: usize = 50_000;
 const DEFAULT_TAIL_MESSAGES: usize = 20;
+const DEFAULT_SOFT_THRESHOLD: f64 = 0.50;
+const DEFAULT_MEDIUM_THRESHOLD: f64 = 0.70;
+const DEFAULT_STRONG_THRESHOLD: f64 = 0.85;
+const DEFAULT_CRITICAL_THRESHOLD: f64 = 0.95;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextManagementConfig {
@@ -10,6 +14,10 @@ pub struct ContextManagementConfig {
     pub tail_retention: TailRetentionRule,
     pub handoff_export: HandoffExportConfig,
     pub context_window_hint: Option<usize>,
+    pub soft_threshold: f64,
+    pub medium_threshold: f64,
+    pub strong_threshold: f64,
+    pub critical_threshold: f64,
 }
 
 impl Default for ContextManagementConfig {
@@ -20,6 +28,10 @@ impl Default for ContextManagementConfig {
             tail_retention: TailRetentionRule::default(),
             handoff_export: HandoffExportConfig::default(),
             context_window_hint: None,
+            soft_threshold: DEFAULT_SOFT_THRESHOLD,
+            medium_threshold: DEFAULT_MEDIUM_THRESHOLD,
+            strong_threshold: DEFAULT_STRONG_THRESHOLD,
+            critical_threshold: DEFAULT_CRITICAL_THRESHOLD,
         }
     }
 }
@@ -54,6 +66,26 @@ impl ContextManagementConfig {
         self
     }
 
+    pub fn with_soft_threshold(mut self, threshold: f64) -> Self {
+        self.soft_threshold = threshold;
+        self
+    }
+
+    pub fn with_medium_threshold(mut self, threshold: f64) -> Self {
+        self.medium_threshold = threshold;
+        self
+    }
+
+    pub fn with_strong_threshold(mut self, threshold: f64) -> Self {
+        self.strong_threshold = threshold;
+        self
+    }
+
+    pub fn with_critical_threshold(mut self, threshold: f64) -> Self {
+        self.critical_threshold = threshold;
+        self
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !self.enabled {
             return Ok(());
@@ -65,6 +97,27 @@ impl ContextManagementConfig {
             if hint == 0 {
                 return Err("context_window_hint must be greater than 0".into());
             }
+        }
+        for (name, threshold) in [
+            ("soft_threshold", self.soft_threshold),
+            ("medium_threshold", self.medium_threshold),
+            ("strong_threshold", self.strong_threshold),
+            ("critical_threshold", self.critical_threshold),
+        ] {
+            if !(0.0..=1.0).contains(&threshold) {
+                return Err(format!(
+                    "{} must be between 0.0 and 1.0, got {}",
+                    name, threshold
+                ));
+            }
+        }
+        if !(self.soft_threshold <= self.medium_threshold
+            && self.medium_threshold <= self.strong_threshold
+            && self.strong_threshold <= self.critical_threshold)
+        {
+            return Err(
+                "pressure thresholds must be ordered: soft <= medium <= strong <= critical".into(),
+            );
         }
         self.tail_retention.validate()?;
         self.handoff_export.validate()

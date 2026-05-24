@@ -12,7 +12,7 @@
 //! available integrations and tools.
 
 use crate::context::config::ContextManagementConfig;
-use crate::context::models::{CompactedContext, PortabilityNote};
+use crate::context::models::CompressedBlock;
 use crate::durable::{DurableSession, SessionId, StructuredMessage};
 use crate::skill::SessionSkillState;
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,7 @@ pub struct HandoffBundle {
     pub version: String,
     pub instructions: Option<String>,
     pub handoff_note: String,
-    pub compacted_context: CompactedContext,
+    pub compressed_blocks: Vec<CompressedBlock>,
     pub recent_tail: Vec<StructuredMessage>,
     pub skill_state: SessionSkillState,
     pub metadata: HandoffBundleMetadata,
@@ -55,7 +55,7 @@ impl HandoffExporter {
     pub fn export(
         session: &DurableSession,
         model: &str,
-        compacted: Option<&CompactedContext>,
+        compressed_blocks: &[CompressedBlock],
         tail: Vec<StructuredMessage>,
         config: &ContextManagementConfig,
         provider_name: Option<&str>,
@@ -64,11 +64,9 @@ impl HandoffExporter {
             return Err("Cannot export handoff bundle: session has active tool calls".into());
         }
 
-        let compacted_context = compacted.cloned().unwrap_or_default();
-
         let target_tokens = config.handoff_export.default_target_tokens;
         let size_estimate = estimate_bundle_size(
-            &compacted_context,
+            compressed_blocks,
             &tail,
             session.instructions.as_deref(),
             &session.skill_state,
@@ -108,7 +106,7 @@ impl HandoffExporter {
             version: HANDOFF_BUNDLE_VERSION.to_string(),
             instructions: session.instructions.clone(),
             handoff_note,
-            compacted_context,
+            compressed_blocks: compressed_blocks.to_vec(),
             recent_tail: tail,
             skill_state: session.skill_state.clone(),
             metadata: HandoffBundleMetadata {
@@ -121,12 +119,12 @@ impl HandoffExporter {
         };
 
         if config.handoff_export.include_portability_notes && !loss_notes.is_empty() {
+            // Portability notes are no longer stored in a structured compacted_context.
+            // They are appended to the handoff_note instead.
             for note in loss_notes {
                 bundle
-                    .compacted_context
-                    .portability_notes
-                    .get_or_insert_with(Vec::new)
-                    .push(PortabilityNote::non_portable(&note, "local-only resource"));
+                    .handoff_note
+                    .push_str(&format!("\nPortability note: {}", note));
             }
         }
 
@@ -152,10 +150,15 @@ impl HandoffImporter {
             target.set_instructions(instr);
         }
 
-        if !bundle.compacted_context.is_empty() {
-            let rendered = bundle.compacted_context.render_to_text();
+        if !bundle.compressed_blocks.is_empty() {
+            let rendered = bundle
+                .compressed_blocks
+                .iter()
+                .map(|b| b.render_to_text())
+                .collect::<Vec<_>>()
+                .join("\n");
             if !rendered.is_empty() {
-                target.add_agent_text(format!("[Compacted context]\n{}", rendered));
+                target.add_agent_text(format!("[Compressed context]\n{}", rendered));
             }
         }
 
@@ -183,10 +186,15 @@ impl HandoffImporter {
             session.add_agent_text(format!("[Handoff] {}", bundle.handoff_note));
         }
 
-        if !bundle.compacted_context.is_empty() {
-            let rendered = bundle.compacted_context.render_to_text();
+        if !bundle.compressed_blocks.is_empty() {
+            let rendered = bundle
+                .compressed_blocks
+                .iter()
+                .map(|b| b.render_to_text())
+                .collect::<Vec<_>>()
+                .join("\n");
             if !rendered.is_empty() {
-                session.add_agent_text(format!("[Compacted context]\n{}", rendered));
+                session.add_agent_text(format!("[Compressed context]\n{}", rendered));
             }
         }
 
@@ -205,7 +213,7 @@ impl HandoffImporter {
 }
 
 fn estimate_bundle_size(
-    compacted: &CompactedContext,
+    compressed_blocks: &[CompressedBlock],
     tail: &[StructuredMessage],
     instructions: Option<&str>,
     skill_state: &SessionSkillState,
@@ -214,7 +222,9 @@ fn estimate_bundle_size(
     if let Some(instr) = instructions {
         total += (instr.len() as f64 * 0.25).ceil() as usize;
     }
-    total += (compacted.render_to_text().len() as f64 * 0.25).ceil() as usize;
+    for block in compressed_blocks {
+        total += (block.render_to_text().len() as f64 * 0.25).ceil() as usize;
+    }
     for msg in tail {
         total += (msg.text_content().len() as f64 * 0.25).ceil() as usize;
     }
@@ -255,7 +265,7 @@ mod tests {
 
         // Export a handoff bundle (minimal — no messages needed).
         let config = ContextManagementConfig::default();
-        let bundle = HandoffExporter::export(&source, "test-model", None, vec![], &config, None)
+        let bundle = HandoffExporter::export(&source, "test-model", &[], vec![], &config, None)
             .expect("export should succeed for idle session");
 
         // Hydrate into a new session.
@@ -288,7 +298,7 @@ mod tests {
         source.add_agent_text("hello");
 
         let config = ContextManagementConfig::default();
-        let bundle = HandoffExporter::export(&source, "test-model", None, vec![], &config, None)
+        let bundle = HandoffExporter::export(&source, "test-model", &[], vec![], &config, None)
             .expect("export should succeed");
 
         // Create a target with its own plugin enablement.
@@ -319,7 +329,7 @@ mod tests {
         assert!(source.skill_state.is_active("test-skill"));
 
         let config = ContextManagementConfig::default();
-        let bundle = HandoffExporter::export(&source, "test-model", None, vec![], &config, None)
+        let bundle = HandoffExporter::export(&source, "test-model", &[], vec![], &config, None)
             .expect("export should succeed");
 
         // Verify skill state is in the bundle
@@ -349,7 +359,7 @@ mod tests {
         source.activate_skill("big-skill", "x".repeat(1000), vec![]);
 
         let config = ContextManagementConfig::default();
-        let bundle = HandoffExporter::export(&source, "test-model", None, vec![], &config, None)
+        let bundle = HandoffExporter::export(&source, "test-model", &[], vec![], &config, None)
             .expect("export should succeed");
 
         // Size estimate should include skill instructions (~250 tokens for 1000 chars)

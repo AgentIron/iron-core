@@ -151,6 +151,12 @@ impl IronConnection {
 
         Ok((iron_session_id, durable))
     }
+
+    fn is_compact_command(blocks: &[crate::durable::ContentBlock]) -> bool {
+        blocks.iter().any(|block| {
+            matches!(block, crate::durable::ContentBlock::Text { text } if text.trim() == "/compact")
+        })
+    }
 }
 
 impl IronConnection {
@@ -200,6 +206,16 @@ impl IronConnection {
             .iter()
             .map(crate::durable::ContentBlock::from_acp_content)
             .collect();
+
+        let is_compact = Self::is_compact_command(&user_blocks);
+        let user_blocks = if is_compact {
+            vec![crate::durable::ContentBlock::Text {
+                text: "The user has requested context compaction. Please use the compress tool to replace resolved older context with durable summaries. Preserve all important facts, decisions, constraints, file paths, errors, tool results, and user intent needed for future work.".to_string(),
+            }]
+        } else {
+            user_blocks
+        };
+
         {
             let mut session = durable.lock();
             session.add_user_message(user_blocks);
@@ -220,7 +236,7 @@ impl IronConnection {
         let config = self.runtime.config().clone();
         let max_iterations = config.max_iterations;
 
-        let sink = AcpPromptSink::new(acp_session_id.clone(), client);
+        let sink = AcpPromptSink::new(acp_session_id.clone(), client.clone());
 
         let runner = PromptRunner::new(self.runtime.clone());
         let stop_reason = runner
@@ -230,7 +246,9 @@ impl IronConnection {
         self.runtime.finish_prompt(iron_session_id);
 
         if config.context_management.enabled {
-            runner.maybe_compact_post_turn(&durable, &config).await;
+            runner
+                .maybe_compact_post_turn(&durable, &config, &client, &acp_session_id)
+                .await;
         }
 
         Ok(acp::PromptResponse::new(stop_reason))
@@ -250,6 +268,16 @@ impl IronConnection {
             .iter()
             .map(crate::durable::ContentBlock::from_acp_content)
             .collect();
+
+        let is_compact = Self::is_compact_command(&user_blocks);
+        let user_blocks = if is_compact {
+            vec![crate::durable::ContentBlock::Text {
+                text: "The user has requested context compaction. Please use the compress tool to replace resolved older context with durable summaries. Preserve all important facts, decisions, constraints, file paths, errors, tool results, and user intent needed for future work.".to_string(),
+            }]
+        } else {
+            user_blocks
+        };
+
         {
             let mut session = durable.lock();
             session.add_user_message(user_blocks);
@@ -270,7 +298,7 @@ impl IronConnection {
         let config = self.runtime.config().clone();
         let max_iterations = config.max_iterations;
 
-        let sink = AcpPromptSink::new(acp_session_id.clone(), client);
+        let sink = AcpPromptSink::new(acp_session_id.clone(), client.clone());
 
         // Resolve the managed provider for this prompt
         let provider = match self
@@ -299,7 +327,9 @@ impl IronConnection {
         self.runtime.finish_prompt(iron_session_id);
 
         if config.context_management.enabled {
-            runner.maybe_compact_post_turn(&durable, &config).await;
+            runner
+                .maybe_compact_post_turn(&durable, &config, &client, &acp_session_id)
+                .await;
         }
 
         Ok(acp::PromptResponse::new(stop_reason))
