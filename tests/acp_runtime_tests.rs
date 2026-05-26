@@ -1026,7 +1026,7 @@ fn approval_strategy_never_skips_even_for_approval_tools() {
 
 #[test]
 fn cancel_sets_cancel_requested_flag_on_ephemeral_turn() {
-    let mut turn = EphemeralTurn::new(SessionId::new());
+    let mut turn = EphemeralTurn::new(SessionId::new(), None);
     turn.start();
     assert_eq!(turn.phase, TurnPhase::Running);
     assert!(!turn.is_cancel_requested());
@@ -1038,7 +1038,7 @@ fn cancel_sets_cancel_requested_flag_on_ephemeral_turn() {
 
 #[test]
 fn cancel_clears_pending_permissions() {
-    let mut turn = EphemeralTurn::new(SessionId::new());
+    let mut turn = EphemeralTurn::new(SessionId::new(), None);
     turn.start();
 
     turn.request_permission("c1".into(), "tool_a".into(), json!({}));
@@ -1052,7 +1052,7 @@ fn cancel_clears_pending_permissions() {
 
 #[test]
 fn resolve_permission_removes_specific_pending_permission() {
-    let mut turn = EphemeralTurn::new(SessionId::new());
+    let mut turn = EphemeralTurn::new(SessionId::new(), None);
     turn.start();
 
     turn.request_permission("c1".into(), "tool_a".into(), json!({}));
@@ -1066,7 +1066,7 @@ fn resolve_permission_removes_specific_pending_permission() {
 
 #[test]
 fn cancel_token_is_shared() {
-    let turn = EphemeralTurn::new(SessionId::new());
+    let turn = EphemeralTurn::new(SessionId::new(), None);
     let token = turn.cancel_token();
 
     assert!(!token.load(Ordering::SeqCst));
@@ -1133,14 +1133,14 @@ fn agent_session_cancel_signals_cancellation() {
 
 #[test]
 fn ephemeral_turn_starts_in_idle() {
-    let turn = EphemeralTurn::new(SessionId::new());
+    let turn = EphemeralTurn::new(SessionId::new(), None);
     assert_eq!(turn.phase, TurnPhase::Idle);
     assert!(!turn.is_terminal());
 }
 
 #[test]
 fn ephemeral_turn_completed_is_terminal() {
-    let mut turn = EphemeralTurn::new(SessionId::new());
+    let mut turn = EphemeralTurn::new(SessionId::new(), None);
     turn.start();
     turn.complete();
     assert_eq!(turn.phase, TurnPhase::Completed);
@@ -1149,7 +1149,7 @@ fn ephemeral_turn_completed_is_terminal() {
 
 #[test]
 fn ephemeral_turn_cancelled_is_terminal() {
-    let mut turn = EphemeralTurn::new(SessionId::new());
+    let mut turn = EphemeralTurn::new(SessionId::new(), None);
     turn.start();
     turn.cancel();
     assert_eq!(turn.phase, TurnPhase::Cancelled);
@@ -1158,7 +1158,7 @@ fn ephemeral_turn_cancelled_is_terminal() {
 
 #[test]
 fn add_chunk_records_partial_output() {
-    let mut turn = EphemeralTurn::new(SessionId::new());
+    let mut turn = EphemeralTurn::new(SessionId::new(), None);
     turn.start();
 
     turn.add_chunk("hello ".into());
@@ -1169,7 +1169,7 @@ fn add_chunk_records_partial_output() {
 
 #[test]
 fn complete_clears_chunks_and_permissions() {
-    let mut turn = EphemeralTurn::new(SessionId::new());
+    let mut turn = EphemeralTurn::new(SessionId::new(), None);
     turn.start();
     turn.add_chunk("data".into());
     turn.request_permission("c1".into(), "t".into(), json!({}));

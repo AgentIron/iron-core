@@ -166,6 +166,7 @@ pub mod capability;
 pub mod config;
 pub mod connection;
 pub mod context;
+pub mod debug;
 pub mod durable;
 pub mod embedded_python;
 pub mod ephemeral;
@@ -258,6 +259,14 @@ pub use iron_providers::{
     GenerationConfig, InferenceRequest, Provider, ProviderConnection, ProviderCredential,
     ProviderError, ProviderEvent, ProviderRegistry, RuntimeConfig, RuntimeConfigSource, ToolCall,
     ToolPolicy, Transcript,
+};
+
+// --- Debug observation public surface ---
+pub use debug::{
+    CompactionDebugEvent, ConfigDebugEvent, ContextDebugEvent, DebugEvent, DebugPayload,
+    DebugScope, DebugSeverity, DebugSink, InfluenceDestination, InfluenceEffect, InfluenceSource,
+    NullDebugSink, PromptDebugEvent, ProviderDebugEvent, SectionSummary, SkillDebugEvent,
+    ToolDebugEvent,
 };
 
 pub mod prelude {

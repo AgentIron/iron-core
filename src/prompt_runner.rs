@@ -135,6 +135,7 @@ impl PromptRunner {
         max_iterations: u32,
     ) -> acp::StopReason {
         let mut iteration: u32 = 0;
+        let turn_id = ephemeral.lock().turn_id.clone();
 
         loop {
             {
@@ -205,7 +206,33 @@ impl PromptRunner {
                     config.context_management.critical_threshold,
                 );
 
-                if let Some(tool_catalog) = tool_catalog.as_ref() {
+                self.runtime.emit_debug(crate::debug::DebugEvent {
+                    timestamp: chrono::Utc::now(),
+                    sequence: self.runtime.next_debug_sequence(),
+                    severity: crate::debug::DebugSeverity::Info,
+                    scope: crate::debug::DebugScope {
+                        session_id: Some(session_id),
+                        turn_id: turn_id.clone(),
+                        ..crate::debug::DebugScope::default()
+                    },
+                    payload: crate::debug::DebugPayload::Context(
+                        crate::debug::ContextDebugEvent::SnapshotEstimated {
+                            total_tokens: snapshot.total_tokens,
+                            context_window_limit: snapshot.context_window_limit,
+                            quality: snapshot.quality,
+                            pressure: context_pressure.as_str().to_string(),
+                            categories: snapshot
+                                .categories
+                                .iter()
+                                .map(|usage| {
+                                    (format!("{:?}", usage.category), usage.tokens, usage.quality)
+                                })
+                                .collect(),
+                        },
+                    ),
+                });
+
+                let request = if let Some(tool_catalog) = tool_catalog.as_ref() {
                     crate::request_builder::build_inference_request_with_effective_tools(
                         config,
                         &messages,
@@ -235,7 +262,109 @@ impl PromptRunner {
                         },
                         &tool_registry,
                     )
+                };
+
+                // Emit prompt debug events inside the block where variables are in scope
+                if let Ok(ref req) = request {
+                    if let Some(ref instructions) = req.instructions {
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        instructions.hash(&mut hasher);
+                        let fingerprint = format!("{:x}", hasher.finish());
+                        let total_chars = instructions.len();
+                        let sections: Vec<crate::debug::SectionSummary> =
+                            crate::prompt::system::PROMPT_SECTION_ORDER
+                                .iter()
+                                .map(|section| {
+                                    let meta = section.metadata();
+                                    crate::debug::SectionSummary {
+                                        name: meta.title.to_string(),
+                                        owner: Some(format!("{:?}", meta.owner)),
+                                        temperature: Some(format!("{:?}", meta.temperature)),
+                                        chars: 0,
+                                    }
+                                })
+                                .collect();
+
+                        self.runtime.emit_debug(crate::debug::DebugEvent {
+                            timestamp: chrono::Utc::now(),
+                            sequence: self.runtime.next_debug_sequence(),
+                            severity: crate::debug::DebugSeverity::Info,
+                            scope: crate::debug::DebugScope {
+                                session_id: Some(session_id),
+                                turn_id: turn_id.clone(),
+                                ..crate::debug::DebugScope::default()
+                            },
+                            payload: crate::debug::DebugPayload::Prompt(
+                                crate::debug::PromptDebugEvent::SystemPromptRendered {
+                                    fingerprint,
+                                    total_chars,
+                                    sections,
+                                    changed: None,
+                                },
+                            ),
+                        });
+
+                        // Emit model input influence for context pressure
+                        self.runtime.emit_debug(crate::debug::DebugEvent {
+                            timestamp: chrono::Utc::now(),
+                            sequence: self.runtime.next_debug_sequence(),
+                            severity: crate::debug::DebugSeverity::Info,
+                            scope: crate::debug::DebugScope {
+                                session_id: Some(session_id),
+                                turn_id: turn_id.clone(),
+                                ..crate::debug::DebugScope::default()
+                            },
+                            payload: crate::debug::DebugPayload::Prompt(
+                                crate::debug::PromptDebugEvent::ModelInputInfluence {
+                                    source: crate::debug::InfluenceSource::ContextPressure,
+                                    destination:
+                                        crate::debug::InfluenceDestination::SystemPromptSection(
+                                            "Tool Philosophy".to_string(),
+                                        ),
+                                    effect: crate::debug::InfluenceEffect::Added,
+                                    reason: format!(
+                                        "context pressure guidance: {}",
+                                        context_pressure.as_str()
+                                    ),
+                                },
+                            ),
+                        });
+
+                        // Emit model input influence for compression availability
+                        self.runtime.emit_debug(crate::debug::DebugEvent {
+                            timestamp: chrono::Utc::now(),
+                            sequence: self.runtime.next_debug_sequence(),
+                            severity: crate::debug::DebugSeverity::Info,
+                            scope: crate::debug::DebugScope {
+                                session_id: Some(session_id),
+                                turn_id: turn_id.clone(),
+                                ..crate::debug::DebugScope::default()
+                            },
+                            payload: crate::debug::DebugPayload::Prompt(
+                                crate::debug::PromptDebugEvent::ModelInputInfluence {
+                                    source: crate::debug::InfluenceSource::CompactionAvailability,
+                                    destination:
+                                        crate::debug::InfluenceDestination::SystemPromptSection(
+                                            "Tool Philosophy".to_string(),
+                                        ),
+                                    effect: if compression_available {
+                                        crate::debug::InfluenceEffect::Added
+                                    } else {
+                                        crate::debug::InfluenceEffect::Suppressed
+                                    },
+                                    reason: format!(
+                                        "compression_available={}",
+                                        compression_available
+                                    ),
+                                },
+                            ),
+                        });
+                    }
                 }
+
+                request
             };
 
             let request = match request {
@@ -592,6 +721,41 @@ impl PromptRunner {
             let tool_requires = tool_catalog.requires_approval(&call.tool_name);
             let requires = approval_strategy.is_approval_required(tool_requires);
 
+            // Emit tool approval evaluation debug event
+            let decision_source = if tool_requires {
+                "tool_catalog_requires_approval"
+            } else {
+                "approval_strategy"
+            };
+            let (turn_session_id, turn_id) = {
+                let turn = ephemeral.lock();
+                (turn.session_id, turn.turn_id.clone())
+            };
+            self.runtime.emit_debug(crate::debug::DebugEvent {
+                timestamp: chrono::Utc::now(),
+                sequence: self.runtime.next_debug_sequence(),
+                severity: crate::debug::DebugSeverity::Info,
+                scope: crate::debug::DebugScope {
+                    session_id: Some(turn_session_id),
+                    turn_id,
+                    tool_call_id: Some(call.call_id.clone()),
+                    ..crate::debug::DebugScope::default()
+                },
+                payload: crate::debug::DebugPayload::Tool(
+                    crate::debug::ToolDebugEvent::ApprovalEvaluated {
+                        tool_name: call.tool_name.clone(),
+                        approved: !requires,
+                        decision_source: decision_source.to_string(),
+                        user_approval_requested: requires,
+                        reason: if requires {
+                            "Tool requires approval".to_string()
+                        } else {
+                            "Approval not required".to_string()
+                        },
+                    },
+                ),
+            });
+
             if !requires {
                 approved.push(call.clone());
                 continue;
@@ -807,7 +971,7 @@ impl PromptRunner {
     async fn execute_single_tool(
         &self,
         durable: &Arc<Mutex<DurableSession>>,
-        _ephemeral: &Arc<Mutex<EphemeralTurn>>,
+        ephemeral: &Arc<Mutex<EphemeralTurn>>,
         sink: &dyn PromptSink,
         call: iron_providers::ToolCall,
         cancel_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -847,7 +1011,7 @@ impl PromptRunner {
         if call.tool_name == "python_exec" && self.runtime.config().embedded_python.enabled {
             self.execute_python_script(
                 durable,
-                _ephemeral,
+                ephemeral,
                 sink,
                 &call,
                 cancel_token,
@@ -858,16 +1022,21 @@ impl PromptRunner {
         }
 
         if call.tool_name == "activate_skill" {
-            self.execute_activate_skill(durable, sink, call).await;
+            let turn_id = ephemeral.lock().turn_id.clone();
+            self.execute_activate_skill(durable, sink, call, turn_id)
+                .await;
             return;
         }
 
         if call.tool_name == crate::context::compaction::COMPRESS_TOOL_NAME {
-            self.execute_compress_tool(durable, sink, call).await;
+            let turn_id = ephemeral.lock().turn_id.clone();
+            self.execute_compress_tool(durable, sink, call, turn_id)
+                .await;
             return;
         }
 
-        self.execute_standard_tool(durable, sink, call, tool_catalog.as_ref())
+        let turn_id = ephemeral.lock().turn_id.clone();
+        self.execute_standard_tool(durable, sink, call, tool_catalog.as_ref(), turn_id)
             .await;
     }
 
@@ -876,10 +1045,43 @@ impl PromptRunner {
         durable: &Arc<Mutex<DurableSession>>,
         sink: &dyn PromptSink,
         call: iron_providers::ToolCall,
+        turn_id: Option<String>,
     ) {
         let call_id = call.call_id.clone();
         let tool_name = call.tool_name.clone();
         let config = self.runtime.config();
+        let session_id = durable.lock().id;
+
+        // Emit compaction requested debug event
+        self.runtime.emit_debug(crate::debug::DebugEvent {
+            timestamp: chrono::Utc::now(),
+            sequence: self.runtime.next_debug_sequence(),
+            severity: crate::debug::DebugSeverity::Info,
+            scope: crate::debug::DebugScope {
+                session_id: Some(session_id),
+                turn_id: turn_id.clone(),
+                tool_call_id: Some(call_id.clone()),
+                ..crate::debug::DebugScope::default()
+            },
+            payload: crate::debug::DebugPayload::Compaction(
+                crate::debug::CompactionDebugEvent::Requested {
+                    topic_present: call.arguments.get("topic").is_some(),
+                    range_count: call
+                        .arguments
+                        .get("ranges")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0),
+                    thresholds: Some(format!(
+                        "soft={:.2}, medium={:.2}, strong={:.2}, critical={:.2}",
+                        config.context_management.soft_threshold,
+                        config.context_management.medium_threshold,
+                        config.context_management.strong_threshold,
+                        config.context_management.critical_threshold,
+                    )),
+                },
+            ),
+        });
 
         let result = {
             let mut session = durable.lock();
@@ -909,7 +1111,7 @@ impl PromptRunner {
                         "context_pressure": result.pressure_state,
                     });
                     session.complete_tool_call(&call_id, output.clone());
-                    Ok(output)
+                    Ok((output, result))
                 }
                 Err(error) => {
                     let output = serde_json::json!({
@@ -917,13 +1119,35 @@ impl PromptRunner {
                         "error": error,
                     });
                     session.fail_tool_call(&call_id, output.clone());
-                    Err(output)
+                    Err((output, error.to_string()))
                 }
             }
         };
 
         match result {
-            Ok(output) => {
+            Ok((output, result)) => {
+                // Emit compaction applied debug event
+                self.runtime.emit_debug(crate::debug::DebugEvent {
+                    timestamp: chrono::Utc::now(),
+                    sequence: self.runtime.next_debug_sequence(),
+                    severity: crate::debug::DebugSeverity::Info,
+                    scope: crate::debug::DebugScope {
+                        session_id: Some(session_id),
+                        turn_id: turn_id.clone(),
+                        tool_call_id: Some(call_id.clone()),
+                        ..crate::debug::DebugScope::default()
+                    },
+                    payload: crate::debug::DebugPayload::Compaction(
+                        crate::debug::CompactionDebugEvent::Applied {
+                            block_count: result.blocks_created.len(),
+                            old_size_tokens: None,
+                            new_size_tokens: None,
+                            pressure_state: result.pressure_state.clone(),
+                            reduction_pct: None,
+                        },
+                    ),
+                });
+
                 sink.emit(PromptLifecycleEvent::ToolCallUpdate {
                     call_id,
                     tool_name,
@@ -932,7 +1156,23 @@ impl PromptRunner {
                 })
                 .await;
             }
-            Err(output) => {
+            Err((output, error)) => {
+                // Emit compaction rejected debug event
+                self.runtime.emit_debug(crate::debug::DebugEvent {
+                    timestamp: chrono::Utc::now(),
+                    sequence: self.runtime.next_debug_sequence(),
+                    severity: crate::debug::DebugSeverity::Warning,
+                    scope: crate::debug::DebugScope {
+                        session_id: Some(session_id),
+                        turn_id: turn_id.clone(),
+                        tool_call_id: Some(call_id.clone()),
+                        ..crate::debug::DebugScope::default()
+                    },
+                    payload: crate::debug::DebugPayload::Compaction(
+                        crate::debug::CompactionDebugEvent::Rejected { reason: error },
+                    ),
+                });
+
                 sink.emit(PromptLifecycleEvent::ToolCallUpdate {
                     call_id,
                     tool_name,
@@ -950,9 +1190,33 @@ impl PromptRunner {
         sink: &dyn PromptSink,
         call: iron_providers::ToolCall,
         tool_catalog: &SessionToolCatalog,
+        turn_id: Option<String>,
     ) {
         let call_id = call.call_id.clone();
         let tool_name = call.tool_name.clone();
+        let session_id = durable.lock().id;
+
+        // Emit tool execution started debug event
+        self.runtime.emit_debug(crate::debug::DebugEvent {
+            timestamp: chrono::Utc::now(),
+            sequence: self.runtime.next_debug_sequence(),
+            severity: crate::debug::DebugSeverity::Info,
+            scope: crate::debug::DebugScope {
+                session_id: Some(session_id),
+                turn_id: turn_id.clone(),
+                tool_call_id: Some(call_id.clone()),
+                ..crate::debug::DebugScope::default()
+            },
+            payload: crate::debug::DebugPayload::Tool(
+                crate::debug::ToolDebugEvent::ExecutionStarted {
+                    tool_name: tool_name.clone(),
+                    tool_source: "session_catalog".to_string(),
+                    call_id: call_id.clone(),
+                },
+            ),
+        });
+
+        let start_time = std::time::Instant::now();
 
         let call_id_owned = call.call_id.clone();
         let tool_name_owned = call.tool_name.clone();
@@ -963,10 +1227,39 @@ impl PromptRunner {
         };
 
         let execute_result = execute_future.await;
+        let duration_ms = start_time.elapsed().as_millis() as u64;
 
         match execute_result {
             Ok(result) => {
                 let limited_result = limit_result_size(result);
+                let truncated = limited_result
+                    .get("truncated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                // Emit tool execution finished debug event (success)
+                self.runtime.emit_debug(crate::debug::DebugEvent {
+                    timestamp: chrono::Utc::now(),
+                    sequence: self.runtime.next_debug_sequence(),
+                    severity: crate::debug::DebugSeverity::Info,
+                    scope: crate::debug::DebugScope {
+                        session_id: Some(session_id),
+                        turn_id: turn_id.clone(),
+                        tool_call_id: Some(call_id.clone()),
+                        ..crate::debug::DebugScope::default()
+                    },
+                    payload: crate::debug::DebugPayload::Tool(
+                        crate::debug::ToolDebugEvent::ExecutionFinished {
+                            tool_name: tool_name.clone(),
+                            call_id: call_id.clone(),
+                            status: "completed".to_string(),
+                            duration_ms: Some(duration_ms),
+                            truncated,
+                            reason: None,
+                        },
+                    ),
+                });
+
                 if let Some(transcript_text) = plugin_transcript_text(&limited_result) {
                     sink.emit(PromptLifecycleEvent::Output {
                         text: transcript_text.to_string(),
@@ -987,6 +1280,29 @@ impl PromptRunner {
             }
             Err(error) => {
                 let result = serde_json::json!({"error": error.to_string()});
+
+                // Emit tool execution finished debug event (failure)
+                self.runtime.emit_debug(crate::debug::DebugEvent {
+                    timestamp: chrono::Utc::now(),
+                    sequence: self.runtime.next_debug_sequence(),
+                    severity: crate::debug::DebugSeverity::Warning,
+                    scope: crate::debug::DebugScope {
+                        session_id: Some(session_id),
+                        turn_id: turn_id.clone(),
+                        tool_call_id: Some(call_id.clone()),
+                        ..crate::debug::DebugScope::default()
+                    },
+                    payload: crate::debug::DebugPayload::Tool(
+                        crate::debug::ToolDebugEvent::ExecutionFinished {
+                            tool_name: tool_name.clone(),
+                            call_id: call_id.clone(),
+                            status: "failed".to_string(),
+                            duration_ms: Some(duration_ms),
+                            truncated: false,
+                            reason: Some(error.to_string()),
+                        },
+                    ),
+                });
                 {
                     let mut session = durable.lock();
                     session.fail_tool_call(&call_id, result.clone());
@@ -1007,8 +1323,10 @@ impl PromptRunner {
         durable: &Arc<Mutex<DurableSession>>,
         sink: &dyn PromptSink,
         call: iron_providers::ToolCall,
+        turn_id: Option<String>,
     ) {
         let call_id = call.call_id.clone();
+        let session_id = durable.lock().id;
         let skill_name = call
             .arguments
             .get("skill_name")
@@ -1028,6 +1346,23 @@ impl PromptRunner {
                 output: Some(result),
             })
             .await;
+            self.runtime.emit_debug(crate::debug::DebugEvent {
+                timestamp: chrono::Utc::now(),
+                sequence: self.runtime.next_debug_sequence(),
+                severity: crate::debug::DebugSeverity::Warning,
+                scope: crate::debug::DebugScope {
+                    session_id: Some(session_id),
+                    turn_id: turn_id.clone(),
+                    tool_call_id: Some(call_id.clone()),
+                    ..crate::debug::DebugScope::default()
+                },
+                payload: crate::debug::DebugPayload::Skill(
+                    crate::debug::SkillDebugEvent::ActivationRejected {
+                        skill_name: "".to_string(),
+                        reason: "missing_argument".to_string(),
+                    },
+                ),
+            });
             return;
         }
 
@@ -1054,6 +1389,23 @@ impl PromptRunner {
                     output: Some(result),
                 })
                 .await;
+                self.runtime.emit_debug(crate::debug::DebugEvent {
+                    timestamp: chrono::Utc::now(),
+                    sequence: self.runtime.next_debug_sequence(),
+                    severity: crate::debug::DebugSeverity::Warning,
+                    scope: crate::debug::DebugScope {
+                        session_id: Some(session_id),
+                        turn_id: turn_id.clone(),
+                        tool_call_id: Some(call_id.clone()),
+                        ..crate::debug::DebugScope::default()
+                    },
+                    payload: crate::debug::DebugPayload::Skill(
+                        crate::debug::SkillDebugEvent::ActivationRejected {
+                            skill_name: skill_name.to_string(),
+                            reason: "unavailable".to_string(),
+                        },
+                    ),
+                });
                 return;
             }
         };
@@ -1076,6 +1428,23 @@ impl PromptRunner {
                 output: Some(result),
             })
             .await;
+            self.runtime.emit_debug(crate::debug::DebugEvent {
+                timestamp: chrono::Utc::now(),
+                sequence: self.runtime.next_debug_sequence(),
+                severity: crate::debug::DebugSeverity::Warning,
+                scope: crate::debug::DebugScope {
+                    session_id: Some(session_id),
+                    turn_id: turn_id.clone(),
+                    tool_call_id: Some(call_id.clone()),
+                    ..crate::debug::DebugScope::default()
+                },
+                payload: crate::debug::DebugPayload::Skill(
+                    crate::debug::SkillDebugEvent::ActivationRejected {
+                        skill_name: skill_name.to_string(),
+                        reason: "trust_required".to_string(),
+                    },
+                ),
+            });
             return;
         }
 
@@ -1086,6 +1455,29 @@ impl PromptRunner {
                 session.activate_skill(&skill.metadata.id, &skill.body, skill.resources.clone());
             }
         }
+
+        self.runtime.emit_debug(crate::debug::DebugEvent {
+            timestamp: chrono::Utc::now(),
+            sequence: self.runtime.next_debug_sequence(),
+            severity: crate::debug::DebugSeverity::Info,
+            scope: crate::debug::DebugScope {
+                session_id: Some(session_id),
+                turn_id,
+                tool_call_id: Some(call_id.clone()),
+                ..crate::debug::DebugScope::default()
+            },
+            payload: crate::debug::DebugPayload::Skill(
+                crate::debug::SkillDebugEvent::ActivationSuccess {
+                    skill_name: skill.metadata.id.clone(),
+                    source_kind: format!("{:?}", skill.metadata.origin),
+                    activation_source: if already_active {
+                        "already_active".to_string()
+                    } else {
+                        "model_request".to_string()
+                    },
+                },
+            ),
+        });
 
         let result = if already_active {
             serde_json::json!({
@@ -1854,7 +2246,7 @@ mod tests {
     fn make_session_and_ephemeral() -> (Arc<Mutex<DurableSession>>, Arc<Mutex<EphemeralTurn>>) {
         let session_id = SessionId::new();
         let durable = Arc::new(Mutex::new(DurableSession::new(session_id)));
-        let ephemeral = Arc::new(Mutex::new(EphemeralTurn::new(session_id)));
+        let ephemeral = Arc::new(Mutex::new(EphemeralTurn::new(session_id, None)));
         ephemeral.lock().start();
         (durable, ephemeral)
     }
@@ -1870,6 +2262,89 @@ mod tests {
                 _ => None,
             })
             .collect::<String>()
+    }
+
+    #[tokio::test]
+    async fn debug_prompt_and_context_events_include_turn_id() {
+        let runtime = IronRuntime::new(
+            Config::default(),
+            StreamEventsProvider::new(vec![Ok(iron_providers::ProviderEvent::Complete)]),
+        );
+        let debug_sink = Arc::new(crate::debug::test_helpers::RecordingDebugSink::new());
+        runtime.set_debug_sink(Some(debug_sink.clone()));
+        let _ = debug_sink.take_events();
+
+        let runner = PromptRunner::new(runtime);
+        let session_id = SessionId::new();
+        let durable = Arc::new(Mutex::new(DurableSession::new(session_id)));
+        let ephemeral = Arc::new(Mutex::new(EphemeralTurn::new(
+            session_id,
+            Some("turn-test".to_string()),
+        )));
+        ephemeral.lock().start();
+
+        let _ = runner
+            .run(&durable, &ephemeral, &NopSink, &Config::default(), 1)
+            .await;
+
+        let events = debug_sink.events();
+        assert!(
+            events.iter().any(|event| matches!(
+                event.payload,
+                crate::debug::DebugPayload::Context(
+                    crate::debug::ContextDebugEvent::SnapshotEstimated { .. }
+                ) if event.scope.turn_id.as_deref() == Some("turn-test")
+            )),
+            "context snapshot debug event should include the active turn_id"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event.payload,
+                crate::debug::DebugPayload::Prompt(
+                    crate::debug::PromptDebugEvent::SystemPromptRendered { .. }
+                ) if event.scope.turn_id.as_deref() == Some("turn-test")
+            )),
+            "system prompt debug event should include the active turn_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_tool_events_include_turn_id() {
+        let config =
+            Config::default().with_approval_strategy(crate::config::ApprovalStrategy::Always);
+        let runtime = IronRuntime::new(
+            config.clone(),
+            StreamEventsProvider::new(vec![
+                Ok(iron_providers::ProviderEvent::ToolCall {
+                    call: iron_providers::ToolCall {
+                        call_id: "call-1".to_string(),
+                        tool_name: "unknown_tool".to_string(),
+                        arguments: serde_json::json!({}),
+                    },
+                }),
+                Ok(iron_providers::ProviderEvent::Complete),
+            ]),
+        );
+        let debug_sink = Arc::new(crate::debug::test_helpers::RecordingDebugSink::new());
+        runtime.set_debug_sink(Some(debug_sink.clone()));
+        let (session_id, durable) = runtime.create_session(crate::ConnectionId(1)).unwrap();
+        let ephemeral = runtime.try_start_prompt(session_id).unwrap();
+        let turn_id = ephemeral.lock().turn_id.clone();
+        let _ = debug_sink.take_events();
+
+        let runner = PromptRunner::new(runtime);
+        let _ = runner.run(&durable, &ephemeral, &NopSink, &config, 1).await;
+
+        let events = debug_sink.events();
+        assert!(
+            events.iter().any(|event| matches!(
+                event.payload,
+                crate::debug::DebugPayload::Tool(
+                    crate::debug::ToolDebugEvent::ApprovalEvaluated { .. }
+                ) if event.scope.turn_id == turn_id
+            )),
+            "tool approval debug event should include the active turn_id"
+        );
     }
 
     #[tokio::test]

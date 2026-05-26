@@ -1,16 +1,16 @@
-# Graph Report - iron-core  (2026-05-23)
+# Graph Report - iron-core  (2026-05-25)
 
 ## Corpus Check
-- 214 files · ~193,263 words
+- 225 files · ~208,641 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 3775 nodes · 5956 edges · 253 communities (213 shown, 40 thin omitted)
-- Extraction: 94% EXTRACTED · 6% INFERRED · 0% AMBIGUOUS · INFERRED: 352 edges (avg confidence: 0.8)
+- 4085 nodes · 6370 edges · 280 communities (242 shown, 38 thin omitted)
+- Extraction: 94% EXTRACTED · 6% INFERRED · 0% AMBIGUOUS · INFERRED: 361 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `354c9537`
+- Built from commit: `6d2a0243`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -124,9 +124,9 @@
 - [[_COMMUNITY_Community 106|Community 106]]
 - [[_COMMUNITY_Community 107|Community 107]]
 - [[_COMMUNITY_Community 108|Community 108]]
-- [[_COMMUNITY_Community 109|Community 109]]
 - [[_COMMUNITY_Community 110|Community 110]]
 - [[_COMMUNITY_Community 111|Community 111]]
+- [[_COMMUNITY_Community 112|Community 112]]
 - [[_COMMUNITY_Community 113|Community 113]]
 - [[_COMMUNITY_Community 114|Community 114]]
 - [[_COMMUNITY_Community 115|Community 115]]
@@ -155,6 +155,7 @@
 - [[_COMMUNITY_Community 138|Community 138]]
 - [[_COMMUNITY_Community 139|Community 139]]
 - [[_COMMUNITY_Community 140|Community 140]]
+- [[_COMMUNITY_Community 141|Community 141]]
 - [[_COMMUNITY_Community 142|Community 142]]
 - [[_COMMUNITY_Community 143|Community 143]]
 - [[_COMMUNITY_Community 144|Community 144]]
@@ -162,7 +163,6 @@
 - [[_COMMUNITY_Community 146|Community 146]]
 - [[_COMMUNITY_Community 147|Community 147]]
 - [[_COMMUNITY_Community 148|Community 148]]
-- [[_COMMUNITY_Community 149|Community 149]]
 - [[_COMMUNITY_Community 150|Community 150]]
 - [[_COMMUNITY_Community 151|Community 151]]
 - [[_COMMUNITY_Community 152|Community 152]]
@@ -252,21 +252,48 @@
 - [[_COMMUNITY_Community 236|Community 236]]
 - [[_COMMUNITY_Community 237|Community 237]]
 - [[_COMMUNITY_Community 238|Community 238]]
+- [[_COMMUNITY_Community 239|Community 239]]
+- [[_COMMUNITY_Community 240|Community 240]]
+- [[_COMMUNITY_Community 241|Community 241]]
+- [[_COMMUNITY_Community 242|Community 242]]
+- [[_COMMUNITY_Community 243|Community 243]]
+- [[_COMMUNITY_Community 244|Community 244]]
+- [[_COMMUNITY_Community 245|Community 245]]
+- [[_COMMUNITY_Community 246|Community 246]]
 - [[_COMMUNITY_Community 247|Community 247]]
 - [[_COMMUNITY_Community 248|Community 248]]
 - [[_COMMUNITY_Community 249|Community 249]]
 - [[_COMMUNITY_Community 250|Community 250]]
 - [[_COMMUNITY_Community 251|Community 251]]
 - [[_COMMUNITY_Community 252|Community 252]]
+- [[_COMMUNITY_Community 253|Community 253]]
+- [[_COMMUNITY_Community 254|Community 254]]
+- [[_COMMUNITY_Community 255|Community 255]]
+- [[_COMMUNITY_Community 256|Community 256]]
+- [[_COMMUNITY_Community 257|Community 257]]
+- [[_COMMUNITY_Community 258|Community 258]]
+- [[_COMMUNITY_Community 259|Community 259]]
+- [[_COMMUNITY_Community 260|Community 260]]
+- [[_COMMUNITY_Community 261|Community 261]]
+- [[_COMMUNITY_Community 262|Community 262]]
+- [[_COMMUNITY_Community 263|Community 263]]
+- [[_COMMUNITY_Community 264|Community 264]]
+- [[_COMMUNITY_Community 265|Community 265]]
+- [[_COMMUNITY_Community 274|Community 274]]
+- [[_COMMUNITY_Community 275|Community 275]]
+- [[_COMMUNITY_Community 276|Community 276]]
+- [[_COMMUNITY_Community 277|Community 277]]
+- [[_COMMUNITY_Community 278|Community 278]]
+- [[_COMMUNITY_Community 279|Community 279]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `IronRuntime` - 73 edges
+1. `IronRuntime` - 80 edges
 2. `run_local()` - 52 edges
-3. `AgentSession` - 49 edges
+3. `AgentSession` - 51 edges
 4. `DurableSession` - 44 edges
-5. `temp_config()` - 33 edges
-6. `ConnectionId` - 30 edges
-7. `IronAgent` - 30 edges
+5. `ConnectionId` - 34 edges
+6. `temp_config()` - 33 edges
+7. `IronAgent` - 31 edges
 8. `compute_tool_availability()` - 29 edges
 9. `PluginRegistry` - 29 edges
 10. `Requirement: Runtime supports concrete MCP transport clients` - 24 edges
@@ -278,10 +305,10 @@
   tests/acp_runtime_tests.rs → src/schema.rs
 - `unit_schema_validate_bad_schema()` --calls--> `validate_arguments()`  [INFERRED]
   tests/acp_runtime_tests.rs → src/schema.rs
-- `setup()` --calls--> `create_in_process_transport()`  [INFERRED]
-  tests/transport_bench_tests.rs → src/transport.rs
-- `bench_initialize_round_trip()` --calls--> `create_in_process_transport()`  [INFERRED]
-  tests/transport_bench_tests.rs → src/transport.rs
+- `setup_transport()` --calls--> `create_in_process_transport()`  [INFERRED]
+  tests/interop_tests.rs → src/transport.rs
+- `inprocess_cross_connection_prompt_rejected()` --calls--> `create_in_process_transport()`  [INFERRED]
+  tests/interop_tests.rs → src/transport.rs
 
 ## Hyperedges (group relationships)
 - **Python Tool Surface Design: ToolRegistry as canonical source exposed through Monty** — ToolRegistry, tools_namespace, Monty, python_exec [EXTRACTED 1.00]
@@ -303,19 +330,19 @@
 - **Cross-Document Handoff Portability Design** — getting_started_handoff, prompt_handoff_portability, plugins_handoff_exclusion [INFERRED 0.85]
 - **Core Architecture Documentation Set** — architecture_overview, getting_started_iron_core, prompt_composition [EXTRACTED 1.00]
 
-## Communities (253 total, 40 thin omitted)
+## Communities (280 total, 38 thin omitted)
 
 ### Community 0 - "Community 0"
 Cohesion: 0.05
-Nodes (28): ActiveContextAccountant, ActiveContextSnapshot, ContextCategory, ContextCategoryUsage, ContextPressure, ContextQuality, ContextTelemetry, estimate_tokens() (+20 more)
+Nodes (32): ActiveContextAccountant, ActiveContextSnapshot, ContextCategory, ContextCategoryUsage, ContextPressure, ContextQuality, ContextTelemetry, estimate_tokens() (+24 more)
 
 ### Community 1 - "Community 1"
-Cohesion: 0.09
-Nodes (40): create_auth_manifest(), create_test_config(), create_test_manifest(), InstallMetadata, PluginAvailabilitySummary, PluginId, PluginRegistry, PluginState (+32 more)
+Cohesion: 0.06
+Nodes (55): activate_skill_duplicate_activation_returns_lightweight_confirmation(), activate_skill_rejects_names_outside_session_catalog(), activate_skill_returns_structured_content_and_resources(), agent_session_cancel_signals_cancellation(), approval_strategy_always_triggers_for_all_tools(), approval_strategy_never_skips_even_for_approval_tools(), async_permission_cancel_verdict_cancels_turn(), async_permission_handler_receives_rich_request() (+47 more)
 
 ### Community 2 - "Community 2"
-Cohesion: 0.05
-Nodes (58): create_transport_client(), PromptAssembler, PromptSection, PromptSectionMetadata, PromptSectionOwner, PromptSectionTemperature, push_part(), render_client_injection() (+50 more)
+Cohesion: 0.09
+Nodes (40): create_auth_manifest(), create_test_config(), create_test_manifest(), InstallMetadata, PluginAvailabilitySummary, PluginId, PluginRegistry, PluginState (+32 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.08
@@ -330,12 +357,12 @@ Cohesion: 0.04
 Nodes (8): telemetry_empty_session_reports_unknown_quality(), telemetry_totals_match_category_sum(), telemetry_with_compacted_context_counts_category(), telemetry_with_compressed_blocks_counts_category(), telemetry_with_current_prompt_counts_prompt_category(), telemetry_with_instructions_counts_category(), telemetry_with_messages_counts_tail_category(), telemetry_with_tools_counts_tool_definitions_category()
 
 ### Community 6 - "Community 6"
-Cohesion: 0.06
-Nodes (38): BuiltinMeta, edit_replace_all_fails_on_zero_matches(), edit_replace_all_replaces_every_occurrence(), edit_requires_prior_read(), edit_tool_applies_exact_replacement(), edit_tool_rejects_ambiguous_match(), edit_tool_rejects_missing_text(), glob_explicit_hidden_pattern_overrides_default_filters() (+30 more)
-
-### Community 7 - "Community 7"
 Cohesion: 0.07
 Nodes (31): bytes_to_pages(), clone_independent_lifecycle(), clone_shares_state(), debug_impl_works(), default_constructor_applies_default_memory_ceiling(), execute_tool_on_empty_plugin_returns_execution_failed(), execute_tool_on_unloaded_plugin_returns_not_found(), execute_tool_sync_on_unloaded_plugin_returns_not_found() (+23 more)
+
+### Community 7 - "Community 7"
+Cohesion: 0.06
+Nodes (37): BuiltinMeta, edit_replace_all_fails_on_zero_matches(), edit_replace_all_replaces_every_occurrence(), edit_requires_prior_read(), edit_tool_applies_exact_replacement(), edit_tool_rejects_ambiguous_match(), edit_tool_rejects_missing_text(), glob_explicit_hidden_pattern_overrides_default_filters() (+29 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.05
@@ -346,532 +373,540 @@ Cohesion: 0.05
 Nodes (30): RepoInstructionLoader, resolve_scope(), apply_context_window_policy(), build_composed_instructions(), build_inference_request(), build_inference_request_with_context(), build_inference_request_with_context_and_repo(), build_inference_request_with_effective_tools() (+22 more)
 
 ### Community 10 - "Community 10"
+Cohesion: 0.05
+Nodes (28): CompactionDebugEvent, ConfigDebugEvent, ContextDebugEvent, debug_context_builds_scope(), debug_event_envelope_fields_present(), DebugContext, DebugEvent, DebugPayload (+20 more)
+
+### Community 11 - "Community 11"
 Cohesion: 0.09
 Nodes (36): compute_tool_availability(), create_test_plugin(), EffectivePluginToolView, make_tool(), plugin_with_mixed_auth(), PluginTool, PluginToolSummary, registry_with_healthy_plugin() (+28 more)
 
-### Community 11 - "Community 11"
+### Community 12 - "Community 12"
 Cohesion: 0.12
 Nodes (47): codex_expires_at_to_secs(), codex_test_metadata(), CodexAuthorizationResponse, CodexDeviceAuthState, decode_base64_url(), device_code_response_parsing(), DeviceCodeInteraction, DeviceCodeResponse (+39 more)
 
-### Community 12 - "Community 12"
+### Community 13 - "Community 13"
 Cohesion: 0.09
 Nodes (22): catalog_list_returns_all_metadata(), catalog_loads_from_correct_source(), catalog_preserves_both_when_no_collision(), catalog_records_collision_diagnostics(), catalog_resolves_collisions_by_precedence(), CatalogEntry, make_skill(), SkillCatalog (+14 more)
 
-### Community 13 - "Community 13"
+### Community 14 - "Community 14"
+Cohesion: 0.07
+Nodes (37): create_transport_client(), ConnectionId, cancel_active_prompt_signals_cancellation(), close_session_removes_only_that_session(), closing_connection_removes_its_sessions(), create_session_on_shutdown_errors(), has_active_prompt_reflects_prompt_lifecycle(), runtime_allows_prompt_after_previous_finishes() (+29 more)
+
+### Community 16 - "Community 16"
 Cohesion: 0.14
 Nodes (27): build_v1_support_map(), CredentialResolver, CredentialSupport, disconnect_oauth_removes_only_oauth(), force_refresh_oauth_attempts_refresh_and_fails_without_network(), force_refresh_returns_api_key_without_refresh(), force_refresh_returns_not_configured_when_missing(), make_expired_tokens() (+19 more)
 
-### Community 14 - "Community 14"
+### Community 17 - "Community 17"
 Cohesion: 0.06
 Nodes (37): ADDED Requirements, MODIFIED Requirements, Purpose, python-tool-namespace Specification, Requirement: Child-tool execution reuses the session-effective runtime path, Requirement: Embedded Python exposes the runtime tool catalog, Requirement: Python tool access supports identifier-safe aliases and raw-name fallback, Requirement: Python tool calls reuse the standard runtime execution path (+29 more)
 
-### Community 15 - "Community 15"
+### Community 18 - "Community 18"
 Cohesion: 0.08
 Nodes (37): Extism WASM Runtime, iron_manifest WASM Custom Section, PluginLifecycle, PluginLoader Trait, PluginRegistry, arbitrary_code_bearing_payload_is_rejected(), empty_transcript_text_is_rejected(), empty_view_id_is_rejected() (+29 more)
 
-### Community 16 - "Community 16"
-Cohesion: 0.06
-Nodes (11): SchemaValidationOutcome, validate_arguments(), activate_skill_duplicate_activation_returns_lightweight_confirmation(), activate_skill_rejects_names_outside_session_catalog(), make_skill(), register_test_auth_plugin(), session_auth_flow_emits_auth_state_change_events(), session_auth_flow_updates_client_visible_availability() (+3 more)
-
-### Community 17 - "Community 17"
+### Community 19 - "Community 19"
 Cohesion: 0.08
 Nodes (18): BuiltinToolConfig, accepts_existing_path_inside_root(), accepts_nested_nonexistent_path_inside_root(), accepts_nonexistent_file_inside_root(), ApprovalDuration, ApprovalScope, ApprovalScopeMatch, BuiltinToolPolicy (+10 more)
 
-### Community 18 - "Community 18"
+### Community 20 - "Community 20"
 Cohesion: 0.1
 Nodes (27): default_config(), make_engine(), test_cancelled_child_call(), test_child_call_limit_exceeded(), test_denied_child_call(), test_iron_call_with_computation(), test_local_compute_returns_none_for_null(), test_local_compute_with_nested_input() (+19 more)
 
-### Community 19 - "Community 19"
-Cohesion: 0.11
-Nodes (34): activate_skill_returns_structured_content_and_resources(), approval_strategy_never_skips_even_for_approval_tools(), async_permission_cancel_verdict_cancels_turn(), async_permission_handler_receives_rich_request(), cancelled_tool_call_replayed_in_subsequent_prompt_transcript(), close_session_on_non_owned_session_returns_error(), concurrent_streamed_prompts_on_one_connection(), denied_tool_call_replayed_in_subsequent_prompt_transcript() (+26 more)
-
-### Community 20 - "Community 20"
-Cohesion: 0.08
-Nodes (28): ConnectionId, cancel_active_prompt_signals_cancellation(), close_session_removes_only_that_session(), closing_connection_removes_its_sessions(), create_session_on_shutdown_errors(), has_active_prompt_reflects_prompt_lifecycle(), runtime_allows_prompt_after_previous_finishes(), runtime_creates_connection_and_session() (+20 more)
-
 ### Community 21 - "Community 21"
-Cohesion: 0.06
-Nodes (34): Approval and choice share one pending-interaction envelope, Approval interaction envelope, Approval resolution, Approval uses a batch public resolution contract in v1, Canonical model-facing choice-resolution context, Choice prompts are first-class pending interaction payloads, Choice requests are model-originated and turn-blocking, Choice resolution (+26 more)
+Cohesion: 0.11
+Nodes (29): test_end_to_end_mcp_lifecycle(), test_mcp_tools_have_namespaced_names(), concurrent_sse_requests_are_correctly_correlated(), connection_manager_stops_on_shutdown_signal(), FakeSseServer, http_sse_transport_handles_framing_and_response_correlation(), mcp_name_resolution_is_unambiguous_for_server_ids_with_underscores(), public_effective_tools_match_prompt_visible_tools() (+21 more)
 
 ### Community 22 - "Community 22"
 Cohesion: 0.07
 Nodes (33): ADDED Requirements, agent-skills Specification, Purpose, Requirement: Activated skill content SHALL be protected from context compaction, Requirement: Activated skills SHALL carry resource listings without eager loading, Requirement: Project-level filesystem skills SHALL be trust-gated, Requirement: Skill activation SHALL be session-scoped, Requirement: Skills SHALL be activated through a dedicated model tool (+25 more)
 
 ### Community 23 - "Community 23"
+Cohesion: 0.06
+Nodes (34): Approval and choice share one pending-interaction envelope, Approval interaction envelope, Approval resolution, Approval uses a batch public resolution contract in v1, Canonical model-facing choice-resolution context, Choice prompts are first-class pending interaction payloads, Choice requests are model-originated and turn-blocking, Choice resolution (+26 more)
+
+### Community 24 - "Community 24"
 Cohesion: 0.09
 Nodes (10): ClientChannel, IronConnection, NopClientChannel, notification(), AcpPromptSink, ApprovalRequest, ApprovalVerdict, PromptLifecycleEvent (+2 more)
 
 ### Community 25 - "Community 25"
-Cohesion: 0.08
-Nodes (31): ADDED Requirements, Requirement: Core SHALL expose provider auth status to clients, Requirement: Core SHALL pass only provider-safe OAuth credential material to iron-providers, Requirement: Core SHALL preserve API-key compatibility, Requirement: Core SHALL refresh OAuth credentials before provider invocation, Requirement: Core SHALL resolve provider credentials per prompt, Requirement: Core SHALL retry safe OAuth provider auth failures once, Requirement: Core SHALL support app-owned provider credential storage (+23 more)
+Cohesion: 0.07
+Nodes (5): ContextManagementConfig, HandoffExportConfig, ModelSwitchConfig, TailRetentionPolicy, TailRetentionRule
 
-### Community 27 - "Community 27"
-Cohesion: 0.09
-Nodes (16): fail_pending_waiters(), format_stderr_suffix(), is_acceptable_bootstrap_response(), is_sensitive_env_var(), McpTransportClient, push_stderr_excerpt(), redact_command(), sanitize_stderr_line() (+8 more)
+### Community 26 - "Community 26"
+Cohesion: 0.08
+Nodes (18): decode_http_rpc_response(), fail_pending_waiters(), format_stderr_suffix(), is_acceptable_bootstrap_response(), is_sensitive_env_var(), McpTransportClient, parse_sse_rpc_response(), push_stderr_excerpt() (+10 more)
 
 ### Community 28 - "Community 28"
 Cohesion: 0.1
-Nodes (11): crate::error::RuntimeError, EditTool, execute_read(), execute_write(), is_binary(), MultieditTool, ReadTool, render_directory_listing() (+3 more)
+Nodes (20): CapabilityDiff, compare_capabilities(), ContextAdaptationPlan, ModelCapabilityMetadata, ModelCapabilityRegistry, ModelSwitchPlan, ModelSwitchPlanner, ModelSwitchRecord (+12 more)
 
 ### Community 29 - "Community 29"
+Cohesion: 0.09
+Nodes (20): PromptAssembler, PromptSection, PromptSectionMetadata, PromptSectionOwner, PromptSectionTemperature, push_part(), render_client_injection(), render_communication_formatting() (+12 more)
+
+### Community 30 - "Community 30"
+Cohesion: 0.08
+Nodes (31): ADDED Requirements, Requirement: Core SHALL expose provider auth status to clients, Requirement: Core SHALL pass only provider-safe OAuth credential material to iron-providers, Requirement: Core SHALL preserve API-key compatibility, Requirement: Core SHALL refresh OAuth credentials before provider invocation, Requirement: Core SHALL resolve provider credentials per prompt, Requirement: Core SHALL retry safe OAuth provider auth failures once, Requirement: Core SHALL support app-owned provider credential storage (+23 more)
+
+### Community 31 - "Community 31"
+Cohesion: 0.12
+Nodes (16): allows_private_when_opted_in(), check_ip(), execute_webfetch(), is_blocked_ip(), is_blocked_v4(), is_blocked_v6(), is_v4_cgnat(), is_v4_documentation() (+8 more)
+
+### Community 32 - "Community 32"
 Cohesion: 0.15
 Nodes (14): derive_skill_id(), filesystem_source_derives_missing_id_from_skill_directory(), filesystem_source_discovers_skills_from_directory(), filesystem_source_handles_malformed_yaml_gracefully(), filesystem_source_preserves_explicit_id(), filesystem_source_skips_directories_without_skill_md(), FilesystemSkillSource, SkillFrontmatter (+6 more)
 
-### Community 30 - "Community 30"
+### Community 33 - "Community 33"
 Cohesion: 0.07
 Nodes (27): ADDED Requirements, Requirement: A turn SHALL expose at most one blocking interaction envelope at a time, Requirement: A turn SHALL pause while waiting for a blocking choice response, Requirement: Clients SHALL resolve pending interactions with typed interaction resolutions, Requirement: Clients SHALL respond with structured choice results, Requirement: The provider/runtime layer SHALL surface model-originated choice requests as first-class structured events, Requirement: The runtime SHALL inject a stable structured choice-resolution record into continuation context, Requirement: The runtime SHALL persist resolved choices as structured runtime/system transcript entries (+19 more)
 
-### Community 31 - "Community 31"
+### Community 34 - "Community 34"
+Cohesion: 0.07
+Nodes (28): ADDED Requirements, MODIFIED Requirements, Requirement: Context compaction SHALL support target-model-aware sizing, Requirement: Context SHALL be adapted when the target model has a smaller context window, Requirement: Handoff bundles SHALL include model switch metadata, Requirement: Model switches SHALL be recorded per-turn in session metadata, Requirement: Model switches SHALL only occur at turn boundaries, Requirement: The runtime SHALL preserve conversation identity across model switches (+20 more)
+
+### Community 35 - "Community 35"
+Cohesion: 0.11
+Nodes (29): ApprovalStrategy, Close MCP Correctness Gaps - Session Scoped MCP Support Spec, compute_tool_availability, EffectiveToolView, Embedded Python Runtime, Finish MCP Outstanding Work - Design, Finish MCP Outstanding Work - Python Tool Namespace Spec, Finish MCP Outstanding Work - Session Scoped MCP Support Spec (+21 more)
+
+### Community 37 - "Community 37"
+Cohesion: 0.16
+Nodes (19): ActivePrompt, CachedSessionToolCatalog, debug_sink_receives_config_event_on_registration(), disconnect_provider_oauth_removes_oauth_only(), new_with_credential_store_creates_resolver(), provider_auth_status_api_key(), provider_auth_status_for_context_reports_unsupported_api_key(), provider_auth_status_for_context_uses_api_key() (+11 more)
+
+### Community 38 - "Community 38"
 Cohesion: 0.11
 Nodes (9): http_config_round_trip_with_headers(), http_config_serializes_without_headers_when_none(), HttpConfig, McpServerConfig, McpServerHealth, McpServerRegistry, McpServerState, McpToolInfo (+1 more)
 
-### Community 32 - "Community 32"
+### Community 39 - "Community 39"
 Cohesion: 0.1
 Nodes (5): dyn Tool, FunctionTool, Tool, ToolDefinition, ToolRegistry
 
-### Community 33 - "Community 33"
-Cohesion: 0.09
-Nodes (21): agent_session_cancel_signals_cancellation(), approval_strategy_always_triggers_for_all_tools(), cancel_between_tool_executions_skips_remaining(), durable_session_records_tool_call_after_prompt(), facade_stream_rejects_second_prompt_while_active(), max_iterations_returns_max_turn_requests(), normalized_plugin_result_reaches_tool_result_fields_and_output_stream(), semantic_event_denied_tool_parity() (+13 more)
+### Community 40 - "Community 40"
+Cohesion: 0.16
+Nodes (11): BuiltinToolError, execute_edit(), execute_multiedit(), execute_read(), execute_write(), is_binary(), render_directory_listing(), resolve_write_path() (+3 more)
 
-### Community 34 - "Community 34"
-Cohesion: 0.12
+### Community 41 - "Community 41"
+Cohesion: 0.13
 Nodes (15): canonical_within_roots(), CollectSink, execute_glob(), execute_grep(), glob_search(), GlobResult, GlobTool, grep_search() (+7 more)
 
-### Community 35 - "Community 35"
-Cohesion: 0.13
-Nodes (15): allows_private_when_opted_in(), check_ip(), is_blocked_ip(), is_blocked_v4(), is_blocked_v6(), is_v4_cgnat(), is_v4_documentation(), is_v4_reserved() (+7 more)
-
-### Community 36 - "Community 36"
-Cohesion: 0.09
-Nodes (4): ContextManagementConfig, HandoffExportConfig, TailRetentionPolicy, TailRetentionRule
-
-### Community 37 - "Community 37"
+### Community 42 - "Community 42"
 Cohesion: 0.08
 Nodes (25): Chat-only client, Chat-only clients remain first-class, Client UX Model, code:json ({), code:text (Updated todo list: completed 'Review tool efficiency'.), code:text (Transcript), code:text (ToolResult), Context (+17 more)
 
-### Community 38 - "Community 38"
-Cohesion: 0.19
-Nodes (17): ActivePrompt, CachedSessionToolCatalog, disconnect_provider_oauth_removes_oauth_only(), new_with_credential_store_creates_resolver(), provider_auth_status_api_key(), provider_auth_status_for_context_reports_unsupported_api_key(), provider_auth_status_for_context_uses_api_key(), provider_auth_status_not_configured() (+9 more)
-
-### Community 40 - "Community 40"
+### Community 43 - "Community 43"
 Cohesion: 0.14
 Nodes (5): calculate_backoff(), is_connection_error(), McpConnectionHandle, McpConnectionManager, ReconnectConfig
 
-### Community 41 - "Community 41"
+### Community 44 - "Community 44"
 Cohesion: 0.09
 Nodes (7): AdditionalInstructionFile, ClientPromptFragment, PromptCompositionConfig, RepoInstructionConfig, RepoInstructionFamily, RepoInstructionPayload, RepoInstructionSource
 
-### Community 42 - "Community 42"
+### Community 45 - "Community 45"
+Cohesion: 0.11
+Nodes (5): crate::error::RuntimeError, EditTool, MultieditTool, ReadTool, WriteTool
+
+### Community 46 - "Community 46"
 Cohesion: 0.13
 Nodes (6): in_memory_store_list_slugs(), in_memory_store_roundtrip(), InMemoryCredentialStore, null_store_always_empty(), NullCredentialStore, ProviderCredentialStore
 
-### Community 43 - "Community 43"
-Cohesion: 0.09
-Nodes (17): CompactionCheckpoint, CompactionEngine, CompactionInput, CompactionReason, CompressRange, CompressResult, estimate_structured_tokens(), extract_json_object() (+9 more)
-
-### Community 44 - "Community 44"
+### Community 47 - "Community 47"
 Cohesion: 0.08
 Nodes (23): Additional Inline Instruction Blocks, Additional Instruction Files, API Reference, Baseline Prompt, code:rust (use iron_core::prompt::config::{), code:rust (let prompt_config = PromptCompositionConfig::new()), code:rust (let prompt_config = PromptCompositionConfig::new()), code:rust,ignore (let session = connection.create_session()?;) (+15 more)
 
-### Community 45 - "Community 45"
-Cohesion: 0.11
-Nodes (8): BuiltinCapabilities, CapabilityBackend, CapabilityDescriptor, CapabilityId, CapabilityRegistry, PermissionDecision, PermissionRequest, PermissionResponse
+### Community 49 - "Community 49"
+Cohesion: 0.13
+Nodes (17): estimate_bundle_size(), handoff_includes_skill_state_in_size_estimate(), handoff_preserves_activated_skills(), HandoffBundle, HandoffBundleMetadata, HandoffExporter, HandoffImporter, hydrate_in_place_does_not_modify_plugin_enablement() (+9 more)
 
-### Community 46 - "Community 46"
-Cohesion: 0.09
-Nodes (6): AuthFailProvider, MockProvider, TestProvider, TestProvider, MockProvider, MockProvider
+### Community 50 - "Community 50"
+Cohesion: 0.15
+Nodes (19): compact_command_replaces_user_message(), critical_pressure_failure_surfaces_error(), facade_checkpoint_rejects_disabled_context_management(), facade_checkpoint_rejects_non_idle_session(), facade_checkpoint_triggers_compaction(), facade_create_session_from_handoff(), facade_export_handoff_returns_bundle(), MockProvider (+11 more)
 
-### Community 47 - "Community 47"
+### Community 51 - "Community 51"
 Cohesion: 0.09
 Nodes (4): CompactedContext, CompressedBlock, Decision, UnresolvedQuestion
 
-### Community 49 - "Community 49"
-Cohesion: 0.19
-Nodes (6): BuiltinToolError, execute_edit(), execute_multiedit(), read_to_string(), execute_webfetch(), builtin_error_code_to_json()
+### Community 52 - "Community 52"
+Cohesion: 0.1
+Nodes (16): CompactionCheckpoint, CompactionEngine, CompactionInput, CompactionReason, CompressRange, CompressResult, estimate_structured_tokens(), extract_json_object() (+8 more)
 
-### Community 50 - "Community 50"
+### Community 53 - "Community 53"
+Cohesion: 0.09
+Nodes (21): API, Capability Reconciliation, code:rust (use iron_core::{AgentSession, ModelSwitchRequest};), code:rust (use iron_core::PromptEvent;), code:rust (use iron_core::ContextManagementConfig;), Configuration, Context Adaptation, Context Window (+13 more)
+
+### Community 54 - "Community 54"
 Cohesion: 0.09
 Nodes (22): Requirement: Runtime supports concrete MCP transport clients, Scenario: HTTP bootstrap accepts an id-less initialize response in the safe case, Scenario: HTTP server is initialized through HTTP transport, Scenario: HTTP+SSE bootstrap does not drop an id-less initialize response before correlation, Scenario: HTTP transport uses HttpConfig for URL and headers, Scenario: Initialize request uses camelCase wire fields, Scenario: Initialize response parses camelCase wire fields, Scenario: Ordinary MCP traffic still requires valid response correlation (+14 more)
 
-### Community 51 - "Community 51"
-Cohesion: 0.17
-Nodes (6): apply_headers(), decode_http_rpc_response(), format_rpc_error(), HttpMcpClient, HttpSseMcpClient, parse_sse_rpc_response()
-
-### Community 52 - "Community 52"
+### Community 55 - "Community 55"
 Cohesion: 0.1
 Nodes (13): CallToolRequest, CallToolResponse, ClientInfo, InitializeRequest, InitializeResponse, JsonRpcError, JsonRpcResponse, ListToolsRequest (+5 more)
 
-### Community 53 - "Community 53"
-Cohesion: 0.15
-Nodes (18): compaction_execute_calls_provider_and_parses_result(), compaction_execute_handles_empty_output(), compaction_execute_handles_malformed_json(), compaction_execute_handles_provider_error(), compaction_prepare_extracts_tail_and_builds_prompt(), compaction_prepare_includes_historical_tool_transcript(), compaction_prepare_with_existing_context_includes_previous(), compaction_split_session_messages_rule() (+10 more)
-
-### Community 54 - "Community 54"
-Cohesion: 0.15
-Nodes (16): estimate_bundle_size(), handoff_includes_skill_state_in_size_estimate(), handoff_preserves_activated_skills(), HandoffBundle, HandoffBundleMetadata, HandoffExporter, HandoffImporter, hydrate_in_place_does_not_modify_plugin_enablement() (+8 more)
-
-### Community 55 - "Community 55"
+### Community 56 - "Community 56"
 Cohesion: 0.1
 Nodes (20): Auth Model, code:rust (use iron_core::{Config, RuntimePluginConfig};), code:rust (use iron_core::{Checksum, ChecksumAlgorithm, PluginSource, P), code:text (Configured → Loading → (cache artifact) → (extract manifest)), code:text (plugin_{plugin_id}_{tool_name}), Current Status, Enable The Plugin Subsystem, Install Lifecycle (+12 more)
 
-### Community 56 - "Community 56"
-Cohesion: 0.17
-Nodes (16): compact_command_replaces_user_message(), critical_pressure_failure_surfaces_error(), facade_checkpoint_rejects_disabled_context_management(), facade_checkpoint_rejects_non_idle_session(), facade_checkpoint_triggers_compaction(), facade_create_session_from_handoff(), facade_export_handoff_returns_bundle(), MockProvider (+8 more)
+### Community 58 - "Community 58"
+Cohesion: 0.16
+Nodes (17): compaction_execute_calls_provider_and_parses_result(), compaction_execute_handles_empty_output(), compaction_execute_handles_malformed_json(), compaction_execute_handles_provider_error(), compaction_prepare_extracts_tail_and_builds_prompt(), compaction_prepare_includes_historical_tool_transcript(), compaction_prepare_with_existing_context_includes_previous(), compaction_split_session_messages_rule() (+9 more)
 
-### Community 57 - "Community 57"
+### Community 59 - "Community 59"
 Cohesion: 0.12
 Nodes (18): ADDED Requirements, mcp-http-headers Specification, Purpose, Requirement: Custom headers are excluded from serialization when not set, Requirement: Custom headers can be configured per MCP server, Requirement: HTTP MCP requests include Accept header, Requirement: HttpConfig struct shared by HTTP transport variants, Requirements (+10 more)
 
-### Community 58 - "Community 58"
+### Community 60 - "Community 60"
 Cohesion: 0.1
 Nodes (18): ADDED Requirements, Requirement: Plugin-backed rich output SHALL normalize to a stable result envelope, Requirement: Rich view payloads SHALL have session-scoped identity and lifecycle semantics, Requirement: Supported v1 view payloads SHALL be declarative and schema-validated, Requirement: Transcript text SHALL remain a standalone fallback channel, Requirement: View mode SHALL have explicit client-visible semantics, Scenario: Append mode preserves prior surface state, Scenario: Executable or arbitrary frontend payload is rejected (+10 more)
 
-### Community 59 - "Community 59"
+### Community 61 - "Community 61"
 Cohesion: 0.1
 Nodes (19): ADDED Requirements, Requirement: Client injection SHALL support ordered trusted markdown fragments, Requirement: Core-owned prompt policy sections SHALL NOT be externally overridable, Requirement: Editing guidance SHALL support client override with core fallback, Requirement: Provider-specific guidance SHALL be isolated to its designated section, Requirement: Static context SHALL rebuild only on explicit invalidation events, Requirement: The runtime SHALL compose the system prompt from a fixed ordered section model, Requirement: Tool philosophy SHALL be core-owned and derived from available tools (+11 more)
 
-### Community 60 - "Community 60"
-Cohesion: 0.13
-Nodes (18): Monty Embedded Python Runtime, ToolRegistry, Expose Python Tool Methods (Change), Improve Python Exec Guidance (Change), iron_call(name, args) Function, iron-core README, MCP HTTP Headers, Plugin Rich Output (+10 more)
-
-### Community 61 - "Community 61"
-Cohesion: 0.11
-Nodes (11): PermissionRequest, PermissionVerdict, PromptEvent, PromptEvents, PromptOutcome, PromptStatus, ScriptActivityStatus, ScriptActivityType (+3 more)
-
 ### Community 62 - "Community 62"
-Cohesion: 0.14
-Nodes (8): bigint_to_json(), json_to_monty(), make_iron_exception(), monty_to_json(), test_json_to_monty_array(), test_json_to_monty_dict(), test_roundtrip(), test_convert_roundtrip_complex()
+Cohesion: 0.19
+Nodes (4): apply_headers(), format_rpc_error(), HttpMcpClient, HttpSseMcpClient
 
 ### Community 63 - "Community 63"
+Cohesion: 0.15
+Nodes (7): bigint_to_json(), json_to_monty(), monty_to_json(), test_json_to_monty_array(), test_json_to_monty_dict(), test_roundtrip(), test_convert_roundtrip_complex()
+
+### Community 64 - "Community 64"
 Cohesion: 0.12
 Nodes (9): CredentialMode, OAuthTokenSet, provider_slug_from_str(), ProviderAuthError, ProviderAuthStatus, ProviderPromptContext, ProviderSlug, ResolvedCredential (+1 more)
 
-### Community 64 - "Community 64"
+### Community 65 - "Community 65"
+Cohesion: 0.11
+Nodes (17): Basic Model Switch, Checking Model History, code:rust (use iron_core::{IronAgent, PromptEvent, ModelSwitchRequest};), code:rust (use iron_core::PromptEvent;), code:rust (// Start a long-running generation), code:rust (// Session has been running with a large-context model), code:rust (use iron_core::ModelSwitchRequest;), code:rust (// After several switches) (+9 more)
+
+### Community 66 - "Community 66"
 Cohesion: 0.11
 Nodes (16): ADDED Requirements, Requirement: Blocking and streaming multimodal prompts preserve the same block mapping, Requirement: Multimodal streaming preserves existing session-level semantics, Requirement: Multimodal streaming reuses the existing prompt event lifecycle, Requirement: Scope remains limited to the Rust facade streaming API, Requirement: Stream-first multimodal prompts, Scenario: A session still allows at most one active prompt, Scenario: Approval flow matches text streaming (+8 more)
 
-### Community 65 - "Community 65"
+### Community 67 - "Community 67"
 Cohesion: 0.15
 Nodes (18): Choice Resolution Transcript Record, Model Choice Prompts, Model Choice Prompts Spec, Shared Pending Interaction Envelope, Plugin Rich Output Spec, Plugin Rich Result Envelope, Prompt Event Lifecycle, ProviderEvent::ChoiceRequest (+10 more)
 
-### Community 66 - "Community 66"
+### Community 68 - "Community 68"
 Cohesion: 0.12
 Nodes (8): AcpSupport, create_stdio_agent(), InProcessClientHandler, InProcessTransport, LocalClientChannel, LocalClientChannel<H>, TransportKind, TransportMetadata
 
-### Community 67 - "Community 67"
+### Community 69 - "Community 69"
+Cohesion: 0.12
+Nodes (5): AuthFailProvider, MockProvider, TestProvider, TestProvider, MockProvider
+
+### Community 70 - "Community 70"
+Cohesion: 0.18
+Nodes (7): BashTool, execute_bash(), execute_powershell(), PowerShellTool, truncate_output(), which_exists(), meta_empty_always_includes_object()
+
+### Community 71 - "Community 71"
 Cohesion: 0.15
 Nodes (5): alias_for_tool(), alias_generation_omits_reserved_and_colliding_names(), alias_generation_sanitizes_names(), ToolCatalog, ToolCatalogEntry
 
-### Community 68 - "Community 68"
+### Community 72 - "Community 72"
+Cohesion: 0.22
+Nodes (3): ResolvedFunctionCall, ScriptEngine, ScriptRun
+
+### Community 73 - "Community 73"
 Cohesion: 0.12
 Nodes (11): AuthActionHint, AuthAvailability, AuthInteractionRequest, AuthInteractionResponse, AuthInteractionResult, AuthPrompt, AuthState, AuthStatusTransition (+3 more)
 
-### Community 69 - "Community 69"
+### Community 74 - "Community 74"
 Cohesion: 0.18
 Nodes (5): PluginEnablementDefaults, SessionPluginEnablement, test_enablement_defaults(), test_from_defaults(), test_session_enablement()
 
-### Community 70 - "Community 70"
+### Community 75 - "Community 75"
 Cohesion: 0.12
 Nodes (16): Context, Core-owned cold sections, Core-owned warm sections, Decisions, External fragment sections, Goals / Non-Goals, Keep the template engine internal, Migration Plan (+8 more)
 
-### Community 71 - "Community 71"
-Cohesion: 0.22
-Nodes (17): compute_tool_availability, EffectiveToolView, Embedded Python Runtime, Finish MCP Outstanding Work - Design, Finish MCP Outstanding Work - Python Tool Namespace Spec, Finish MCP Outstanding Work - Session Scoped MCP Support Spec, Fully Operational MCP - Design, Fully Operational MCP - Python Tool Namespace Spec (+9 more)
-
-### Community 72 - "Community 72"
-Cohesion: 0.12
-Nodes (3): EphemeralTurn, PendingPermission, TurnPhase
-
-### Community 73 - "Community 73"
-Cohesion: 0.31
-Nodes (12): create_in_process_transport(), inprocess_cancel(), inprocess_close_session(), inprocess_cross_connection_close_session_rejected(), inprocess_cross_connection_prompt_rejected(), inprocess_initialize_and_new_session(), inprocess_multiple_sessions(), inprocess_prompt_with_fake_provider_returns_end_turn() (+4 more)
-
-### Community 74 - "Community 74"
-Cohesion: 0.32
-Nodes (11): model_issued_mcp_tool_call_executes_through_runtime(), model_issued_mcp_tool_call_respects_real_approval_flow(), model_issued_unavailable_mcp_tool_uses_precise_canonical_diagnostics(), prompt_request_includes_visible_mcp_tools(), python_exec_child_call_can_reach_visible_mcp_tool(), python_exec_child_unavailable_mcp_tool_uses_precise_canonical_diagnostics(), reconnect_and_rediscover_restore_tools(), RecordingProvider (+3 more)
-
 ### Community 76 - "Community 76"
-Cohesion: 0.16
-Nodes (12): create_valid_manifest(), ExportedTool, ManifestValidationError, PluginIdentity, PluginManifest, PluginPublisher, PresentationMetadata, test_duplicate_tool_names() (+4 more)
+Cohesion: 0.12
+Nodes (16): Add one sink primitive, not per-domain callbacks, Context, Decisions, Emit system prompt render summaries, not full prompts, Goals / Non-Goals, Introduce explicit debug scope/correlation metadata, Keep debug events ephemeral in phase 1, Keep `tracing`, `PromptSink`, and `DebugSink` separate (+8 more)
 
 ### Community 77 - "Community 77"
 Cohesion: 0.12
+Nodes (3): EphemeralTurn, PendingPermission, TurnPhase
+
+### Community 79 - "Community 79"
+Cohesion: 0.14
+Nodes (11): convert_notification_to_prompt_event_with_index(), FacadeClientChannel, PermissionRequest, PermissionVerdict, PromptEvent, PromptOutcome, PromptStatus, ScriptActivityStatus (+3 more)
+
+### Community 80 - "Community 80"
+Cohesion: 0.18
+Nodes (3): make_iron_exception(), ScriptError, ScriptOutput
+
+### Community 81 - "Community 81"
+Cohesion: 0.16
+Nodes (12): create_valid_manifest(), ExportedTool, ManifestValidationError, PluginIdentity, PluginManifest, PluginPublisher, PresentationMetadata, test_duplicate_tool_names() (+4 more)
+
+### Community 82 - "Community 82"
+Cohesion: 0.32
+Nodes (11): model_issued_mcp_tool_call_executes_through_runtime(), model_issued_mcp_tool_call_respects_real_approval_flow(), model_issued_unavailable_mcp_tool_uses_precise_canonical_diagnostics(), prompt_request_includes_visible_mcp_tools(), python_exec_child_call_can_reach_visible_mcp_tool(), python_exec_child_unavailable_mcp_tool_uses_precise_canonical_diagnostics(), reconnect_and_rediscover_restore_tools(), RecordingProvider (+3 more)
+
+### Community 83 - "Community 83"
+Cohesion: 0.12
 Nodes (15): Add the highest-leverage missing capabilities first, Context, Decisions, Define clear ignore and visibility semantics, Goals / Non-Goals, Make the model-facing format change a deliberate hard switch, Migration Plan, Open Questions (+7 more)
 
-### Community 78 - "Community 78"
+### Community 84 - "Community 84"
 Cohesion: 0.12
 Nodes (15): Auth interactions are runtime-owned, Auth prompt, Auth remains observable to the session, Auth status transition, Clients may start auth directly, code:json ({), code:json ({), code:json ({) (+7 more)
 
-### Community 79 - "Community 79"
+### Community 85 - "Community 85"
 Cohesion: 0.12
 Nodes (15): Context, Decisions, Goals / Non-Goals, Keep injected-provider compatibility, Migration Plan, Model provider auth statuses explicitly, Open Questions, Prefer API keys over OAuth for dual-mode providers (+7 more)
 
-### Community 81 - "Community 81"
+### Community 86 - "Community 86"
+Cohesion: 0.32
+Nodes (11): inprocess_cancel(), inprocess_close_session(), inprocess_cross_connection_close_session_rejected(), inprocess_cross_connection_prompt_rejected(), inprocess_initialize_and_new_session(), inprocess_multiple_sessions(), inprocess_prompt_with_fake_provider_returns_end_turn(), inprocess_reinitialize_fresh_transport() (+3 more)
+
+### Community 87 - "Community 87"
 Cohesion: 0.21
 Nodes (3): estimate_text_tokens(), estimate_tool_call_tokens(), estimate_tool_result_tokens()
 
-### Community 82 - "Community 82"
+### Community 88 - "Community 88"
 Cohesion: 0.15
-Nodes (3): ContentBlock, StructuredMessage, ToolRecordStatus
+Nodes (5): ADDED Requirements, MODIFIED Requirements, Requirement: Runtime-local MCP server inventory, Scenario: Client lists configured runtime MCP servers, Scenario: Runtime inventory is local to the current runtime
 
-### Community 83 - "Community 83"
-Cohesion: 0.22
-Nodes (6): BashTool, execute_bash(), execute_powershell(), PowerShellTool, truncate_output(), which_exists()
-
-### Community 85 - "Community 85"
+### Community 89 - "Community 89"
 Cohesion: 0.13
 Nodes (14): Context, Decisions, Embedded Python must consume the same session-effective catalog, Embedded Python should snapshot the session-effective tool surface, Goals / Non-Goals, Introduce one runtime-owned effective tool catalog for prompting and execution, Migration Plan, Open Questions (+6 more)
 
-### Community 86 - "Community 86"
+### Community 90 - "Community 90"
 Cohesion: 0.13
 Nodes (14): Approval strategy must be applied at the session-effective layer, not only at legacy execution paths, Context, Decisions, Extend one canonical `SessionToolCatalog` instead of adding parallel plugin paths, Extism execution should be mediated through a narrow host layer, Goals / Non-Goals, MCP enablement should use a single runtime default for new sessions, Migration Plan (+6 more)
 
-### Community 87 - "Community 87"
+### Community 91 - "Community 91"
 Cohesion: 0.13
 Nodes (14): Definition of done, Phase 10 — OpenSpec/task reconciliation, Phase 1 — Runtime model and defaults, Phase 2 — Install / lifecycle, Phase 3 — Manifest extraction and metadata, Phase 4 — Extism / WASM execution, Phase 5 — Auth and availability, Phase 6 — Session controls and handoff (+6 more)
 
-### Community 90 - "Community 90"
+### Community 92 - "Community 92"
+Cohesion: 0.13
+Nodes (14): Capability Reconciliation is Reported, Not Blocking, code:block1 (timeline: [), code:block2 (SessionState::Idle -> apply switch immediately), code:rust (pub struct CapabilityDiff {), Context, Decisions, Goals / Non-Goals, Migration Plan (+6 more)
+
+### Community 94 - "Community 94"
+Cohesion: 0.19
+Nodes (3): ContentBlock, SessionId, ToolRecordStatus
+
+### Community 95 - "Community 95"
 Cohesion: 0.14
 Nodes (4): PerToolAvailability, PluginHealth, PluginInfo, PluginRuntimeStatus
 
-### Community 91 - "Community 91"
+### Community 96 - "Community 96"
 Cohesion: 0.14
 Nodes (13): Built-In Tools, code:toml ([dependencies]), code:toml ([dependencies]), code:rust,ignore (use iron_core::{Config, FunctionTool, IronAgent, PromptEvent), code:bash (cargo doc -p iron-core --no-deps), Documentation, Install, Integration Plugins (+5 more)
 
-### Community 92 - "Community 92"
+### Community 97 - "Community 97"
 Cohesion: 0.14
 Nodes (13): 1. `ToolRegistry` SHALL be the canonical Monty tool catalog, 2. Embedded Python SHALL expose a namespace object, not only a generic function, 3. Tool names SHALL support both sanitized aliases and raw-name dispatch, 4. Namespace contents SHALL be snapshotted per script run, 5. Python tool methods SHALL reuse the existing child-call executor path, 6. Capability negotiation SHALL only affect Python visibility through tool registration, 7. Recursive `python_exec` exposure should be treated deliberately, Context (+5 more)
 
-### Community 93 - "Community 93"
+### Community 98 - "Community 98"
 Cohesion: 0.14
 Nodes (13): Context, Decisions, Goals / Non-Goals, Handoff excludes plugin runtime state, Migration Plan, Network access must be declared, even when broad access is permitted, Open Questions, Plugin metadata must be structured and client-facing (+5 more)
 
-### Community 94 - "Community 94"
+### Community 99 - "Community 99"
 Cohesion: 0.14
 Nodes (13): Address Ranges with Stable Visible IDs, Validate with Structural Groups, Clear Pressure Only After Recomputed Usage Falls Below Threshold, Context, Decisions, Fail Simply at Critical Pressure, Goals / Non-Goals, Make `/compact` an Immediate Compression Turn, Make `compress` Runtime-Owned and Special (+5 more)
 
-### Community 95 - "Community 95"
+### Community 100 - "Community 100"
 Cohesion: 0.2
-Nodes (14): Align Runtime Context - Session Scoped MCP Support Spec, Align Runtime Context Working Directory - Design, Align Runtime Context Working Directory - Proposal, Align Runtime Context Working Directory - Tasks, Finish MCP Outstanding Work - Proposal, Fully Operational MCP - Proposal, python-tool-namespace capability, request_builder (+6 more)
+Nodes (13): Bootstrap-Only ID Tolerance, Fix MCP CamelCase Protocol Fields Change, Handoff Portability Model, HttpMcpClient, HttpConfig Struct, mcp-http-headers Capability, MCP HTTP Headers Change, MCP Protocol Structs (+5 more)
 
-### Community 96 - "Community 96"
-Cohesion: 0.18
-Nodes (14): Close MCP Correctness Gaps - Session Scoped MCP Support Spec, Finish MCP Outstanding Work - Tasks, HttpMcpClient, HttpSseMcpClient, HttpConfig Struct, src/mcp/client.rs, src/mcp/connection.rs, src/mcp/effective_tools.rs (+6 more)
-
-### Community 97 - "Community 97"
+### Community 101 - "Community 101"
 Cohesion: 0.27
 Nodes (12): build(), _failure_summary(), _lockfile_path(), _print_summary(), Run the test suite with a terse summary., Run security checks with a terse summary., Run the build and lint checks with a terse summary., _run_group() (+4 more)
 
-### Community 98 - "Community 98"
+### Community 102 - "Community 102"
+Cohesion: 0.22
+Nodes (8): create_in_process_transport(), bench_initialize_round_trip(), bench_new_session_round_trip(), bench_prompt_round_trip_with_fake_provider(), make_runtime(), NopClient, setup(), TestProvider
+
+### Community 103 - "Community 103"
+Cohesion: 0.15
+Nodes (7): BuiltinCapabilities, CapabilityBackend, CapabilityDescriptor, CapabilityId, PermissionDecision, PermissionRequest, PermissionResponse
+
+### Community 104 - "Community 104"
 Cohesion: 0.22
 Nodes (7): render_directory_entries(), render_mutation_summary(), render_path(), render_skip_warning(), render_truncation_footer(), render_glob_output(), render_grep_output()
 
-### Community 100 - "Community 100"
+### Community 105 - "Community 105"
 Cohesion: 0.15
 Nodes (12): 1. Add Dependencies, 2. Configure a Provider, 3. Register Tools, 4. Use The Stream-First Session API, 5. Manage Session State, 6. Build API Docs, code:toml ([dependencies]), code:rust (use iron_core::{Config, IronAgent, PromptEvent};) (+4 more)
 
-### Community 101 - "Community 101"
+### Community 106 - "Community 106"
 Cohesion: 0.15
 Nodes (12): Context, Decisions, Effective MCP tool visibility is computed from session intent plus runtime health, Goals / Non-Goals, Handoff excludes MCP enablement and inventory, MCP tools should enter the same effective tool pipeline as local tools, Migration Plan, New sessions use one runtime-level default for MCP enablement (+4 more)
 
-### Community 102 - "Community 102"
+### Community 107 - "Community 107"
 Cohesion: 0.18
 Nodes (11): ADDED Requirements, Purpose, Requirement: Auth state transitions SHALL remain observable to the session, Requirement: Clients SHALL be able to start runtime-owned auth flows directly, Requirement: The runtime SHALL expose structured auth interaction state to clients, Requirements, runtime-auth-interactions Specification, Scenario: Client observes authenticated auth state (+3 more)
 
-### Community 104 - "Community 104"
-Cohesion: 0.23
-Nodes (7): bench_initialize_round_trip(), bench_new_session_round_trip(), bench_prompt_round_trip_with_fake_provider(), make_runtime(), NopClient, setup(), TestProvider
+### Community 108 - "Community 108"
+Cohesion: 0.24
+Nodes (3): debug_events_include_turn_id_when_prompt_started(), debug_sink_receives_session_skill_events_on_create(), debug_sink_receives_skill_catalog_event_on_refresh()
 
-### Community 106 - "Community 106"
+### Community 111 - "Community 111"
 Cohesion: 0.17
 Nodes (11): 1. Post-compaction request context SHALL be explicit rather than inferred from transcript leftovers, 2. Compaction SHALL be destructive for pre-tail history within the session, 3. Compaction accounting SHALL reflect provider-visible growth, including tool traffic, 4. Historical tool outcomes SHALL be preserved semantically, not transcriptually, 5. Integration tests SHALL verify request composition, not just compaction state, Context, Decisions, Goals / Non-Goals (+3 more)
 
-### Community 107 - "Community 107"
+### Community 112 - "Community 112"
+Cohesion: 0.17
+Nodes (11): ADDED Requirements, Requirement: Critical pressure failure is visible to the user, Requirement: Model-visible compress tool compacts selected ranges, Requirement: Slash compact runs an immediate compression turn, Requirement: Visible context IDs address compressible context, Scenario: Compress tool is not dispatched as an external tool, Scenario: Compressed blocks include block IDs, Scenario: Compression cannot resolve critical pressure (+3 more)
+
+### Community 113 - "Community 113"
+Cohesion: 0.17
+Nodes (11): Purpose, Requirement: MCP integration must not regress local tool execution, Requirement: MCP state is excluded from handoff portability, Requirement: Public MCP helper APIs must not advertise stub execution behavior, Requirements, Scenario: Destination runtime decides its own MCP availability, Scenario: Handoff does not carry enabled MCP servers, Scenario: Local tool remains executable after MCP integration (+3 more)
+
+### Community 114 - "Community 114"
 Cohesion: 0.17
 Nodes (11): Context, Decisions, Goals / Non-Goals, HTTP+SSE correlation must be dispatcher-based, not receiver-race-based, Legacy public MCP helper exposure should not imply executable behavior, Migration Plan, Non-payload SSE events should be explicitly filtered before dispatch, Open Questions (+3 more)
 
-### Community 108 - "Community 108"
+### Community 115 - "Community 115"
 Cohesion: 0.17
 Nodes (11): Add `prompt_stream_with_blocks(&[ContentBlock])` instead of overloading `prompt_stream`, Context, Decisions, Factor request submission and stream setup so text and block streaming share one path, Goals / Non-Goals, Keep multimodal conversion aligned with the existing blocking path, Migration Plan, Open Questions (+3 more)
 
-### Community 109 - "Community 109"
-Cohesion: 0.17
-Nodes (11): ADDED Requirements, Requirement: Compression pressure uses qualitative model-visible nudges, Requirement: Critical pressure failure is visible to the user, Requirement: Pressure clears only after recomputed usage is below threshold, Requirement: Slash compact runs an immediate compression turn, Scenario: Compression cannot resolve critical pressure, Scenario: Prompt cache changes only on pressure bucket transitions, Scenario: Prompt renders bucketed pressure (+3 more)
-
-### Community 110 - "Community 110"
-Cohesion: 0.2
-Nodes (11): ApprovalStrategy, Bootstrap-Only ID Tolerance, Fix MCP CamelCase Protocol Fields Change, Handoff Portability Model, MCP Protocol Structs, MCP Server Inventory, Handle Missing MCP Response ID Change, Fully Implement MCP and WASM Plugins Change (+3 more)
-
-### Community 111 - "Community 111"
-Cohesion: 0.18
-Nodes (4): ApprovalStrategy, ConfigSource, ContextWindowPolicy, McpConfig
-
-### Community 114 - "Community 114"
-Cohesion: 0.35
-Nodes (8): cancel_running_leaves_no_running_records_after(), cancel_running_skips_already_terminal_records(), cancel_running_transitions_running_and_pending(), cancel_running_with_no_running_is_noop(), DurableToolRecord, fresh_session(), ScriptRecordStatus, ToolTerminalOutcome
-
 ### Community 116 - "Community 116"
-Cohesion: 0.2
-Nodes (6): Checksum, ChecksumAlgorithm, ChecksumError, PluginConfig, PluginSource, test_sha256_checksum_mismatch()
+Cohesion: 0.21
+Nodes (10): Monty Embedded Python Runtime, ToolRegistry, Expose Python Tool Methods (Change), Improve Python Exec Guidance (Change), iron_call(name, args) Function, python_exec Tool, Python Tool Namespace Capability, Sandbox Boundary Design (+2 more)
 
 ### Community 117 - "Community 117"
 Cohesion: 0.18
-Nodes (10): 1. The prompt contract SHALL distinguish orchestration from host access, 2. The `python_exec` tool description SHALL describe the unsupported path explicitly, 3. Unsupported direct OS access SHALL fail with recovery-oriented guidance, 4. Verification SHALL cover both guidance surfaces and failure surfaces, Context, Decisions, Goals / Non-Goals, Migration Plan (+2 more)
+Nodes (4): ApprovalStrategy, ConfigSource, ContextWindowPolicy, McpConfig
 
 ### Community 118 - "Community 118"
-Cohesion: 0.18
-Nodes (4): MODIFIED Requirements, Requirement: MCP integration must not regress local tool execution, Scenario: Local tool remains executable after MCP integration, Scenario: MCP lookup remains unambiguous for provider-visible names
-
-### Community 119 - "Community 119"
-Cohesion: 0.18
-Nodes (10): Context, Decisions, Goals / Non-Goals, Make reconnect monitoring runtime-owned and shutdown-aware, Migration Plan, Open Questions, Risks / Trade-offs, Stop reparsing MCP names with first-underscore splitting (+2 more)
-
-### Community 120 - "Community 120"
-Cohesion: 0.18
-Nodes (10): Add explicit serialization/deserialization tests for protocol shapes, Apply serde camelCase mapping at the MCP protocol struct boundary, Audit all wire-visible MCP message structs, not just initialize, Context, Decisions, Goals / Non-Goals, Keep Rust field names unchanged, Migration Plan (+2 more)
+Cohesion: 0.35
+Nodes (8): cancel_running_leaves_no_running_records_after(), cancel_running_skips_already_terminal_records(), cancel_running_transitions_running_and_pending(), cancel_running_with_no_running_is_noop(), DurableToolRecord, fresh_session(), ScriptRecordStatus, ToolTerminalOutcome
 
 ### Community 121 - "Community 121"
-Cohesion: 0.18
-Nodes (10): Context, Decisions, Goals / Non-Goals, Keep diagnostics transport-specific but policy-consistent, Migration Plan, Move tolerance to the transport correlation boundary, not only the final validation check, Open Questions, Require unambiguous correlation before accepting an id-less bootstrap response (+2 more)
+Cohesion: 0.2
+Nodes (6): Checksum, ChecksumAlgorithm, ChecksumError, PluginConfig, PluginSource, test_sha256_checksum_mismatch()
 
 ### Community 122 - "Community 122"
 Cohesion: 0.18
-Nodes (10): Context, Decisions, Goals / Non-Goals, Log stripped vars at debug level, Match on case-insensitive suffix and prefix patterns, Migration Plan, Open Questions, Risks / Trade-offs (+2 more)
+Nodes (6): test_function_tool_execute(), test_function_tool_simple(), test_tool_registry_clear(), test_tool_registry_definitions(), test_tool_registry_get(), test_tool_registry_register()
+
+### Community 123 - "Community 123"
+Cohesion: 0.18
+Nodes (10): Architecture Overview, code:block1 (┌─────────────────┐     ┌──────────────────┐     ┌──────────), Context Architecture, Model Switching Architecture, Practical Guidance, Primary Architecture, Prompt Execution Model, Related Docs (+2 more)
+
+### Community 124 - "Community 124"
+Cohesion: 0.18
+Nodes (10): 1. The prompt contract SHALL distinguish orchestration from host access, 2. The `python_exec` tool description SHALL describe the unsupported path explicitly, 3. Unsupported direct OS access SHALL fail with recovery-oriented guidance, 4. Verification SHALL cover both guidance surfaces and failure surfaces, Context, Decisions, Goals / Non-Goals, Migration Plan (+2 more)
+
+### Community 125 - "Community 125"
+Cohesion: 0.18
+Nodes (10): Context, Decisions, Goals / Non-Goals, Make reconnect monitoring runtime-owned and shutdown-aware, Migration Plan, Open Questions, Risks / Trade-offs, Stop reparsing MCP names with first-underscore splitting (+2 more)
 
 ### Community 126 - "Community 126"
-Cohesion: 0.22
-Nodes (8): ADDED Requirements, dependency-version-guidance Specification, Purpose, Requirement: Monty source policy remains explicit, Requirement: Provider dependency version guidance stays current, Requirements, Scenario: Embedded Python guidance explains Monty source choice, Scenario: Manifest and docs reference the same provider version
+Cohesion: 0.18
+Nodes (10): Add explicit serialization/deserialization tests for protocol shapes, Apply serde camelCase mapping at the MCP protocol struct boundary, Audit all wire-visible MCP message structs, not just initialize, Context, Decisions, Goals / Non-Goals, Keep Rust field names unchanged, Migration Plan (+2 more)
 
 ### Community 127 - "Community 127"
-Cohesion: 0.2
-Nodes (9): Context, Decisions, Fall back to process current directory only when no allowed roots are configured, Goals / Non-Goals, Keep the primary working directory concept even with multiple roots, Migration Plan, Open Questions, Risks / Trade-offs (+1 more)
+Cohesion: 0.18
+Nodes (10): Context, Decisions, Goals / Non-Goals, Keep diagnostics transport-specific but policy-consistent, Migration Plan, Move tolerance to the transport correlation boundary, not only the final validation check, Open Questions, Require unambiguous correlation before accepting an id-less bootstrap response (+2 more)
 
 ### Community 128 - "Community 128"
-Cohesion: 0.2
-Nodes (9): 1. Shared interaction architecture, 2. Interaction payloads and validation, 3. Turn pause/resume behavior, 4. Client-visible APIs, 5. Migration and compatibility, 6. Verification, 7. Full choice-request implementation, 8. Resolution correctness and continuation storage (+1 more)
+Cohesion: 0.18
+Nodes (10): Context, Decisions, Goals / Non-Goals, Log stripped vars at debug level, Match on case-insensitive suffix and prefix patterns, Migration Plan, Open Questions, Risks / Trade-offs (+2 more)
 
 ### Community 129 - "Community 129"
-Cohesion: 0.22
-Nodes (10): activate_skill Model Tool, Agent Skills, agent-skills Capability, Agent Skills Support Change, context-compaction Capability, FilesystemSkillSource, Progressive Disclosure Pattern, SkillCatalog (+2 more)
-
-### Community 130 - "Community 130"
-Cohesion: 0.2
-Nodes (10): Context Architecture (active/compacted/handoff), Facade/Runtime Architecture Path, Three-Source Tool Architecture, Handoff Bundle Portability Rationale, Stream-First Session API, Plugin Auth Model, Plugin Handoff Exclusion Rationale, SessionToolCatalog Unification (+2 more)
-
-### Community 132 - "Community 132"
-Cohesion: 0.22
-Nodes (8): Current Change, Implemented, Important Files, Recommended Next Slice, Status: Context Compaction Redesign, Still Open, Verification Status, Worktree Note
-
-### Community 133 - "Community 133"
-Cohesion: 0.22
-Nodes (8): Architecture Overview, Context Architecture, Practical Guidance, Primary Architecture, Prompt Execution Model, Related Docs, Runtime Model, Tool Architecture
-
-### Community 134 - "Community 134"
-Cohesion: 0.22
-Nodes (8): Purpose, Requirement: Public MCP helper APIs must not advertise stub execution behavior, Requirement: Runtime-local MCP server inventory, Requirements, Scenario: Client lists configured runtime MCP servers, Scenario: Public MCP helper cannot report fake execution success, Scenario: Runtime inventory is local to the current runtime, session-scoped-mcp-support Specification
+Cohesion: 0.18
+Nodes (10): 10. Frontend Integration (Tauri/SolidJS), 1. Data Model and Types, 2. Core Switching Logic, 3. Context Adaptation, 4. Capability Reconciliation, 5. Timeline and Metadata, 6. Client Protocol (ACP), 7. Handoff Bundle Integration (+2 more)
 
 ### Community 135 - "Community 135"
 Cohesion: 0.22
-Nodes (8): 1. Inspection and Lookup Alignment, 2. Runtime Lifecycle Cleanup, 3. HTTP+SSE Transport Hardening, 4. Verification, Completed Changes, Implementation Summary, Known Issues, Test Results
+Nodes (8): ADDED Requirements, dependency-version-guidance Specification, Purpose, Requirement: Monty source policy remains explicit, Requirement: Provider dependency version guidance stays current, Requirements, Scenario: Embedded Python guidance explains Monty source choice, Scenario: Manifest and docs reference the same provider version
 
 ### Community 136 - "Community 136"
-Cohesion: 0.22
-Nodes (8): 1. Shared `HttpConfig` struct over duplicating fields on enum variants, 2. `Option<HashMap>` for headers rather than empty-vec default, 3. Default `Accept` header set at request time, not on the `reqwest::Client`, 4. Merge order: default Accept first, then user headers, Context, Decisions, Goals / Non-Goals, Risks / Trade-offs
+Cohesion: 0.2
+Nodes (9): Context, Decisions, Fall back to process current directory only when no allowed roots are configured, Goals / Non-Goals, Keep the primary working directory concept even with multiple roots, Migration Plan, Open Questions, Risks / Trade-offs (+1 more)
 
 ### Community 137 - "Community 137"
-Cohesion: 0.22
-Nodes (8): 1. Core types and skill source abstractions, 2. Skill discovery and parsing, 3. Runtime integration and APIs, 4. Session activation state, 5. Model-facing activation tool, 6. Prompt integration, 7. Context compaction protection, 8. Verification and tests
+Cohesion: 0.2
+Nodes (9): 1. Shared interaction architecture, 2. Interaction payloads and validation, 3. Turn pause/resume behavior, 4. Client-visible APIs, 5. Migration and compatibility, 6. Verification, 7. Full choice-request implementation, 8. Resolution correctness and continuation storage (+1 more)
 
 ### Community 138 - "Community 138"
-Cohesion: 0.22
-Nodes (7): MODIFIED Requirements, REMOVED Requirements, Requirement: Hidden runtime summarizer compaction, Requirement: Important historical tool outcomes survive semantically, Scenario: Runtime runs separate compaction LLM call, Scenario: Tool-derived results are preserved through compacted context, Scenario: Tool-derived results are preserved through compressed block summaries
-
-### Community 139 - "Community 139"
-Cohesion: 0.22
-Nodes (9): Requirement: Edit SHALL support higher-efficiency mutation patterns, Scenario: Multiedit is atomic, Scenario: Multiedit requires prior file awareness, Scenario: Multiedit supports replace-all per edit item, Scenario: Multiple edits can be applied to one file in one call, Scenario: Mutation failure output remains diagnostic, Scenario: Mutation success output remains compact, Scenario: Replace-all applies repeated exact matches in one call (+1 more)
+Cohesion: 0.2
+Nodes (10): Context Architecture (active/compacted/handoff), Facade/Runtime Architecture Path, Three-Source Tool Architecture, Handoff Bundle Portability Rationale, Stream-First Session API, Plugin Auth Model, Plugin Handoff Exclusion Rationale, SessionToolCatalog Unification (+2 more)
 
 ### Community 140 - "Community 140"
 Cohesion: 0.22
-Nodes (7): ADDED Requirements, Requirement: Baseline prompt guidance SHALL promote efficient built-in tool usage, Requirement: Built-in tool descriptions SHALL teach efficient tool usage, Scenario: Prompt instructs the model to batch independent work, Scenario: Prompt instructs the model to keep responses terse, Scenario: Read and edit tools describe bounded efficient workflows, Scenario: Search tools describe batching and selection guidance
+Nodes (7): MODIFIED Requirements, REMOVED Requirements, Requirement: Hidden runtime summarizer compaction, Requirement: Important historical tool outcomes survive semantically, Scenario: Runtime runs separate compaction LLM call, Scenario: Tool-derived results are preserved through compacted context, Scenario: Tool-derived results are preserved through compressed block summaries
+
+### Community 141 - "Community 141"
+Cohesion: 0.22
+Nodes (8): 1. Inspection and Lookup Alignment, 2. Runtime Lifecycle Cleanup, 3. HTTP+SSE Transport Hardening, 4. Verification, Completed Changes, Implementation Summary, Known Issues, Test Results
 
 ### Community 142 - "Community 142"
+Cohesion: 0.22
+Nodes (8): 1. Shared `HttpConfig` struct over duplicating fields on enum variants, 2. `Option<HashMap>` for headers rather than empty-vec default, 3. Default `Accept` header set at request time, not on the `reqwest::Client`, 4. Merge order: default Accept first, then user headers, Context, Decisions, Goals / Non-Goals, Risks / Trade-offs
+
+### Community 143 - "Community 143"
+Cohesion: 0.22
+Nodes (8): 1. Core types and skill source abstractions, 2. Skill discovery and parsing, 3. Runtime integration and APIs, 4. Session activation state, 5. Model-facing activation tool, 6. Prompt integration, 7. Context compaction protection, 8. Verification and tests
+
+### Community 144 - "Community 144"
+Cohesion: 0.22
+Nodes (9): Requirement: Edit SHALL support higher-efficiency mutation patterns, Scenario: Multiedit is atomic, Scenario: Multiedit requires prior file awareness, Scenario: Multiedit supports replace-all per edit item, Scenario: Multiple edits can be applied to one file in one call, Scenario: Mutation failure output remains diagnostic, Scenario: Mutation success output remains compact, Scenario: Replace-all applies repeated exact matches in one call (+1 more)
+
+### Community 145 - "Community 145"
+Cohesion: 0.22
+Nodes (7): ADDED Requirements, Requirement: Built-in tool descriptions SHALL teach efficient tool usage, Requirement: Search tools SHALL tolerate partial traversal failures, Scenario: Read and edit tools describe bounded efficient workflows, Scenario: Search continues after minor unreadable paths, Scenario: Search tools describe batching and selection guidance, Scenario: Significant skipped-path conditions can be surfaced
+
+### Community 146 - "Community 146"
+Cohesion: 0.22
+Nodes (8): 1. Debug Observation API, 2. Scope, Redaction, And Test Support, 3. Prompt And Context Instrumentation, 4. Compaction Instrumentation, 5. Tool Instrumentation, 6. Model Switch Instrumentation, 7. Skill Instrumentation, 8. Verification And Documentation
+
+### Community 147 - "Community 147"
+Cohesion: 0.22
+Nodes (8): Current Change, Implemented, Important Files, Recommended Next Slice, Status: Context Compaction Redesign, Still Open, Verification Status, Worktree Note
+
+### Community 148 - "Community 148"
+Cohesion: 0.25
+Nodes (9): activate_skill Model Tool, agent-skills Capability, Agent Skills Support Change, context-compaction Capability, FilesystemSkillSource, Progressive Disclosure Pattern, SkillCatalog, SkillSource Trait (+1 more)
+
+### Community 150 - "Community 150"
 Cohesion: 0.61
 Nodes (7): build_catalog(), create_test_registry(), create_test_session_with_mcp(), create_test_session_without_mcp(), disabled_server_tools_are_hidden(), errored_server_tools_are_hidden(), reconnected_server_tools_return_for_enabled_sessions()
 
-### Community 143 - "Community 143"
+### Community 151 - "Community 151"
 Cohesion: 0.25
 Nodes (7): context-compaction Specification, Purpose, Requirement: Compacted context SHALL preserve activated skill instructions, Requirements, Scenario: Active skills are not summarized into compacted context, Scenario: Active skills are not summarized into compressed blocks, Scenario: Post-compaction prompt includes active skills
 
-### Community 144 - "Community 144"
+### Community 152 - "Community 152"
 Cohesion: 0.25
 Nodes (7): Capabilities, Decisions Captured In This Proposal, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
-### Community 145 - "Community 145"
+### Community 153 - "Community 153"
 Cohesion: 0.25
 Nodes (7): 1. Provider credential domain, 2. OAuth metadata and token lifecycle, 3. Credential resolution, 4. Managed provider execution path, 5. Provider auth status and disconnect, 6. OAuth auth-failure retry, 7. Verification
 
-### Community 146 - "Community 146"
+### Community 154 - "Community 154"
+Cohesion: 0.25
+Nodes (7): ADDED Requirements, Requirement: Runtime Configuration Observation, Requirement: System Prompt Render Observation, Scenario: Future mutable config changes occur, Scenario: Model request is built, Scenario: Runtime is configured, Scenario: System prompt fingerprint changes
+
+### Community 155 - "Community 155"
 Cohesion: 0.36
 Nodes (8): Per-Prompt Credential Resolver, App-Owned Credential Store Abstraction, iron-providers Credential Types, Managed Provider Execution Path, Safe OAuth Auth Failure Retry, OAuth Device Code Token Exchange, Provider Auth Status Model, Provider Credential Orchestration
 
-### Community 147 - "Community 147"
+### Community 156 - "Community 156"
 Cohesion: 0.25
 Nodes (8): Dependency Version Guidance Capability, Dynamic System Prompt Templating, monty Git Dependency, Monty Embedded Python Runtime, Nine-Section System Prompt Model, Prompt Invalidation and Caching, Section Ownership Model, Update Iron Providers Version (Change)
 
-### Community 148 - "Community 148"
-Cohesion: 0.29
-Nodes (8): Handle Missing MCP Response ID, Hybrid Stdio Env Sanitization, inherited_stdio_env Function (deprecated), sanitized_stdio_env Function, Sensitive Environment Variable Blocklist, Session-Scoped MCP Support Spec (bootstrap ID handling), Session-Scoped MCP Support Spec (stdio env sanitization), StdioMcpClient
-
-### Community 152 - "Community 152"
-Cohesion: 0.29
-Nodes (6): ChildCallOutcome, ChildCallStatus, ScriptErrorKind, ScriptExecStatus, ScriptInput, ScriptResult
-
-### Community 154 - "Community 154"
-Cohesion: 0.43
-Nodes (3): JsonRpcRequest, tool_content_to_value(), tool_error_to_string()
-
-### Community 155 - "Community 155"
-Cohesion: 0.29
-Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
-
-### Community 156 - "Community 156"
-Cohesion: 0.29
-Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
-
 ### Community 157 - "Community 157"
 Cohesion: 0.29
-Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
+Nodes (8): iron-core README, MCP HTTP Headers, Plugin Rich Output, Rich View Result Envelope, Runtime Auth Interactions, Session-Effective Runtime Tool Catalog, Session-Scoped MCP Support (Change), WASM Integration Plugins
 
 ### Community 158 - "Community 158"
 Cohesion: 0.29
-Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
+Nodes (8): CompactedContext Struct, ContextWindowPolicy, Agent Skills, Compacted Context + Retained Tail Prompt Model, Context Compaction Capability, context_management Module, Destructive Compaction Design, Fix Context Compaction (Change)
 
 ### Community 159 - "Community 159"
 Cohesion: 0.29
-Nodes (7): Requirement: Effective MCP tool exposure depends on enablement and server health, Scenario: Disabled server tools are hidden, Scenario: Enabled usable server contributes tools to prompt construction, Scenario: Errored server tools are hidden, Scenario: Prompt construction uses the session-effective tool surface, Scenario: Reconnected server tools return for enabled sessions, Scenario: Unavailable MCP execution reports a precise reason
-
-### Community 160 - "Community 160"
-Cohesion: 0.29
-Nodes (7): Requirement: Client-visible MCP inspection and session control APIs, Scenario: Client inspects runtime server state, Scenario: Client toggles server for a session, Scenario: Prompt runtime context exposes all configured roots as workspace roots, Scenario: Prompt runtime context falls back to process current directory when no roots are configured, Scenario: Prompt runtime context uses configured primary root as working directory, Scenario: Public effective-tool inspection matches execution-visible tools
-
-### Community 161 - "Community 161"
-Cohesion: 0.29
-Nodes (4): ADDED Requirements, Requirement: MCP state is excluded from handoff portability, Scenario: Destination runtime decides its own MCP availability, Scenario: Handoff does not carry enabled MCP servers
-
-### Community 162 - "Community 162"
-Cohesion: 0.29
-Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
+Nodes (8): Handle Missing MCP Response ID, Hybrid Stdio Env Sanitization, inherited_stdio_env Function (deprecated), sanitized_stdio_env Function, Sensitive Environment Variable Blocklist, Session-Scoped MCP Support Spec (bootstrap ID handling), Session-Scoped MCP Support Spec (stdio env sanitization), StdioMcpClient
 
 ### Community 163 - "Community 163"
 Cohesion: 0.29
-Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
-
-### Community 164 - "Community 164"
-Cohesion: 0.29
-Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
+Nodes (6): ChildCallOutcome, ChildCallStatus, ScriptErrorKind, ScriptExecStatus, ScriptInput, ScriptResult
 
 ### Community 165 - "Community 165"
-Cohesion: 0.29
-Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
+Cohesion: 0.43
+Nodes (3): JsonRpcRequest, tool_content_to_value(), tool_error_to_string()
 
 ### Community 166 - "Community 166"
 Cohesion: 0.29
@@ -887,15 +922,15 @@ Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What C
 
 ### Community 169 - "Community 169"
 Cohesion: 0.29
-Nodes (6): 1. Data Model, 2. HTTP Client — HttpMcpClient, 3. HTTP Client — HttpSseMcpClient, 4. Dispatch Wiring, 5. Test Updates, 6. Verification
+Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
 ### Community 170 - "Community 170"
 Cohesion: 0.29
-Nodes (6): Context, Decisions, Goals / Non-Goals, Migration Plan, Open Questions, Risks / Trade-offs
+Nodes (7): Requirement: Client-visible MCP inspection and session control APIs, Scenario: Client inspects runtime server state, Scenario: Client toggles server for a session, Scenario: Prompt runtime context exposes all configured roots as workspace roots, Scenario: Prompt runtime context falls back to process current directory when no roots are configured, Scenario: Prompt runtime context uses configured primary root as working directory, Scenario: Public effective-tool inspection matches execution-visible tools
 
 ### Community 171 - "Community 171"
 Cohesion: 0.29
-Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
+Nodes (7): Requirement: Effective MCP tool exposure depends on enablement and server health, Scenario: Disabled server tools are hidden, Scenario: Enabled usable server contributes tools to prompt construction, Scenario: Errored server tools are hidden, Scenario: Prompt construction uses the session-effective tool surface, Scenario: Reconnected server tools return for enabled sessions, Scenario: Unavailable MCP execution reports a precise reason
 
 ### Community 172 - "Community 172"
 Cohesion: 0.29
@@ -907,7 +942,7 @@ Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What C
 
 ### Community 174 - "Community 174"
 Cohesion: 0.29
-Nodes (6): 1. MCP correctness completion, 2. Canonical runtime tool catalog expansion, 3. Plugin installation and runtime inventory, 4. Extism/WASM execution and auth-mediated availability, 5. Embedded Python and session control integration, 6. Verification
+Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
 ### Community 175 - "Community 175"
 Cohesion: 0.29
@@ -923,15 +958,15 @@ Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What C
 
 ### Community 178 - "Community 178"
 Cohesion: 0.29
-Nodes (7): Requirement: Built-in search results SHALL minimize model-facing token overhead, Scenario: Glob output includes directories and files in deterministic order, Scenario: Glob returns compact path output, Scenario: Grep output ordering is deterministic, Scenario: Grep returns compact grouped output, Scenario: Rendered paths are root-relative when possible, Scenario: Structured internal results remain available
+Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
 ### Community 179 - "Community 179"
 Cohesion: 0.29
-Nodes (7): Requirement: Grep SHALL support distinct v1 result modes, Scenario: Case-insensitive flag composes with regex flags, Scenario: Content mode pagination applies to match entries, Scenario: Count mode pagination does not alter global total, Scenario: Count mode returns total and per-file counts, Scenario: Files-with-matches mode lists file paths only, Scenario: Multiline matching spans lines
+Nodes (6): 1. Data Model, 2. HTTP Client — HttpMcpClient, 3. HTTP Client — HttpSseMcpClient, 4. Dispatch Wiring, 5. Test Updates, 6. Verification
 
 ### Community 180 - "Community 180"
 Cohesion: 0.29
-Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
+Nodes (6): Context, Decisions, Goals / Non-Goals, Migration Plan, Open Questions, Risks / Trade-offs
 
 ### Community 181 - "Community 181"
 Cohesion: 0.29
@@ -947,195 +982,303 @@ Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What C
 
 ### Community 184 - "Community 184"
 Cohesion: 0.29
-Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
+Nodes (6): 1. MCP correctness completion, 2. Canonical runtime tool catalog expansion, 3. Plugin installation and runtime inventory, 4. Extism/WASM execution and auth-mediated availability, 5. Embedded Python and session control integration, 6. Verification
 
 ### Community 185 - "Community 185"
 Cohesion: 0.29
-Nodes (6): 1. Durable Data Model, 2. Provider Request Rendering, 3. Pressure And Prompt Nudges, 4. Compress Tool Execution, 5. Runtime Flow And Slash Command, 6. Tests And Verification
+Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
 ### Community 186 - "Community 186"
-Cohesion: 0.33
-Nodes (3): CapabilityRegistry, render_python_context(), RuntimeContextRenderer
+Cohesion: 0.29
+Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
 ### Community 187 - "Community 187"
-Cohesion: 0.33
-Nodes (7): CompactedContext Struct, ContextWindowPolicy, Compacted Context + Retained Tail Prompt Model, Context Compaction Capability, context_management Module, Destructive Compaction Design, Fix Context Compaction (Change)
+Cohesion: 0.29
+Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
 ### Community 188 - "Community 188"
-Cohesion: 0.48
-Nodes (7): AgentSession, ContentBlock, prompt_stream_with_blocks, Streaming Multimodal Prompts - Design, Streaming Multimodal Prompts - Proposal, Streaming Multimodal Prompts - Spec, Streaming Multimodal Prompts - Tasks
+Cohesion: 0.29
+Nodes (7): Requirement: Grep SHALL support distinct v1 result modes, Scenario: Case-insensitive flag composes with regex flags, Scenario: Content mode pagination applies to match entries, Scenario: Count mode pagination does not alter global total, Scenario: Count mode returns total and per-file counts, Scenario: Files-with-matches mode lists file paths only, Scenario: Multiline matching spans lines
+
+### Community 189 - "Community 189"
+Cohesion: 0.29
+Nodes (7): Requirement: Built-in search results SHALL minimize model-facing token overhead, Scenario: Glob output includes directories and files in deterministic order, Scenario: Glob returns compact path output, Scenario: Grep output ordering is deterministic, Scenario: Grep returns compact grouped output, Scenario: Rendered paths are root-relative when possible, Scenario: Structured internal results remain available
+
+### Community 190 - "Community 190"
+Cohesion: 0.29
+Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
+
+### Community 191 - "Community 191"
+Cohesion: 0.29
+Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
 ### Community 192 - "Community 192"
-Cohesion: 0.33
-Nodes (5): 1. Tool Catalog Modeling, 2. Monty Namespace Exposure, 3. Execution Integration, 4. Verification, 5. Documentation
+Cohesion: 0.29
+Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
 ### Community 193 - "Community 193"
-Cohesion: 0.33
-Nodes (5): 1. Request Composition, 2. Destructive Compaction State, 3. Trigger Accounting, 4. Verification, 5. Documentation
+Cohesion: 0.29
+Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
 ### Community 194 - "Community 194"
-Cohesion: 0.33
-Nodes (6): Requirement: Runtime manages MCP connection and discovery lifecycle, Scenario: Failed server initialization marks server unavailable, Scenario: Failed stdio process spawn is surfaced as runtime error state, Scenario: Registered server connects and discovers tools, Scenario: Registration uses runtime-owned shared connection state, Scenario: Runtime shutdown stops MCP background lifecycle
+Cohesion: 0.29
+Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
 ### Community 195 - "Community 195"
-Cohesion: 0.33
-Nodes (5): Capabilities, Impact, Modified Capabilities, What Changes, Why
+Cohesion: 0.29
+Nodes (6): 1. Durable Data Model, 2. Provider Request Rendering, 3. Pressure And Prompt Nudges, 4. Compress Tool Execution, 5. Runtime Flow And Slash Command, 6. Tests And Verification
 
 ### Community 196 - "Community 196"
-Cohesion: 0.33
-Nodes (5): 1. Runtime Wiring, 2. Effective Tool Surface, 3. Embedded Python, 4. Transport and Execution, 5. Verification
+Cohesion: 0.29
+Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
 ### Community 197 - "Community 197"
-Cohesion: 0.33
-Nodes (6): Requirement: Compaction prunes historical tool transcript state, Scenario: Activated skill content survives compaction, Scenario: Completed historical tool records are not replayed after compaction, Scenario: Historical tool records are not replayed after compaction, Scenario: Retained active transcript remains available after compaction, Scenario: Retained tail remains available after compaction
+Cohesion: 0.29
+Nodes (6): Capabilities, Impact, Modified Capabilities, New Capabilities, What Changes, Why
 
 ### Community 198 - "Community 198"
 Cohesion: 0.33
-Nodes (6): Requirement: Compaction behavior is verified end to end, Scenario: Tests verify compacted context is re-used in future requests, Scenario: Tests verify compressed blocks are re-used in future requests, Scenario: Tests verify compressed historical tool transcript is removed, Scenario: Tests verify historical tool transcript is removed, Scenario: Tests verify invalid ranges do not mutate session state
+Nodes (3): CapabilityRegistry, render_python_context(), RuntimeContextRenderer
 
 ### Community 199 - "Community 199"
+Cohesion: 0.43
+Nodes (7): Align Runtime Context - Session Scoped MCP Support Spec, Align Runtime Context Working Directory - Design, Align Runtime Context Working Directory - Proposal, Align Runtime Context Working Directory - Tasks, request_builder, RuntimeContextRenderer, Runtime Working Directory Derivation Rationale
+
+### Community 200 - "Community 200"
+Cohesion: 0.38
+Nodes (7): Finish MCP Outstanding Work - Proposal, Fully Operational MCP - Proposal, python-tool-namespace capability, session-scoped-mcp-support capability, WASM Integration Plugins - Spec, WASM Plugin Auth Model, WASM Plugin Session Enablement
+
+### Community 201 - "Community 201"
+Cohesion: 0.48
+Nodes (7): AgentSession, ContentBlock, prompt_stream_with_blocks, Streaming Multimodal Prompts - Design, Streaming Multimodal Prompts - Proposal, Streaming Multimodal Prompts - Spec, Streaming Multimodal Prompts - Tasks
+
+### Community 204 - "Community 204"
+Cohesion: 0.33
+Nodes (5): SchemaValidationOutcome, validate_arguments(), unit_schema_validate_bad_schema(), unit_schema_validate_invalid(), unit_schema_validate_valid()
+
+### Community 205 - "Community 205"
+Cohesion: 0.33
+Nodes (5): 1. Tool Catalog Modeling, 2. Monty Namespace Exposure, 3. Execution Integration, 4. Verification, 5. Documentation
+
+### Community 206 - "Community 206"
+Cohesion: 0.33
+Nodes (5): 1. Request Composition, 2. Destructive Compaction State, 3. Trigger Accounting, 4. Verification, 5. Documentation
+
+### Community 207 - "Community 207"
+Cohesion: 0.33
+Nodes (6): Requirement: Compaction behavior is verified end to end, Scenario: Tests verify compacted context is re-used in future requests, Scenario: Tests verify compressed blocks are re-used in future requests, Scenario: Tests verify compressed historical tool transcript is removed, Scenario: Tests verify historical tool transcript is removed, Scenario: Tests verify invalid ranges do not mutate session state
+
+### Community 208 - "Community 208"
+Cohesion: 0.33
+Nodes (6): Requirement: Compaction prunes historical tool transcript state, Scenario: Activated skill content survives compaction, Scenario: Completed historical tool records are not replayed after compaction, Scenario: Historical tool records are not replayed after compaction, Scenario: Retained active transcript remains available after compaction, Scenario: Retained tail remains available after compaction
+
+### Community 209 - "Community 209"
+Cohesion: 0.33
+Nodes (6): Requirement: Runtime manages MCP connection and discovery lifecycle, Scenario: Failed server initialization marks server unavailable, Scenario: Failed stdio process spawn is surfaced as runtime error state, Scenario: Registered server connects and discovers tools, Scenario: Registration uses runtime-owned shared connection state, Scenario: Runtime shutdown stops MCP background lifecycle
+
+### Community 210 - "Community 210"
+Cohesion: 0.33
+Nodes (5): Capabilities, Impact, Modified Capabilities, What Changes, Why
+
+### Community 211 - "Community 211"
+Cohesion: 0.33
+Nodes (5): 1. Runtime Wiring, 2. Effective Tool Surface, 3. Embedded Python, 4. Transport and Execution, 5. Verification
+
+### Community 212 - "Community 212"
 Cohesion: 0.33
 Nodes (5): 1. Search engine foundation, 2. Search API and result contracts, 3. Read and edit efficiency upgrades, 4. Prompt and tool guidance, 5. Verification
 
-### Community 200 - "Community 200"
+### Community 213 - "Community 213"
 Cohesion: 0.33
 Nodes (5): 1. Prompt section model, 2. Rendering and caching, 3. Integration with existing prompt composition, 4. Runtime and facade surfaces, 5. Verification
 
-### Community 201 - "Community 201"
+### Community 214 - "Community 214"
 Cohesion: 0.47
 Nodes (6): Built-in Tool Efficiency Spec, Compact Model-Facing Output Format, Improve Built-in Tool Efficiency, Atomic Multiedit Capability, Ripgrep Ecosystem Crate Integration, Shared Tool Result Renderer
 
-### Community 203 - "Community 203"
+### Community 217 - "Community 217"
 Cohesion: 0.4
 Nodes (3): PortabilityNote, portability_note_non_portable(), portability_note_portable()
 
-### Community 204 - "Community 204"
-Cohesion: 0.4
-Nodes (4): 1. Runtime MCP Inventory, 2. Session Enablement And Effective Tools, 3. Client-Facing APIs, 4. Validation
-
-### Community 205 - "Community 205"
-Cohesion: 0.4
-Nodes (5): Requirement: MCP tool calls reuse the standard runtime execution lifecycle, Scenario: Approval strategy always forces approval for MCP tools, Scenario: Approval strategy never skips approval for MCP tools, Scenario: Child MCP tool call follows the same execution path, Scenario: Model-issued MCP tool call completes through the runtime
-
-### Community 206 - "Community 206"
-Cohesion: 0.4
-Nodes (4): Context, Decisions, Goals / Non-Goals, Risks / Trade-offs
-
-### Community 207 - "Community 207"
-Cohesion: 0.4
-Nodes (4): 1. Runtime Failure Handling, 2. HTTP+SSE Concurrency Safety, 3. Public API Cleanup, 4. Verification
-
-### Community 208 - "Community 208"
-Cohesion: 0.4
-Nodes (4): 1. Plugin Runtime Foundations, 2. Metadata, Auth, and Policy Surfaces, 3. Session and Tool Exposure Integration, 4. Verification and Validation
-
-### Community 209 - "Community 209"
-Cohesion: 0.4
-Nodes (4): 1. Facade API and shared streaming path, 2. Public documentation, 3. Streaming-contract test coverage, 4. Scope verification
-
-### Community 210 - "Community 210"
+### Community 218 - "Community 218"
 Cohesion: 0.4
 Nodes (5): Requirement: Future prompts use compacted context and retained tail, Scenario: Post-compaction request excludes compressed active transcript entries, Scenario: Post-compaction request excludes summarized pre-tail transcript, Scenario: Post-compaction request includes compressed blocks, Scenario: Post-compaction request includes semantic summary
 
-### Community 211 - "Community 211"
-Cohesion: 0.4
-Nodes (5): Requirement: Compaction thresholds reflect provider-visible context growth, Scenario: Critical pressure requires compression before continuing, Scenario: Hard-fit compaction reacts to actual request footprint, Scenario: Tool-heavy sessions receive pressure nudges, Scenario: Tool-heavy sessions still trigger maintenance compaction
-
-### Community 212 - "Community 212"
+### Community 219 - "Community 219"
 Cohesion: 0.4
 Nodes (5): Requirement: Compress validation preserves structural integrity, Scenario: Active context is protected, Scenario: Invalid or overlapping ranges are rejected, Scenario: Previous completed turns can be compressed during an active turn, Scenario: Tool call and result pairs cannot be split
 
-### Community 213 - "Community 213"
+### Community 220 - "Community 220"
+Cohesion: 0.4
+Nodes (5): Requirement: Compaction thresholds reflect provider-visible context growth, Scenario: Critical pressure requires compression before continuing, Scenario: Hard-fit compaction reacts to actual request footprint, Scenario: Tool-heavy sessions receive pressure nudges, Scenario: Tool-heavy sessions still trigger maintenance compaction
+
+### Community 221 - "Community 221"
+Cohesion: 0.4
+Nodes (4): 1. Runtime MCP Inventory, 2. Session Enablement And Effective Tools, 3. Client-Facing APIs, 4. Validation
+
+### Community 222 - "Community 222"
+Cohesion: 0.4
+Nodes (5): Requirement: MCP tool calls reuse the standard runtime execution lifecycle, Scenario: Approval strategy always forces approval for MCP tools, Scenario: Approval strategy never skips approval for MCP tools, Scenario: Child MCP tool call follows the same execution path, Scenario: Model-issued MCP tool call completes through the runtime
+
+### Community 223 - "Community 223"
+Cohesion: 0.4
+Nodes (4): Context, Decisions, Goals / Non-Goals, Risks / Trade-offs
+
+### Community 224 - "Community 224"
+Cohesion: 0.4
+Nodes (4): 1. Runtime Failure Handling, 2. HTTP+SSE Concurrency Safety, 3. Public API Cleanup, 4. Verification
+
+### Community 225 - "Community 225"
+Cohesion: 0.4
+Nodes (4): 1. Plugin Runtime Foundations, 2. Metadata, Auth, and Policy Surfaces, 3. Session and Tool Exposure Integration, 4. Verification and Validation
+
+### Community 226 - "Community 226"
+Cohesion: 0.4
+Nodes (4): 1. Facade API and shared streaming path, 2. Public documentation, 3. Streaming-contract test coverage, 4. Scope verification
+
+### Community 227 - "Community 227"
 Cohesion: 0.4
 Nodes (4): 1. Result contract and runtime normalization, 2. Client-visible runtime surfaces, 3. Declarative v1 view model, 4. Verification
 
-### Community 217 - "Community 217"
+### Community 228 - "Community 228"
+Cohesion: 0.4
+Nodes (5): Requirement: Model Switch Observation, Scenario: Model switch applied, Scenario: Model switch fails, Scenario: Model switch plan created, Scenario: Model switch queued
+
+### Community 229 - "Community 229"
+Cohesion: 0.4
+Nodes (5): Requirement: Skill Loading Observation, Scenario: Skill activation is rejected, Scenario: Skill activation succeeds, Scenario: Skill catalog refreshed, Scenario: Skills made available to session
+
+### Community 230 - "Community 230"
+Cohesion: 0.4
+Nodes (5): Requirement: Redaction-First Debug Payloads, Scenario: Config debug event, Scenario: Skill debug event, Scenario: System prompt debug event, Scenario: Tool debug event
+
+### Community 234 - "Community 234"
 Cohesion: 0.5
 Nodes (3): 1. Prompt And Tool Guidance, 2. Sandbox Failure Messaging, 3. Verification
 
-### Community 218 - "Community 218"
+### Community 235 - "Community 235"
 Cohesion: 0.5
 Nodes (4): Requirement: Session-scoped MCP enablement, Scenario: New session uses runtime default enablement, Scenario: Runtime default applies uniformly across configured servers, Scenario: Session toggle does not affect another session
 
-### Community 219 - "Community 219"
+### Community 236 - "Community 236"
 Cohesion: 0.5
 Nodes (3): 1. Dependency Declarations, 2. Documentation Alignment, 3. Verification
 
-### Community 220 - "Community 220"
+### Community 237 - "Community 237"
 Cohesion: 0.5
 Nodes (3): 1. Protocol struct audit and correction, 2. Verification, 3. Real-world validation
 
-### Community 221 - "Community 221"
+### Community 238 - "Community 238"
 Cohesion: 0.5
 Nodes (3): 1. Bootstrap correlation policy, 2. Transport-specific handling, 3. Verification
 
-### Community 222 - "Community 222"
+### Community 239 - "Community 239"
 Cohesion: 0.5
 Nodes (3): 1. Sensitive pattern matching, 2. Replace allowlist with hybrid approach, 3. Verification
 
-### Community 223 - "Community 223"
-Cohesion: 0.5
-Nodes (4): Requirement: Built-in search SHALL use embedded ripgrep ecosystem libraries, Scenario: Search follows symlinks within allowed roots, Scenario: Search respects repository ignore behavior by default, Scenario: Search runs without host ripgrep binary
-
-### Community 224 - "Community 224"
-Cohesion: 0.5
-Nodes (4): Requirement: Built-in tool truncation SHALL guide efficient follow-up actions, Scenario: File read truncation provides continuation guidance, Scenario: Search truncation provides refinement guidance, Scenario: Truncation footer format is consistent
-
-### Community 225 - "Community 225"
-Cohesion: 0.5
-Nodes (4): Requirement: Read SHALL support lightweight directory inspection, Scenario: Directory inspection shows actual contents, Scenario: Reading a directory returns entries instead of an error, Scenario: Reading a file still returns line-oriented content
-
-### Community 226 - "Community 226"
+### Community 240 - "Community 240"
 Cohesion: 0.5
 Nodes (4): Requirement: Built-in search SHALL provide correct glob and regex semantics, Scenario: Explicit patterns can target ignored or hidden content, Scenario: Glob pattern matching uses actual glob semantics, Scenario: Grep supports richer filtering and matching controls
 
-### Community 227 - "Community 227"
+### Community 241 - "Community 241"
+Cohesion: 0.5
+Nodes (4): Requirement: Read SHALL support lightweight directory inspection, Scenario: Directory inspection shows actual contents, Scenario: Reading a directory returns entries instead of an error, Scenario: Reading a file still returns line-oriented content
+
+### Community 242 - "Community 242"
+Cohesion: 0.5
+Nodes (4): Requirement: Built-in search SHALL use embedded ripgrep ecosystem libraries, Scenario: Search follows symlinks within allowed roots, Scenario: Search respects repository ignore behavior by default, Scenario: Search runs without host ripgrep binary
+
+### Community 243 - "Community 243"
+Cohesion: 0.5
+Nodes (4): Requirement: Built-in tool truncation SHALL guide efficient follow-up actions, Scenario: File read truncation provides continuation guidance, Scenario: Search truncation provides refinement guidance, Scenario: Truncation footer format is consistent
+
+### Community 244 - "Community 244"
 Cohesion: 0.5
 Nodes (3): 1. Auth interaction model, 2. Runtime/client surfaces, 3. Verification
 
-### Community 228 - "Community 228"
+### Community 245 - "Community 245"
 Cohesion: 0.5
-Nodes (4): iron-tui Host Integration Example, Ordered Prompt Layer Model, Protected Resources Policy, Repo Instruction File Family Selection
+Nodes (4): Requirement: Debug Scope Correlation, Scenario: Prompt-turn event, Scenario: Runtime-level event, Scenario: Tool-call event
 
-### Community 229 - "Community 229"
+### Community 246 - "Community 246"
+Cohesion: 0.5
+Nodes (4): Requirement: Tool Decision Observation, Scenario: Tool approval evaluated, Scenario: Tool execution finishes, Scenario: Tool execution starts
+
+### Community 247 - "Community 247"
+Cohesion: 0.5
+Nodes (4): Requirement: Runtime Debug Sink Registration, Scenario: Default no-op debug sink, Scenario: Registered sink receives events, Scenario: Sink registration avoids constructor breakage
+
+### Community 248 - "Community 248"
+Cohesion: 0.5
+Nodes (4): Requirement: Compaction Observation, Scenario: Compaction is applied, Scenario: Compaction is rejected, Scenario: Model requests compaction
+
+### Community 249 - "Community 249"
 Cohesion: 0.83
 Nodes (4): Architecture Overview Document, Getting Started Guide, Integration Plugins Document, Prompt Composition Document
 
-### Community 231 - "Community 231"
-Cohesion: 0.67
-Nodes (3): Requirement: Visible context IDs address compressible context, Scenario: Compressed blocks include block IDs, Scenario: Provider-visible transcript includes timeline IDs
+### Community 250 - "Community 250"
+Cohesion: 0.5
+Nodes (4): iron-tui Host Integration Example, Ordered Prompt Layer Model, Protected Resources Policy, Repo Instruction File Family Selection
 
-### Community 232 - "Community 232"
+### Community 252 - "Community 252"
 Cohesion: 0.67
-Nodes (3): Requirement: Model-visible compress tool compacts selected ranges, Scenario: Compress tool is not dispatched as an external tool, Scenario: Model compresses a resolved range
+Nodes (3): Requirement: Compression pressure uses qualitative model-visible nudges, Scenario: Prompt cache changes only on pressure bucket transitions, Scenario: Prompt renders bucketed pressure
 
-### Community 233 - "Community 233"
+### Community 253 - "Community 253"
 Cohesion: 0.67
-Nodes (3): Requirement: Search tools SHALL tolerate partial traversal failures, Scenario: Search continues after minor unreadable paths, Scenario: Significant skipped-path conditions can be surfaced
+Nodes (3): Requirement: Pressure clears only after recomputed usage is below threshold, Scenario: Successful compression clears pressure when below threshold, Scenario: Successful compression keeps pressure when still above threshold
 
-### Community 234 - "Community 234"
+### Community 255 - "Community 255"
+Cohesion: 0.67
+Nodes (3): Requirement: Baseline prompt guidance SHALL promote efficient built-in tool usage, Scenario: Prompt instructs the model to batch independent work, Scenario: Prompt instructs the model to keep responses terse
+
+### Community 256 - "Community 256"
+Cohesion: 0.67
+Nodes (3): Requirement: Prompt Influence Observation, Scenario: Context pressure hint is injected, Scenario: Hint is suppressed
+
+### Community 257 - "Community 257"
+Cohesion: 0.67
+Nodes (3): Requirement: Debug Events Remain Separate From Lifecycle And Logs, Scenario: Prompt lifecycle event emitted, Scenario: Runtime warning logged
+
+### Community 258 - "Community 258"
+Cohesion: 0.67
+Nodes (3): Requirement: Debug Event Envelope, Scenario: Event contains common metadata, Scenario: Event payload is domain typed
+
+### Community 259 - "Community 259"
+Cohesion: 0.67
+Nodes (3): Requirement: Context Snapshot Observation, Scenario: Context snapshot estimated, Scenario: Token estimate quality is approximate
+
+### Community 260 - "Community 260"
+Cohesion: 0.67
+Nodes (3): Requirement: Non-Interfering Debug Emission, Scenario: Debug sink is absent, Scenario: Debug sink performs no state transition
+
+### Community 261 - "Community 261"
+Cohesion: 0.67
+Nodes (3): Requirement: Recording Sink Test Support, Scenario: Test records debug events, Scenario: Test verifies redaction
+
+### Community 262 - "Community 262"
 Cohesion: 0.67
 Nodes (3): Extism WASM Runtime, Plugin Install Lifecycle, WASM Integration Plugin Subsystem
 
 ## Knowledge Gaps
-- **1093 isolated node(s):** `Run the build and lint checks with a terse summary.`, `Run the test suite with a terse summary.`, `Run security checks with a terse summary.`, `CapabilityDescriptor`, `CapabilityBackend` (+1088 more)
+- **1248 isolated node(s):** `Run the build and lint checks with a terse summary.`, `Run the test suite with a terse summary.`, `Run security checks with a terse summary.`, `CapabilityDescriptor`, `CapabilityBackend` (+1243 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **40 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **38 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `iron-providers Dependency` connect `Community 103` to `Community 0`, `Community 2`, `Community 6`, `Community 104`, `Community 9`, `Community 74`, `Community 73`, `Community 43`, `Community 111`, `Community 16`, `Community 147`, `Community 20`?**
+- **Why does `iron-providers Dependency` connect `Community 110` to `Community 0`, `Community 1`, `Community 102`, `Community 7`, `Community 9`, `Community 14`, `Community 82`, `Community 52`, `Community 117`, `Community 86`, `Community 21`, `Community 156`?**
   _High betweenness centrality (0.084) - this node is a cross-community bridge._
-- **Why does `SessionToolCatalog` connect `Community 71` to `Community 96`, `Community 110`, `Community 15`?**
-  _High betweenness centrality (0.057) - this node is a cross-community bridge._
-- **Why does `compute_tool_availability` connect `Community 71` to `Community 1`, `Community 4`?**
-  _High betweenness centrality (0.053) - this node is a cross-community bridge._
+- **Why does `compute_tool_availability` connect `Community 35` to `Community 2`, `Community 4`?**
+  _High betweenness centrality (0.034) - this node is a cross-community bridge._
+- **Why does `ConnectionId` connect `Community 14` to `Community 0`, `Community 37`, `Community 231`, `Community 10`, `Community 108`, `Community 49`, `Community 21`, `Community 24`?**
+  _High betweenness centrality (0.033) - this node is a cross-community bridge._
+- **Are the 30 inferred relationships involving `ConnectionId` (e.g. with `.new()` and `debug_tool_events_include_turn_id()`) actually correct?**
+  _`ConnectionId` has 30 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `Run the build and lint checks with a terse summary.`, `Run the test suite with a terse summary.`, `Run security checks with a terse summary.` to the rest of the system?**
-  _1093 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _1248 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Community 0` be split into smaller, more focused modules?**
   _Cohesion score 0.05 - nodes in this community are weakly interconnected._
 - **Should `Community 1` be split into smaller, more focused modules?**
-  _Cohesion score 0.09 - nodes in this community are weakly interconnected._
-- **Should `Community 2` be split into smaller, more focused modules?**
-  _Cohesion score 0.05 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.06 - nodes in this community are weakly interconnected._

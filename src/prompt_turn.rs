@@ -14,7 +14,9 @@ pub struct PromptTurn {
 
 impl PromptTurn {
     pub fn new(session_id: SessionId, runtime: IronRuntime) -> Self {
-        let ephemeral = Arc::new(tokio::sync::Mutex::new(EphemeralTurn::new(session_id)));
+        let ephemeral = Arc::new(tokio::sync::Mutex::new(EphemeralTurn::new(
+            session_id, None,
+        )));
         Self {
             session_id,
             ephemeral,
