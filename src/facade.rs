@@ -513,6 +513,14 @@ impl IronAgent {
         &self.runtime
     }
 
+    /// Set the debug observation sink for this agent.
+    ///
+    /// The sink receives typed debug events emitted at semantic runtime
+    /// transitions. Setting `None` restores the default no-op sink.
+    pub fn set_debug_sink(&self, sink: Option<Arc<dyn crate::debug::DebugSink>>) {
+        self.runtime.set_debug_sink(sink);
+    }
+
     /// Register a custom tool with the agent.
     ///
     /// Tools must implement the [`Tool`] trait. Once registered,

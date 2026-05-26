@@ -54,6 +54,8 @@ struct RuntimeInner {
     shutdown_tx: watch::Sender<bool>,
     active_tasks: Mutex<Vec<JoinHandle<()>>>,
     resolver: Option<Arc<CredentialResolver>>,
+    debug_sink: RwLock<Option<Arc<dyn crate::debug::DebugSink>>>,
+    debug_sequence: crate::debug::SequenceGenerator,
 }
 
 struct ActivePrompt {
@@ -66,6 +68,7 @@ struct RuntimeSession {
     active_prompt: Mutex<Option<ActivePrompt>>,
     tool_catalog_cache: Mutex<Option<CachedSessionToolCatalog>>,
     pending_model_switch: Mutex<Option<PendingModelSwitch>>,
+    turn_counter: std::sync::atomic::AtomicU64,
 }
 
 struct CachedSessionToolCatalog {
@@ -86,6 +89,7 @@ impl RuntimeSession {
             active_prompt: Mutex::new(None),
             tool_catalog_cache: Mutex::new(None),
             pending_model_switch: Mutex::new(None),
+            turn_counter: std::sync::atomic::AtomicU64::new(1),
         }
     }
 }
@@ -207,6 +211,8 @@ impl IronRuntime {
             shutdown_tx,
             active_tasks: Mutex::new(Vec::new()),
             resolver: None,
+            debug_sink: RwLock::new(None),
+            debug_sequence: crate::debug::SequenceGenerator::new(),
         };
 
         let this = Self {
@@ -225,6 +231,16 @@ impl IronRuntime {
             this.register_activate_skill_tool();
             this.refresh_skill_catalog();
         }
+
+        // Emit runtime configuration debug event
+        let config_event = crate::debug::redact_config(&this.inner.config);
+        this.emit_debug(crate::debug::DebugEvent {
+            timestamp: chrono::Utc::now(),
+            sequence: this.inner.debug_sequence.next(),
+            severity: crate::debug::DebugSeverity::Info,
+            scope: crate::debug::DebugScope::default(),
+            payload: crate::debug::DebugPayload::Config(config_event),
+        });
 
         this
     }
@@ -275,6 +291,8 @@ impl IronRuntime {
             shutdown_tx,
             active_tasks: Mutex::new(Vec::new()),
             resolver: None,
+            debug_sink: RwLock::new(None),
+            debug_sequence: crate::debug::SequenceGenerator::new(),
         };
 
         let this = Self {
@@ -293,6 +311,16 @@ impl IronRuntime {
             this.register_activate_skill_tool();
             this.refresh_skill_catalog();
         }
+
+        // Emit runtime configuration debug event
+        let config_event = crate::debug::redact_config(&this.inner.config);
+        this.emit_debug(crate::debug::DebugEvent {
+            timestamp: chrono::Utc::now(),
+            sequence: this.inner.debug_sequence.next(),
+            severity: crate::debug::DebugSeverity::Info,
+            scope: crate::debug::DebugScope::default(),
+            payload: crate::debug::DebugPayload::Config(config_event),
+        });
 
         this
     }
@@ -313,6 +341,51 @@ impl IronRuntime {
             inner.resolver = Some(Arc::new(CredentialResolver::new(credential_store)));
         }
         runtime
+    }
+
+    /// Set the debug observation sink for this runtime.
+    ///
+    /// The sink receives typed debug events emitted at semantic runtime
+    /// transitions. Setting `None` restores the default no-op sink.
+    pub fn set_debug_sink(&self, sink: Option<Arc<dyn crate::debug::DebugSink>>) {
+        let mut guard = self.inner.debug_sink.write();
+        *guard = sink.clone();
+        // Emit config event when sink is registered so embedders can observe current configuration
+        if let Some(ref s) = sink {
+            let config_event = crate::debug::redact_config(&self.inner.config);
+            crate::debug::emit_debug(
+                s.as_ref(),
+                crate::debug::DebugEvent {
+                    timestamp: chrono::Utc::now(),
+                    sequence: self.inner.debug_sequence.next(),
+                    severity: crate::debug::DebugSeverity::Info,
+                    scope: crate::debug::DebugScope::default(),
+                    payload: crate::debug::DebugPayload::Config(config_event),
+                },
+            );
+        }
+    }
+
+    /// Access the current debug sink (read-only).
+    pub(crate) fn debug_sink(
+        &self,
+    ) -> parking_lot::MappedRwLockReadGuard<'_, Option<Arc<dyn crate::debug::DebugSink>>> {
+        parking_lot::RwLockReadGuard::map(self.inner.debug_sink.read(), |s| s)
+    }
+
+    /// Get the next debug event sequence number.
+    pub(crate) fn next_debug_sequence(&self) -> u64 {
+        self.inner.debug_sequence.next()
+    }
+
+    /// Emit a debug event through the runtime's sink if one is registered.
+    ///
+    /// This is a no-op if no sink is configured. Events are best-effort
+    /// and must never affect runtime behavior.
+    pub(crate) fn emit_debug(&self, event: crate::debug::DebugEvent) {
+        if let Some(ref sink) = *self.debug_sink() {
+            crate::debug::emit_debug(sink.as_ref(), event);
+        }
     }
 
     /// Borrow the validated runtime configuration.
@@ -609,7 +682,35 @@ impl IronRuntime {
         let mut catalog = SkillCatalog::discover(&sources);
         catalog.extend_diagnostics(diagnostics);
         let diagnostics = catalog.diagnostics().to_vec();
+        let discovered_count = catalog.len();
+        let all_skills = catalog.list_all();
+        let trusted_count = all_skills
+            .iter()
+            .filter(|s| !s.metadata.requires_trust)
+            .count();
+        let untrusted_count = discovered_count - trusted_count;
+        let source_kinds: Vec<String> = sources
+            .iter()
+            .map(|s| std::any::type_name_of_val(s.as_ref()).to_string())
+            .collect();
         *self.inner.skill_catalog.write() = catalog;
+
+        self.emit_debug(crate::debug::DebugEvent {
+            timestamp: chrono::Utc::now(),
+            sequence: self.next_debug_sequence(),
+            severity: crate::debug::DebugSeverity::Info,
+            scope: crate::debug::DebugScope::default(),
+            payload: crate::debug::DebugPayload::Skill(
+                crate::debug::SkillDebugEvent::CatalogRefreshed {
+                    sources: source_kinds,
+                    discovered_count,
+                    trusted_count,
+                    untrusted_count,
+                    diagnostic_count: diagnostics.len(),
+                },
+            ),
+        });
+
         diagnostics
     }
 
@@ -710,7 +811,30 @@ impl IronRuntime {
         // Initialize active skills from runtime skill catalog
         if self.inner.config.skills.enabled {
             let available_skills = self.available_skill_snapshot();
+            let source_categories: Vec<String> = available_skills
+                .iter()
+                .map(|s| format!("{:?}", s.metadata.origin))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
             durable.set_available_skills(available_skills.clone());
+
+            self.emit_debug(crate::debug::DebugEvent {
+                timestamp: chrono::Utc::now(),
+                sequence: self.next_debug_sequence(),
+                severity: crate::debug::DebugSeverity::Info,
+                scope: crate::debug::DebugScope {
+                    session_id: Some(session_id),
+                    ..crate::debug::DebugScope::default()
+                },
+                payload: crate::debug::DebugPayload::Skill(
+                    crate::debug::SkillDebugEvent::AvailableToSession {
+                        count: available_skills.len(),
+                        source_categories,
+                    },
+                ),
+            });
+
             for skill in &available_skills {
                 if skill.metadata.auto_activate && !skill.metadata.requires_trust {
                     durable.activate_skill(
@@ -803,7 +927,14 @@ impl IronRuntime {
                 "session already has an active prompt".into(),
             ));
         }
-        let ephemeral = Arc::new(Mutex::new(EphemeralTurn::new(session_id)));
+        let turn_id = rs
+            .turn_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let turn_id_str = format!("{}-{}", session_id, turn_id);
+        let ephemeral = Arc::new(Mutex::new(EphemeralTurn::new(
+            session_id,
+            Some(turn_id_str),
+        )));
         ephemeral.lock().start();
         *active = Some(ActivePrompt {
             ephemeral: ephemeral.clone(),
@@ -839,8 +970,36 @@ impl IronRuntime {
 
         let mut pending = rs.pending_model_switch.lock();
         *pending = Some(PendingModelSwitch {
-            request,
+            request: request.clone(),
             requested_at: chrono::Utc::now(),
+        });
+
+        // Emit model switch queued debug event
+        let (target_model, target_provider) = match &request {
+            crate::context::model_switch::ModelSwitchRequest::Managed {
+                provider_slug,
+                model,
+                ..
+            } => (model.clone(), provider_slug.clone()),
+            crate::context::model_switch::ModelSwitchRequest::Unmanaged {
+                model,
+                provider_name,
+            } => (model.clone(), provider_name.clone()),
+        };
+        self.emit_debug(crate::debug::DebugEvent {
+            timestamp: chrono::Utc::now(),
+            sequence: self.inner.debug_sequence.next(),
+            severity: crate::debug::DebugSeverity::Info,
+            scope: crate::debug::DebugScope {
+                session_id: Some(session_id),
+                ..crate::debug::DebugScope::default()
+            },
+            payload: crate::debug::DebugPayload::Provider(
+                crate::debug::ProviderDebugEvent::ModelSwitchQueued {
+                    target_model,
+                    target_provider,
+                },
+            ),
         });
 
         Ok(())
@@ -911,8 +1070,49 @@ impl IronRuntime {
             false
         };
 
+        // Emit model switch plan created debug event
+        self.emit_debug(crate::debug::DebugEvent {
+            timestamp: chrono::Utc::now(),
+            sequence: self.inner.debug_sequence.next(),
+            severity: crate::debug::DebugSeverity::Info,
+            scope: crate::debug::DebugScope {
+                session_id: Some(session_id),
+                ..crate::debug::DebugScope::default()
+            },
+            payload: crate::debug::DebugPayload::Provider(
+                crate::debug::ProviderDebugEvent::ModelSwitchPlanCreated {
+                    current_tokens,
+                    target_window,
+                    adaptation_needed: plan.context_adaptation.needs_compaction,
+                    estimate_quality: "estimated".to_string(),
+                },
+            ),
+        });
+
         // Update current model
         session.current_model = Some(to_model.clone());
+
+        // Emit model switch applied debug event
+        self.emit_debug(crate::debug::DebugEvent {
+            timestamp: chrono::Utc::now(),
+            sequence: self.inner.debug_sequence.next(),
+            severity: crate::debug::DebugSeverity::Info,
+            scope: crate::debug::DebugScope {
+                session_id: Some(session_id),
+                ..crate::debug::DebugScope::default()
+            },
+            payload: crate::debug::DebugPayload::Provider(
+                crate::debug::ProviderDebugEvent::ModelSwitchApplied {
+                    from_model: from_model.clone().unwrap_or_else(|| "unknown".to_string()),
+                    from_provider: from_provider
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    to_model: to_model.clone(),
+                    to_provider: to_provider.clone().unwrap_or_else(|| "unknown".to_string()),
+                    capability_diff: Some(format!("{:?}", plan.capability_diff)),
+                },
+            ),
+        });
 
         // Record in timeline
         let timeline_index = session.timeline.len() as u64;
@@ -960,7 +1160,35 @@ impl IronRuntime {
         };
 
         if let Some(pending) = pending {
-            let _ = self.apply_model_switch(session_id, pending.request);
+            if let Err(ref e) = self.apply_model_switch(session_id, pending.request.clone()) {
+                let (target_model, target_provider) = match &pending.request {
+                    crate::context::model_switch::ModelSwitchRequest::Managed {
+                        provider_slug,
+                        model,
+                        ..
+                    } => (model.clone(), provider_slug.clone()),
+                    crate::context::model_switch::ModelSwitchRequest::Unmanaged {
+                        model,
+                        provider_name,
+                    } => (model.clone(), provider_name.clone()),
+                };
+                self.emit_debug(crate::debug::DebugEvent {
+                    timestamp: chrono::Utc::now(),
+                    sequence: self.inner.debug_sequence.next(),
+                    severity: crate::debug::DebugSeverity::Error,
+                    scope: crate::debug::DebugScope {
+                        session_id: Some(session_id),
+                        ..crate::debug::DebugScope::default()
+                    },
+                    payload: crate::debug::DebugPayload::Provider(
+                        crate::debug::ProviderDebugEvent::ModelSwitchFailed {
+                            target_model,
+                            target_provider,
+                            reason: e.to_string(),
+                        },
+                    ),
+                });
+            }
         }
     }
 
@@ -1718,5 +1946,86 @@ mod tests {
         assert!(
             matches!(result, Err(ProviderAuthError::UnsupportedCredential { ref provider, .. }) if provider == "codex"),
         );
+    }
+
+    #[test]
+    fn debug_sink_receives_config_event_on_registration() {
+        let runtime = IronRuntime::new(Config::default(), MockProvider);
+        let sink = std::sync::Arc::new(crate::debug::test_helpers::RecordingDebugSink::new());
+        runtime.set_debug_sink(Some(sink.clone()));
+
+        let events = sink.events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.payload, crate::debug::DebugPayload::Config(_))),
+            "Config event should be emitted when sink is registered"
+        );
+    }
+
+    #[test]
+    fn debug_sink_receives_skill_catalog_event_on_refresh() {
+        let runtime = IronRuntime::new(Config::default(), MockProvider);
+        let sink = std::sync::Arc::new(crate::debug::test_helpers::RecordingDebugSink::new());
+        runtime.set_debug_sink(Some(sink.clone()));
+
+        // Clear events from config emission
+        let _ = sink.take_events();
+
+        runtime.refresh_skill_catalog();
+
+        let events = sink.events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.payload, crate::debug::DebugPayload::Skill(_))),
+            "Skill catalog event should be emitted on refresh"
+        );
+    }
+
+    #[test]
+    fn debug_sink_receives_session_skill_events_on_create() {
+        let runtime = IronRuntime::new(
+            Config::default().with_skills(crate::config::SkillConfig::default().with_enabled(true)),
+            MockProvider,
+        );
+        let sink = std::sync::Arc::new(crate::debug::test_helpers::RecordingDebugSink::new());
+        runtime.set_debug_sink(Some(sink.clone()));
+
+        // Clear events from config emission
+        let _ = sink.take_events();
+
+        let (_session_id, _) = runtime.create_session(crate::ConnectionId(1)).unwrap();
+
+        let events = sink.events();
+        assert!(
+            events.iter().any(|e| matches!(
+                e.payload,
+                crate::debug::DebugPayload::Skill(
+                    crate::debug::SkillDebugEvent::AvailableToSession { .. }
+                )
+            )),
+            "Skill available event should be emitted when session is created"
+        );
+    }
+
+    #[test]
+    fn debug_events_include_turn_id_when_prompt_started() {
+        let runtime = IronRuntime::new(Config::default(), MockProvider);
+        let sink = std::sync::Arc::new(crate::debug::test_helpers::RecordingDebugSink::new());
+        runtime.set_debug_sink(Some(sink.clone()));
+
+        let (session_id, _) = runtime.create_session(crate::ConnectionId(1)).unwrap();
+
+        // Clear events from config and session emissions
+        let _ = sink.take_events();
+
+        let ephemeral = runtime.try_start_prompt(session_id).unwrap();
+        let turn_id = ephemeral.lock().turn_id.clone();
+
+        assert!(turn_id.is_some(), "Turn should have a turn_id assigned");
+
+        // Finish the prompt to clean up
+        runtime.finish_prompt(session_id);
     }
 }

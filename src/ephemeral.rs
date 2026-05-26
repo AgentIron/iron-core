@@ -24,6 +24,7 @@ pub enum PendingPermission {
 
 pub struct EphemeralTurn {
     pub session_id: SessionId,
+    pub turn_id: Option<String>,
     pub phase: TurnPhase,
     pub pending_permissions: Vec<PendingPermission>,
     pub partial_chunks: Vec<String>,
@@ -33,10 +34,11 @@ pub struct EphemeralTurn {
 }
 
 impl EphemeralTurn {
-    pub fn new(session_id: SessionId) -> Self {
+    pub fn new(session_id: SessionId, turn_id: Option<String>) -> Self {
         let (phase_tx, phase_rx) = watch::channel(TurnPhase::Idle);
         Self {
             session_id,
+            turn_id,
             phase: TurnPhase::Idle,
             pending_permissions: Vec::new(),
             partial_chunks: Vec::new(),
@@ -118,6 +120,7 @@ impl std::fmt::Debug for EphemeralTurn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EphemeralTurn")
             .field("session_id", &self.session_id)
+            .field("turn_id", &self.turn_id)
             .field("phase", &self.phase)
             .field("pending_permissions", &self.pending_permissions.len())
             .field("partial_chunks", &self.partial_chunks.len())
