@@ -1,1 +1,0 @@
-{"nodes": [], "edges": [{"source": "fix_context_compaction", "target": "context_compaction", "relation": "implements", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "openspec/changes/archive/2026-04-09-fix-context-compaction/proposal.md"}], "hyperedges": []}

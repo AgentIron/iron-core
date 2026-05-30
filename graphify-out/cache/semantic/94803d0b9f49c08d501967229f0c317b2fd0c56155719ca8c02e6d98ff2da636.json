@@ -1,1 +1,0 @@
-{"nodes": [], "edges": [{"source": "update_iron_providers_version", "target": "dependency_version_guidance", "relation": "implements", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "openspec/changes/archive/2026-04-09-update-iron-providers-version/proposal.md"}], "hyperedges": []}

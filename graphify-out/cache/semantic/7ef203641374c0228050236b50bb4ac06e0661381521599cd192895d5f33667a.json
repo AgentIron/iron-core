@@ -1,1 +1,0 @@
-{"nodes": [], "edges": [{"source": "close_mcp_correctness_gaps", "target": "session_scoped_mcp_capability", "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "openspec/changes/archive/2026-04-10-close-mcp-correctness-gaps/proposal.md"}], "hyperedges": []}

@@ -17,7 +17,5 @@ llm_files
 __pycache__
 .ruff_cache
 
-graphify-out/cache
-
 # Code review graph database
 .code-review-graph/

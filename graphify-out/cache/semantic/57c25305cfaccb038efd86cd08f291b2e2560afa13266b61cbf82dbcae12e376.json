@@ -1,1 +1,0 @@
-{"nodes": [], "edges": [{"source": "expose_python_tool_methods", "target": "python_tool_namespace", "relation": "implements", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "openspec/changes/archive/2026-04-09-expose-python-tool-methods/proposal.md"}], "hyperedges": []}

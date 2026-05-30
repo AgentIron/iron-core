@@ -1,1 +1,0 @@
-{"nodes": [], "edges": [{"source": "session_scoped_mcp_support", "target": "session_scoped_mcp_capability", "relation": "implements", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "openspec/changes/archive/2026-04-09-session-scoped-mcp-support/proposal.md"}], "hyperedges": []}

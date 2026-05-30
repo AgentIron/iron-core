@@ -1,1 +1,0 @@
-{"nodes": [], "edges": [{"source": "sandbox_boundary", "target": "tools_namespace", "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "openspec/changes/archive/2026-04-09-improve-python-exec-guidance/specs/python-tool-namespace/spec.md"}], "hyperedges": []}

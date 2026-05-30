@@ -1,1 +1,0 @@
-{"nodes": [], "edges": [{"source": "dynamic_system_prompt_templating", "target": "dependency_version_guidance", "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "openspec/changes/dynamic-system-prompt-templating/proposal.md", "source_location": null, "weight": 1.0}], "hyperedges": []}
