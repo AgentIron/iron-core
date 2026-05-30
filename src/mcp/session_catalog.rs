@@ -956,7 +956,11 @@ mod tests {
         let mut local_registry = crate::tool::ToolRegistry::new();
         local_registry.register(crate::tool::FunctionTool::new(
             crate::context::CompressTool::definition(),
-            |_args| Err(crate::error::RuntimeError::tool_execution("test stub".to_string())),
+            |_args| {
+                Err(crate::error::RuntimeError::tool_execution(
+                    "test stub".to_string(),
+                ))
+            },
         ));
         let local = Arc::new(local_registry);
         let mcp = Arc::new(crate::mcp::server::McpServerRegistry::new());

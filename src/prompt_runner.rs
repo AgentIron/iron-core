@@ -167,9 +167,7 @@ impl PromptRunner {
                 let instructions = session.instructions.clone();
                 let compressed_blocks = session.compressed_blocks.clone();
                 let repo_payload = session.repo_instruction_payload.clone();
-                let messages = session
-                    .to_transcript_with_visible_ids(true)
-                    .messages;
+                let messages = session.to_transcript_with_visible_ids(true).messages;
                 let skill_instructions = session.active_skill_instructions();
                 drop(session);
 

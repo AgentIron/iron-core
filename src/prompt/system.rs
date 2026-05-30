@@ -211,10 +211,9 @@ impl SystemPromptRenderer {
             PromptSection::Identity => render_identity(),
             PromptSection::StaticContext => inputs.runtime_context.to_string(),
             PromptSection::CoreGuidelines => render_core_guidelines(inputs.baseline),
-            PromptSection::ToolPhilosophy => render_tool_philosophy(
-                inputs.python_exec_available,
-                inputs.context_pressure,
-            ),
+            PromptSection::ToolPhilosophy => {
+                render_tool_philosophy(inputs.python_exec_available, inputs.context_pressure)
+            }
             PromptSection::EditingGuidelines => inputs
                 .client_editing_guidance
                 .filter(|s| !s.trim().is_empty())
