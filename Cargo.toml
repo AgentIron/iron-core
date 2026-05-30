@@ -4,7 +4,7 @@ version = "0.1.20"
 edition = "2021"
 authors = ["Paul Mooring"]
 license = "Apache-2.0"
-rust-version = "1.91"
+rust-version = "1.95"
 description = "Core AgentIron loop, session state, and tool registry"
 readme = "README.md"
 repository = "https://github.com/AgentIron/iron-core"
@@ -16,7 +16,7 @@ exclude = [
 ]
 
 [dependencies]
-iron-providers = "0.2.2"
+iron-providers = "0.2.5"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 serde = { version = "1", features = ["derive"] }
@@ -67,7 +67,7 @@ grep-regex = "0.1"
 # there, because crates.io rejects manifests containing git dependencies.
 #
 # Bump `rev` deliberately after verifying against the iron-core test suite.
-monty = { git = "https://github.com/pydantic/monty", tag = "v0.0.17", optional = true }
+monty = { git = "https://github.com/pydantic/monty", tag = "v0.0.18", optional = true }
 num-bigint = { version = "0.4", optional = true }
 num-traits = { version = "0.2", optional = true }
 
