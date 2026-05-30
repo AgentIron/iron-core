@@ -175,14 +175,6 @@ impl SessionToolCatalog {
             definitions.push(def);
         }
 
-        if Self::compress_tool_available_for_session(session)
-            && !definitions
-                .iter()
-                .any(|def| def.name == crate::context::compaction::COMPRESS_TOOL_NAME)
-        {
-            definitions.push(crate::context::CompressTool::definition());
-        }
-
         // Add MCP tools for enabled and usable servers
         for server in mcp_registry.list_servers() {
             let server_id = server.config.id.clone();
@@ -284,10 +276,6 @@ impl SessionToolCatalog {
             definitions,
             tool_map: Arc::new(tool_map),
         }
-    }
-
-    fn compress_tool_available_for_session(session: &DurableSession) -> bool {
-        session.uncompacted_tokens > 0 || !session.compressed_blocks.is_empty()
     }
 
     /// Get all tool definitions visible to the model for this session.
@@ -965,7 +953,16 @@ mod tests {
     /// Helper: build a SessionToolCatalog with only local + plugin registries
     /// (no MCP).  Uses empty MCP registries.
     fn build_catalog(session: &DurableSession) -> SessionToolCatalog {
-        let local = Arc::new(crate::tool::ToolRegistry::new());
+        let mut local_registry = crate::tool::ToolRegistry::new();
+        local_registry.register(crate::tool::FunctionTool::new(
+            crate::context::CompressTool::definition(),
+            |_args| {
+                Err(crate::error::RuntimeError::tool_execution(
+                    "test stub".to_string(),
+                ))
+            },
+        ));
+        let local = Arc::new(local_registry);
         let mcp = Arc::new(crate::mcp::server::McpServerRegistry::new());
         let plugin = Arc::new(crate::plugin::registry::PluginRegistry::new());
         let wasm = Arc::new(crate::plugin::wasm_host::WasmHost::new());
@@ -1021,10 +1018,11 @@ mod tests {
     // ---- Tests: plugin tool visibility in session catalog ----
 
     #[test]
-    fn catalog_empty_when_no_plugins_registered() {
+    fn catalog_has_only_compress_when_no_plugins_registered() {
         let session = DurableSession::new(SessionId::new());
         let catalog = build_catalog(&session);
-        assert!(catalog.is_empty());
+        assert_eq!(catalog.len(), 1);
+        assert!(catalog.contains(crate::context::compaction::COMPRESS_TOOL_NAME));
     }
 
     #[test]
@@ -1034,11 +1032,22 @@ mod tests {
 
         let catalog = build_catalog(&session);
 
-        assert!(!catalog.contains(crate::context::compaction::COMPRESS_TOOL_NAME));
+        assert!(catalog.contains(crate::context::compaction::COMPRESS_TOOL_NAME));
         assert!(catalog
             .get_definition(crate::context::compaction::COMPRESS_TOOL_NAME)
             .is_some());
         assert!(!catalog.requires_approval(crate::context::compaction::COMPRESS_TOOL_NAME));
+    }
+
+    #[test]
+    fn catalog_exposes_compress_for_empty_session() {
+        let session = DurableSession::new(SessionId::new());
+        let catalog = build_catalog(&session);
+
+        assert!(catalog.contains(crate::context::compaction::COMPRESS_TOOL_NAME));
+        assert!(catalog
+            .get_definition(crate::context::compaction::COMPRESS_TOOL_NAME)
+            .is_some());
     }
 
     #[test]

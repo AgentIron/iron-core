@@ -36,7 +36,6 @@ fn render_system_prompt<'a>(
         client_editing_guidance,
         client_injections,
         python_exec_available,
-        compression_available: false,
         context_pressure: iron_core::ContextPressure::None,
     })
 }
@@ -104,7 +103,6 @@ fn prompt_preserves_repo_and_session_content_inside_client_injection() {
         client_editing_guidance: None,
         client_injections: &[],
         python_exec_available: false,
-        compression_available: false,
         context_pressure: iron_core::ContextPressure::None,
     });
 
@@ -590,7 +588,6 @@ fn system_prompt_cache_reuses_output_until_inputs_change_or_invalidate() {
             client_editing_guidance: None,
             client_injections: &[],
             python_exec_available: false,
-            compression_available: false,
             context_pressure: iron_core::ContextPressure::None,
         })
         .to_string();
@@ -606,7 +603,6 @@ fn system_prompt_cache_reuses_output_until_inputs_change_or_invalidate() {
             client_editing_guidance: None,
             client_injections: &[],
             python_exec_available: false,
-            compression_available: false,
             context_pressure: iron_core::ContextPressure::None,
         })
         .to_string();
@@ -624,7 +620,6 @@ fn system_prompt_cache_reuses_output_until_inputs_change_or_invalidate() {
             client_editing_guidance: None,
             client_injections: &[],
             python_exec_available: false,
-            compression_available: false,
             context_pressure: iron_core::ContextPressure::None,
         })
         .to_string();
@@ -643,7 +638,6 @@ fn system_prompt_cache_reuses_output_until_inputs_change_or_invalidate() {
             client_editing_guidance: None,
             client_injections: &[],
             python_exec_available: false,
-            compression_available: false,
             context_pressure: iron_core::ContextPressure::None,
         })
         .to_string();

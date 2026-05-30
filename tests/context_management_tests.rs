@@ -1270,6 +1270,29 @@ fn compress_tool_valid_range_does_not_mutate_on_rejection() {
     assert!(session.compressed_blocks.is_empty());
 }
 
+#[test]
+fn compress_tool_rejects_on_empty_session() {
+    let mut session = DurableSession::new(SessionId::new());
+
+    let err = CompressTool::execute(
+        &mut session,
+        "Test".to_string(),
+        vec![CompressRange {
+            start_id: "m0001".to_string(),
+            end_id: "m0001".to_string(),
+            summary: "summary".to_string(),
+        }],
+        0.50,
+        0.70,
+        0.85,
+        0.95,
+    )
+    .expect_err("empty session must reject compress");
+
+    assert!(err.contains("Unknown start ID"));
+    assert!(session.compressed_blocks.is_empty());
+}
+
 // =========================================================================
 // 6.3 Integration tests for provider request rendering with blocks
 // =========================================================================
@@ -1470,7 +1493,6 @@ fn system_prompt_includes_pressure_guidance() {
         client_editing_guidance: None,
         client_injections: &[],
         python_exec_available: false,
-        compression_available: true,
         context_pressure: ContextPressure::Strong,
     };
 
@@ -1501,7 +1523,6 @@ fn prompt_cache_fingerprint_stable_for_exact_telemetry_change() {
         client_editing_guidance: None,
         client_injections: &[],
         python_exec_available: false,
-        compression_available: true,
         context_pressure: ContextPressure::Soft,
     };
 
@@ -1516,7 +1537,6 @@ fn prompt_cache_fingerprint_stable_for_exact_telemetry_change() {
         client_editing_guidance: None,
         client_injections: &[],
         python_exec_available: false,
-        compression_available: true,
         context_pressure: ContextPressure::Soft,
     };
 
@@ -1544,7 +1564,6 @@ fn prompt_cache_fingerprint_changes_on_pressure_bucket_transition() {
         client_editing_guidance: None,
         client_injections: &[],
         python_exec_available: false,
-        compression_available: true,
         context_pressure: ContextPressure::Soft,
     };
 
@@ -1559,7 +1578,6 @@ fn prompt_cache_fingerprint_changes_on_pressure_bucket_transition() {
         client_editing_guidance: None,
         client_injections: &[],
         python_exec_available: false,
-        compression_available: true,
         context_pressure: ContextPressure::Medium,
     };
 
@@ -1568,49 +1586,6 @@ fn prompt_cache_fingerprint_changes_on_pressure_bucket_transition() {
     assert_ne!(
         fp_soft, fp_medium,
         "different pressure buckets should produce different fingerprints"
-    );
-}
-
-#[test]
-fn prompt_cache_fingerprint_changes_on_compression_availability() {
-    use iron_core::context::ContextPressure;
-    use iron_core::prompt::{SystemPromptFingerprint, SystemPromptInputs};
-
-    let inputs_available = SystemPromptInputs {
-        baseline: "Test",
-        runtime_context: "Context",
-        repo_payload: &Default::default(),
-        additional_inline: &[],
-        session_instructions: None,
-        skill_instructions: None,
-        provider_guidance: None,
-        client_editing_guidance: None,
-        client_injections: &[],
-        python_exec_available: false,
-        compression_available: true,
-        context_pressure: ContextPressure::None,
-    };
-
-    let inputs_unavailable = SystemPromptInputs {
-        baseline: "Test",
-        runtime_context: "Context",
-        repo_payload: &Default::default(),
-        additional_inline: &[],
-        session_instructions: None,
-        skill_instructions: None,
-        provider_guidance: None,
-        client_editing_guidance: None,
-        client_injections: &[],
-        python_exec_available: false,
-        compression_available: false,
-        context_pressure: ContextPressure::None,
-    };
-
-    let fp_available = SystemPromptFingerprint::from_inputs(&inputs_available);
-    let fp_unavailable = SystemPromptFingerprint::from_inputs(&inputs_unavailable);
-    assert_ne!(
-        fp_available, fp_unavailable,
-        "compression availability change should invalidate cache"
     );
 }
 
