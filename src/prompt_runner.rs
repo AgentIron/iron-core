@@ -167,25 +167,12 @@ impl PromptRunner {
                 let instructions = session.instructions.clone();
                 let compressed_blocks = session.compressed_blocks.clone();
                 let repo_payload = session.repo_instruction_payload.clone();
-                let include_visible_ids = tool_catalog
-                    .as_ref()
-                    .map(|catalog| {
-                        catalog
-                            .definitions()
-                            .iter()
-                            .any(|def| def.name == crate::context::compaction::COMPRESS_TOOL_NAME)
-                    })
-                    .unwrap_or(false);
                 let messages = session
-                    .to_transcript_with_visible_ids(include_visible_ids)
+                    .to_transcript_with_visible_ids(true)
                     .messages;
                 let skill_instructions = session.active_skill_instructions();
                 drop(session);
 
-                let compression_available = tool_catalog
-                    .as_ref()
-                    .map(|catalog| catalog.contains(crate::context::compaction::COMPRESS_TOOL_NAME))
-                    .unwrap_or(false);
                 let tool_registry = self.runtime.tool_registry();
                 let snapshot = crate::context::ActiveContextAccountant::estimate_snapshot(
                     instructions.as_deref(),
@@ -242,7 +229,6 @@ impl PromptRunner {
                             repo_instruction_payload: repo_payload.as_ref(),
                             python_exec_available: tool_catalog.contains("python_exec"),
                             skill_instructions: Some(&skill_instructions),
-                            compression_available,
                             context_pressure,
                         },
                         tool_catalog.definitions(),
@@ -257,7 +243,6 @@ impl PromptRunner {
                             repo_instruction_payload: repo_payload.as_ref(),
                             python_exec_available: tool_registry.contains("python_exec"),
                             skill_instructions: Some(&skill_instructions),
-                            compression_available,
                             context_pressure,
                         },
                         &tool_registry,
@@ -349,15 +334,8 @@ impl PromptRunner {
                                         crate::debug::InfluenceDestination::SystemPromptSection(
                                             "Tool Philosophy".to_string(),
                                         ),
-                                    effect: if compression_available {
-                                        crate::debug::InfluenceEffect::Added
-                                    } else {
-                                        crate::debug::InfluenceEffect::Suppressed
-                                    },
-                                    reason: format!(
-                                        "compression_available={}",
-                                        compression_available
-                                    ),
+                                    effect: crate::debug::InfluenceEffect::Added,
+                                    reason: "compression_available=true".to_string(),
                                 },
                             ),
                         });

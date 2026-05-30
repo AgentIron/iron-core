@@ -119,7 +119,6 @@ pub struct SystemPromptInputs<'a> {
     pub client_editing_guidance: Option<&'a str>,
     pub client_injections: &'a [ClientPromptFragment],
     pub python_exec_available: bool,
-    pub compression_available: bool,
     pub context_pressure: crate::context::ContextPressure,
 }
 
@@ -144,14 +143,6 @@ impl SystemPromptFingerprint {
         push_part(
             &mut value,
             if inputs.python_exec_available {
-                "1"
-            } else {
-                "0"
-            },
-        );
-        push_part(
-            &mut value,
-            if inputs.compression_available {
                 "1"
             } else {
                 "0"
@@ -222,7 +213,6 @@ impl SystemPromptRenderer {
             PromptSection::CoreGuidelines => render_core_guidelines(inputs.baseline),
             PromptSection::ToolPhilosophy => render_tool_philosophy(
                 inputs.python_exec_available,
-                inputs.compression_available,
                 inputs.context_pressure,
             ),
             PromptSection::EditingGuidelines => inputs
@@ -258,7 +248,6 @@ fn render_core_guidelines(baseline: &str) -> String {
 
 fn render_tool_philosophy(
     python_exec_available: bool,
-    compression_available: bool,
     context_pressure: crate::context::ContextPressure,
 ) -> String {
     let mut text = String::from(
@@ -269,9 +258,7 @@ fn render_tool_philosophy(
     } else {
         text.push_str("\n\n`python_exec` is not currently available in the visible tool catalog.");
     }
-    if compression_available {
-        text.push_str("\n\nThe `compress` tool is available to replace resolved older context with durable summaries. Summaries permanently replace selected ranges, so preserve all durable facts, decisions, constraints, file paths, errors, tool results, and user intent needed for future work.");
-    }
+    text.push_str("\n\nThe `compress` tool is available to replace resolved older context with durable summaries. Summaries permanently replace selected ranges, so preserve all durable facts, decisions, constraints, file paths, errors, tool results, and user intent needed for future work.");
     text.push_str("\n\n");
     text.push_str(context_pressure.guidance());
     text

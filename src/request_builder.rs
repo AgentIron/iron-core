@@ -12,7 +12,6 @@ pub struct EffectiveToolRequestContext<'a> {
     pub repo_instruction_payload: Option<&'a crate::prompt::config::RepoInstructionPayload>,
     pub python_exec_available: bool,
     pub skill_instructions: Option<&'a str>,
-    pub compression_available: bool,
     pub context_pressure: crate::context::ContextPressure,
 }
 
@@ -60,7 +59,6 @@ pub fn build_inference_request_with_effective_tools(
         context.repo_instruction_payload,
         context.python_exec_available,
         context.skill_instructions,
-        context.compression_available,
         context.context_pressure,
     );
     if !composed.is_empty() {
@@ -85,7 +83,6 @@ pub fn build_inference_request(
             repo_instruction_payload: None,
             python_exec_available: tool_registry.contains("python_exec"),
             skill_instructions: None,
-            compression_available: false,
             context_pressure: crate::context::ContextPressure::None,
         },
         tool_registry,
@@ -108,7 +105,6 @@ pub fn build_inference_request_with_context(
             repo_instruction_payload: None,
             python_exec_available: tool_registry.contains("python_exec"),
             skill_instructions: None,
-            compression_available: false,
             context_pressure: crate::context::ContextPressure::None,
         },
         tool_registry,
@@ -131,7 +127,6 @@ pub fn build_inference_request_with_repo(
             repo_instruction_payload,
             python_exec_available: tool_registry.contains("python_exec"),
             skill_instructions: None,
-            compression_available: false,
             context_pressure: crate::context::ContextPressure::None,
         },
         tool_registry,
@@ -176,7 +171,6 @@ pub fn build_inference_request_with_context_and_repo(
         context.repo_instruction_payload,
         context.python_exec_available || python_exec_available,
         context.skill_instructions,
-        context.compression_available,
         context.context_pressure,
     );
     if !composed.is_empty() {
@@ -192,7 +186,6 @@ fn build_composed_instructions(
     repo_instruction_payload: Option<&crate::prompt::config::RepoInstructionPayload>,
     python_exec_available: bool,
     skill_instructions: Option<&str>,
-    compression_available: bool,
     context_pressure: crate::context::ContextPressure,
 ) -> String {
     let baseline = crate::prompt::baseline::BASELINE_PROMPT;
@@ -231,7 +224,6 @@ fn build_composed_instructions(
         client_editing_guidance: config.prompt_composition.client_editing_guidance.as_deref(),
         client_injections: &config.prompt_composition.client_injections,
         python_exec_available,
-        compression_available,
         context_pressure,
     })
 }

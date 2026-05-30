@@ -232,7 +232,9 @@ impl IronRuntime {
             this.refresh_skill_catalog();
         }
 
-        // Emit runtime configuration debug event
+        this.register_compress_tool();
+
+        // Emit runtime configuration debug event (new())
         let config_event = crate::debug::redact_config(&this.inner.config);
         this.emit_debug(crate::debug::DebugEvent {
             timestamp: chrono::Utc::now(),
@@ -311,6 +313,8 @@ impl IronRuntime {
             this.register_activate_skill_tool();
             this.refresh_skill_catalog();
         }
+
+        this.register_compress_tool();
 
         // Emit runtime configuration debug event
         let config_event = crate::debug::redact_config(&this.inner.config);
@@ -534,6 +538,17 @@ impl IronRuntime {
             // handler should never be called.
             Err(crate::error::RuntimeError::tool_execution(
                 "activate_skill must be handled by the orchestrator".to_string(),
+            ))
+        });
+        self.register_tool(tool);
+    }
+
+    /// Register the `compress` model-facing tool.
+    pub fn register_compress_tool(&self) {
+        let definition = crate::context::CompressTool::definition();
+        let tool = crate::tool::FunctionTool::new(definition, |_args| {
+            Err(crate::error::RuntimeError::tool_execution(
+                "compress must be handled by the orchestrator".to_string(),
             ))
         });
         self.register_tool(tool);
