@@ -53,4 +53,4 @@
 - [x] 8.2 Add documentation for redaction guarantees and the expectation that sink implementations must be fast/non-blocking.
 - [x] 8.3 Run the narrowest relevant Rust verification, including `cargo check --manifest-path src-tauri/Cargo.toml` if this repository path remains the correct verification target.
 - [x] 8.4 Run or add targeted tests covering representative debug event emission and redaction behavior.
-- [x] 8.5 Run `graphify update .` after implementation changes.
+- [x] 8.5 Run `crg update` after implementation changes.
