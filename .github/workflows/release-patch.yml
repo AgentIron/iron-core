@@ -37,6 +37,9 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
       - name: Detect unreleased changes
         id: release_gate
         shell: bash
@@ -60,10 +63,11 @@ jobs:
       - name: Verify build, lint, and tests
         if: steps.release_gate.outputs.should_release == 'true'
         run: |
-          cargo build --locked --all-targets
+          cargo build --manifest-path Cargo.toml --all-targets
           cargo fmt --manifest-path Cargo.toml -- --check
-          cargo clippy --locked --all-targets --all-features -- -D warnings
-          cargo test --locked
+          cargo clippy --manifest-path Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --manifest-path Cargo.toml
+          cargo audit --file Cargo.lock
 
       - name: Bump patch version
         if: steps.release_gate.outputs.should_release == 'true'

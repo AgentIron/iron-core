@@ -18,7 +18,7 @@ The facade/runtime API is the supported integration surface.
 
 ## Requirements
 
-- Rust 1.91+
+- Rust 1.95+
 - Tokio for async embedding code
 
 ## Install
@@ -135,6 +135,42 @@ The plugin system is fully implemented:
 - **Auth model** — runtime-governed auth state, credential bindings, and per-tool scope checks
 - **Tool diagnostics** — structured `UnavailableReason` variants for actionable error messages
 - **Network policy** — allowlist, blocklist, and wildcard policies declared in plugin manifests
+
+## Development
+
+Install the security tooling if you want to run the same audit check CI reports:
+
+```bash
+cargo install cargo-audit
+```
+
+Configure the repository pre-commit hook after cloning:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The pre-commit hook runs `cargo fmt --manifest-path Cargo.toml -- --check` when staged Rust files are present. Before opening or updating a pull request, run the same checks CI validates:
+
+```bash
+cargo build --manifest-path Cargo.toml --all-targets
+cargo fmt --manifest-path Cargo.toml -- --check
+cargo clippy --manifest-path Cargo.toml --all-targets --all-features -- -D warnings
+cargo test --manifest-path Cargo.toml
+cargo audit --file Cargo.lock
+```
+
+The local `invoke` tasks in `tasks.py` are a convenience layer over these checks:
+
+```bash
+inv build
+inv test
+inv security
+```
+
+The `Pull Request` workflow runs build, format, lint, and test checks on every PR to `main`. It also runs `cargo audit` as a non-blocking audit and posts the output as a PR comment.
+
+Merges to `main` trigger an automatic patch release that bumps `Cargo.toml`, creates a `vX.Y.Z` tag, and creates a GitHub release. Publishing to crates.io is skipped until `monty` is available from crates.io because crates.io rejects manifests containing git dependencies.
 
 ## Documentation
 
