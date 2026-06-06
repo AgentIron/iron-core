@@ -169,6 +169,7 @@ impl PromptRunner {
                 let repo_payload = session.repo_instruction_payload.clone();
                 let messages = session.to_transcript_with_visible_ids(true).messages;
                 let skill_instructions = session.active_skill_instructions();
+                let workspace_roots = session.workspace_roots.clone();
                 drop(session);
 
                 let tool_registry = self.runtime.tool_registry();
@@ -233,6 +234,7 @@ impl PromptRunner {
                             python_exec_available: tool_catalog.contains("python_exec"),
                             skill_instructions: Some(&skill_instructions),
                             context_pressure,
+                            workspace_roots: Some(&workspace_roots),
                         },
                         tool_catalog.definitions(),
                     )
@@ -247,6 +249,7 @@ impl PromptRunner {
                             python_exec_available: tool_registry.contains("python_exec"),
                             skill_instructions: Some(&skill_instructions),
                             context_pressure,
+                            workspace_roots: Some(&workspace_roots),
                         },
                         &tool_registry,
                     )
@@ -1215,7 +1218,17 @@ impl PromptRunner {
         let arguments = call.arguments.clone();
         let execute_future = {
             let session_guard = durable.lock();
-            tool_catalog.execute(&call_id_owned, &tool_name_owned, arguments, &session_guard)
+            let roots = session_guard.workspace_roots.clone();
+            drop(session_guard);
+            let builtin_config = self.runtime.session_builtin_tool_config(&roots);
+            let session_guard = durable.lock();
+            tool_catalog.execute_with_builtin_config(
+                &call_id_owned,
+                &tool_name_owned,
+                arguments,
+                &session_guard,
+                builtin_config,
+            )
         };
 
         let execute_result = execute_future.await;
@@ -1697,11 +1710,16 @@ impl PromptRunner {
                         let req_tool_name = req.tool_name.clone();
                         let execute_future = {
                             let session_guard = durable.lock();
-                            session_tool_catalog.execute(
+                            let roots = session_guard.workspace_roots.clone();
+                            drop(session_guard);
+                            let builtin_config = self.runtime.session_builtin_tool_config(&roots);
+                            let session_guard = durable.lock();
+                            session_tool_catalog.execute_with_builtin_config(
                                 &req.call_id,
                                 &req.tool_name,
                                 req.args.clone(),
                                 &session_guard,
+                                builtin_config,
                             )
                         };
 
@@ -1898,11 +1916,16 @@ impl PromptRunner {
                     let req_tool_name = req.tool_name.clone();
                     let execute_future = {
                         let session_guard = durable.lock();
-                        session_tool_catalog.execute(
+                        let roots = session_guard.workspace_roots.clone();
+                        drop(session_guard);
+                        let builtin_config = self.runtime.session_builtin_tool_config(&roots);
+                        let session_guard = durable.lock();
+                        session_tool_catalog.execute_with_builtin_config(
                             &req.call_id,
                             &req.tool_name,
                             req.args.clone(),
                             &session_guard,
+                            builtin_config,
                         )
                     };
 

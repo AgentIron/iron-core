@@ -390,6 +390,12 @@ pub struct DurableSession {
     /// History of model switches for this session
     #[serde(default)]
     pub model_switch_history: Vec<crate::context::model_switch::ModelSwitchRecord>,
+    /// Session-scoped active workspace roots.
+    #[serde(default)]
+    pub workspace_roots: Vec<std::path::PathBuf>,
+    /// Pending workspace roots to be applied at the next turn boundary.
+    #[serde(default)]
+    pub pending_workspace_roots: Option<Vec<std::path::PathBuf>>,
 }
 
 impl DurableSession {
@@ -412,6 +418,8 @@ impl DurableSession {
             next_visible_id: 1,
             current_model: None,
             model_switch_history: Vec::new(),
+            workspace_roots: Vec::new(),
+            pending_workspace_roots: None,
         }
     }
 
@@ -967,6 +975,29 @@ impl DurableSession {
             .iter()
             .find(|skill| skill.metadata.id == name)
             .cloned()
+    }
+
+    // -- Workspace root helpers --
+
+    pub fn active_workspace_roots(&self) -> &[std::path::PathBuf] {
+        &self.workspace_roots
+    }
+
+    pub fn set_pending_workspace_roots(&mut self, roots: Vec<std::path::PathBuf>) {
+        self.pending_workspace_roots = Some(roots);
+    }
+
+    pub fn clear_pending_workspace_roots(&mut self) {
+        self.pending_workspace_roots = None;
+    }
+
+    pub fn apply_pending_workspace_roots(&mut self) -> bool {
+        if let Some(roots) = self.pending_workspace_roots.take() {
+            self.workspace_roots = roots;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn to_transcript(&self) -> iron_providers::Transcript {
