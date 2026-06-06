@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 pub const COMPRESS_TOOL_NAME: &str = "compress";
+pub const COMPRESS_METHOD_MODEL_SUMMARY: &str = "model_summary";
 
 /// Runtime-owned compress tool: validates ranges, applies compression, and
 /// produces new compressed blocks.
@@ -130,8 +131,26 @@ impl CompressTool {
         }
         session.uncompacted_tokens = 0;
 
+        let tokens_before = blocks_created
+            .iter()
+            .filter_map(|block| block.token_estimate_before)
+            .map(usize::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+            .map(|tokens| tokens.into_iter().sum());
+        let tokens_after = blocks_created
+            .iter()
+            .filter_map(|block| block.token_estimate_after)
+            .map(usize::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+            .map(|tokens| tokens.into_iter().sum());
+
         Ok(CompressResult {
             blocks_created,
+            tokens_before,
+            tokens_after,
+            method: COMPRESS_METHOD_MODEL_SUMMARY.to_string(),
             pressure_state: Self::compute_pressure_state(
                 session,
                 soft_threshold,
@@ -347,5 +366,8 @@ pub struct CompressRange {
 #[derive(Debug, Clone)]
 pub struct CompressResult {
     pub blocks_created: Vec<CompressedBlock>,
+    pub tokens_before: Option<usize>,
+    pub tokens_after: Option<usize>,
+    pub method: String,
     pub pressure_state: String,
 }

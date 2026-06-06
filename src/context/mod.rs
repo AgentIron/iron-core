@@ -24,8 +24,8 @@ pub use config::{
 };
 pub use handoff::{HandoffBundle, HandoffBundleMetadata, HandoffExporter, HandoffImporter};
 pub use model_switch::{
-    CapabilityDiff, ContextAdaptationPlan, ModelSwitchPlan, ModelSwitchRecord, ModelSwitchRequest,
-    PendingModelSwitch,
+    CapabilityDiff, ContextAdaptationPlan, ModelCapabilityMetadata, ModelCapabilityRegistry,
+    ModelSwitchPlan, ModelSwitchRecord, ModelSwitchRequest, PendingModelSwitch,
 };
 pub use models::{CompressedBlock, HANDOFF_DEFAULT_TARGET_TOKENS};
 pub use telemetry::ContextTelemetry;

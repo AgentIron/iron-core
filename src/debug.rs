@@ -178,6 +178,7 @@ pub enum ContextDebugEvent {
     SnapshotEstimated {
         total_tokens: usize,
         context_window_limit: Option<usize>,
+        compact_threshold_tokens: Option<usize>,
         quality: crate::ContextQuality,
         pressure: String,
         categories: Vec<(String, usize, crate::ContextQuality)>,
@@ -208,6 +209,7 @@ pub enum CompactionDebugEvent {
         block_count: usize,
         old_size_tokens: Option<usize>,
         new_size_tokens: Option<usize>,
+        method: Option<String>,
         pressure_state: String,
         reduction_pct: Option<f64>,
     },
