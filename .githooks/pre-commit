@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+set -eu
+
+staged_rust_files="$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')"
+
+if [ -z "$staged_rust_files" ]; then
+  exit 0
+fi
+
+cargo fmt --manifest-path Cargo.toml -- --check
