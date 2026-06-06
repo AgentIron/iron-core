@@ -198,9 +198,10 @@ pub use context::{
     ActiveContextAccountant, ActiveContextSnapshot, CapabilityDiff, CompressRange, CompressResult,
     CompressTool, CompressedBlock, ContextAdaptationPlan, ContextCategory, ContextCategoryUsage,
     ContextPressure, ContextQuality, ContextTelemetry, HandoffBundle, HandoffBundleMetadata,
-    HandoffExportConfig, HandoffExporter, HandoffImporter, ModelSwitchPlan, ModelSwitchRecord,
-    ModelSwitchRequest, PendingModelSwitch, SessionModelInfo, TailRetentionPolicy,
-    TailRetentionRule, HANDOFF_DEFAULT_TARGET_TOKENS,
+    HandoffExportConfig, HandoffExporter, HandoffImporter, ModelCapabilityMetadata,
+    ModelCapabilityRegistry, ModelSwitchPlan, ModelSwitchRecord, ModelSwitchRequest,
+    PendingModelSwitch, SessionModelInfo, TailRetentionPolicy, TailRetentionRule,
+    HANDOFF_DEFAULT_TARGET_TOKENS,
 };
 pub use durable::{
     ContentBlock, DurableScriptRecord, DurableSession, DurableToolRecord, ScriptRecordStatus,

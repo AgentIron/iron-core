@@ -1815,7 +1815,7 @@ impl AgentSession {
     ) -> crate::context::ActiveContextSnapshot {
         let session = self.durable.lock();
         let tail = session.to_transcript();
-        crate::context::ContextTelemetry::for_session(
+        let mut snapshot = crate::context::ContextTelemetry::for_session(
             session.instructions.as_deref(),
             &session.compressed_blocks,
             &tail.messages,
@@ -1826,7 +1826,12 @@ impl AgentSession {
                 current_model: session.current_model.as_deref(),
                 model_switch_count: session.model_switch_history.len(),
             },
-        )
+        );
+        let context_config = &self.connection.runtime().config().context_management;
+        if context_config.enabled {
+            snapshot.compact_threshold_tokens = Some(context_config.maintenance_threshold);
+        }
+        snapshot
     }
 
     /// Check if the session is idle (no active prompts or tool calls).

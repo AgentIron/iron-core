@@ -84,6 +84,8 @@ pub struct ContextCategoryUsage {
 pub struct ActiveContextSnapshot {
     pub total_tokens: usize,
     pub context_window_limit: Option<usize>,
+    /// Token threshold at which automatic context compaction is requested.
+    pub compact_threshold_tokens: Option<usize>,
     pub quality: ContextQuality,
     pub categories: Vec<ContextCategoryUsage>,
     /// Current model identifier for this session
@@ -217,6 +219,7 @@ impl ActiveContextAccountant {
         ActiveContextSnapshot {
             total_tokens: total,
             context_window_limit: context_window_hint,
+            compact_threshold_tokens: None,
             quality: overall_quality,
             categories,
             current_model: model_info.current_model.map(|m| m.to_string()),

@@ -60,6 +60,7 @@ fn telemetry_with_instructions_counts_category() {
         .iter()
         .any(|c| c.category == ContextCategory::Instructions));
     assert_eq!(snapshot.context_window_limit, Some(128_000));
+    assert_eq!(snapshot.compact_threshold_tokens, None);
     let fullness = snapshot.fullness().unwrap();
     assert!(fullness > 0.0 && fullness < 1.0);
 }
@@ -222,6 +223,7 @@ fn telemetry_without_context_window_has_no_fullness() {
     let snapshot = ActiveContextSnapshot {
         total_tokens: 1000,
         context_window_limit: None,
+        compact_threshold_tokens: None,
         quality: ContextQuality::Estimated,
         categories: vec![],
         current_model: None,
@@ -1807,6 +1809,8 @@ fn compress_clears_nudges_when_below_threshold() {
 
     // After heavy compression, pressure should be reduced
     assert_eq!(result.pressure_state, "none");
+    assert_eq!(result.method, "model_summary");
+    assert!(result.tokens_before.unwrap() > result.tokens_after.unwrap());
     assert_eq!(session.compressed_blocks.len(), 1);
     assert!(session.messages.len() < 20);
 }

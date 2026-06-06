@@ -267,6 +267,10 @@ pub struct ModelCapabilityMetadata {
     pub context_window: usize,
     pub supports_tools: bool,
     pub supports_streaming: bool,
+    #[serde(default)]
+    pub supports_reasoning_effort: bool,
+    #[serde(default)]
+    pub reasoning_effort_values: Vec<String>,
     pub supported_modalities: Vec<String>,
     pub unsupported_tools: Vec<String>,
 }
@@ -291,6 +295,11 @@ pub fn compare_capabilities(
     // Check streaming support
     if !target.supports_streaming {
         diff.streaming_supported = false;
+    }
+
+    // Check reasoning effort support
+    if source.supports_reasoning_effort && !target.supports_reasoning_effort {
+        diff.unsupported_features.push("reasoning_effort".into());
     }
 
     // Check modalities
@@ -429,6 +438,8 @@ mod tests {
             context_window: 100000,
             supports_tools: true,
             supports_streaming: true,
+            supports_reasoning_effort: true,
+            reasoning_effort_values: vec!["low".into(), "medium".into(), "high".into()],
             supported_modalities: vec!["text".into()],
             unsupported_tools: vec![],
         };
@@ -439,6 +450,8 @@ mod tests {
             context_window: 50000,
             supports_tools: true,
             supports_streaming: true,
+            supports_reasoning_effort: true,
+            reasoning_effort_values: vec!["low".into(), "medium".into(), "high".into()],
             supported_modalities: vec!["text".into()],
             unsupported_tools: vec![],
         };
@@ -456,6 +469,8 @@ mod tests {
             context_window: 100000,
             supports_tools: true,
             supports_streaming: true,
+            supports_reasoning_effort: true,
+            reasoning_effort_values: vec!["low".into(), "medium".into(), "high".into()],
             supported_modalities: vec!["text".into()],
             unsupported_tools: vec![],
         };
@@ -466,6 +481,8 @@ mod tests {
             context_window: 100000,
             supports_tools: false,
             supports_streaming: true,
+            supports_reasoning_effort: false,
+            reasoning_effort_values: vec![],
             supported_modalities: vec!["text".into()],
             unsupported_tools: vec!["tool1".into()],
         };
@@ -473,6 +490,25 @@ mod tests {
         let diff = compare_capabilities(&source, &target);
         assert!(!diff.tools_supported);
         assert_eq!(diff.hidden_tools, vec!["tool1"]);
+        assert_eq!(diff.unsupported_features, vec!["reasoning_effort"]);
+    }
+
+    #[test]
+    fn test_model_capability_metadata_exposes_reasoning_effort() {
+        let meta = ModelCapabilityMetadata {
+            model: "o3".into(),
+            provider: "openai".into(),
+            context_window: 200000,
+            supports_tools: true,
+            supports_streaming: true,
+            supports_reasoning_effort: true,
+            reasoning_effort_values: vec!["low".into(), "medium".into(), "high".into()],
+            supported_modalities: vec!["text".into()],
+            unsupported_tools: vec![],
+        };
+
+        assert!(meta.supports_reasoning_effort);
+        assert_eq!(meta.reasoning_effort_values, vec!["low", "medium", "high"]);
     }
 
     #[test]
@@ -484,6 +520,8 @@ mod tests {
             context_window: 8192,
             supports_tools: true,
             supports_streaming: true,
+            supports_reasoning_effort: false,
+            reasoning_effort_values: vec![],
             supported_modalities: vec!["text".into()],
             unsupported_tools: vec![],
         };

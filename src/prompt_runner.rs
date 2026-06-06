@@ -172,7 +172,7 @@ impl PromptRunner {
                 drop(session);
 
                 let tool_registry = self.runtime.tool_registry();
-                let snapshot = crate::context::ActiveContextAccountant::estimate_snapshot(
+                let mut snapshot = crate::context::ActiveContextAccountant::estimate_snapshot(
                     instructions.as_deref(),
                     &compressed_blocks,
                     &messages,
@@ -184,6 +184,10 @@ impl PromptRunner {
                         model_switch_count: 0,
                     },
                 );
+                if config.context_management.enabled {
+                    snapshot.compact_threshold_tokens =
+                        Some(config.context_management.maintenance_threshold);
+                }
                 let context_pressure = snapshot.pressure_with_thresholds(
                     config.context_management.soft_threshold,
                     config.context_management.medium_threshold,
@@ -204,6 +208,7 @@ impl PromptRunner {
                         crate::debug::ContextDebugEvent::SnapshotEstimated {
                             total_tokens: snapshot.total_tokens,
                             context_window_limit: snapshot.context_window_limit,
+                            compact_threshold_tokens: snapshot.compact_threshold_tokens,
                             quality: snapshot.quality,
                             pressure: context_pressure.as_str().to_string(),
                             categories: snapshot
@@ -1077,11 +1082,16 @@ impl PromptRunner {
                 Ok(result) => {
                     let output = serde_json::json!({
                         "status": "compressed",
+                        "tokens_before": result.tokens_before,
+                        "tokens_after": result.tokens_after,
+                        "method": result.method,
                         "blocks_created": result.blocks_created.iter().map(|block| {
                             serde_json::json!({
                                 "id": block.id,
                                 "topic": block.topic,
                                 "source_range": block.source_range,
+                                "tokens_before": block.token_estimate_before,
+                                "tokens_after": block.token_estimate_after,
                             })
                         }).collect::<Vec<_>>(),
                         "context_pressure": result.pressure_state,
@@ -1116,10 +1126,16 @@ impl PromptRunner {
                     payload: crate::debug::DebugPayload::Compaction(
                         crate::debug::CompactionDebugEvent::Applied {
                             block_count: result.blocks_created.len(),
-                            old_size_tokens: None,
-                            new_size_tokens: None,
+                            old_size_tokens: result.tokens_before,
+                            new_size_tokens: result.tokens_after,
+                            method: Some(result.method.clone()),
                             pressure_state: result.pressure_state.clone(),
-                            reduction_pct: None,
+                            reduction_pct: match (result.tokens_before, result.tokens_after) {
+                                (Some(before), Some(after)) if before > 0 => Some(
+                                    ((before.saturating_sub(after)) as f64 / before as f64) * 100.0,
+                                ),
+                                _ => None,
+                            },
                         },
                     ),
                 });
