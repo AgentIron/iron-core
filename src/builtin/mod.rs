@@ -19,6 +19,24 @@ pub use registration::register_builtin_tools;
 
 use crate::tool::Tool;
 
+/// Check if a name corresponds to a builtin tool.
+///
+/// Returns `true` if the name is a recognized builtin tool name.
+pub fn is_builtin_name(name: &str) -> bool {
+    matches!(
+        name,
+        "read"
+            | "write"
+            | "edit"
+            | "multiedit"
+            | "glob"
+            | "grep"
+            | "webfetch"
+            | "bash"
+            | "powershell"
+    )
+}
+
 /// Instantiate a builtin tool by name with the given configuration.
 ///
 /// Returns `None` if the name does not correspond to a builtin tool.
