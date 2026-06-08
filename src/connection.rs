@@ -245,6 +245,10 @@ impl IronConnection {
 
         self.runtime.finish_prompt(iron_session_id);
 
+        // Check for pending workspace roots at turn boundary
+        self.runtime
+            .check_and_apply_pending_workspace_roots(iron_session_id);
+
         // Check for pending model switches at turn boundary
         self.runtime
             .check_and_apply_pending_model_switch(iron_session_id);
@@ -318,6 +322,9 @@ impl IronConnection {
                     session.add_agent_text(format!("[Auth error: {}]", e));
                 }
                 self.runtime.finish_prompt(iron_session_id);
+                // Check for pending workspace roots at turn boundary
+                self.runtime
+                    .check_and_apply_pending_workspace_roots(iron_session_id);
                 // Check for pending model switches at turn boundary
                 self.runtime
                     .check_and_apply_pending_model_switch(iron_session_id);
@@ -332,6 +339,10 @@ impl IronConnection {
             .await;
 
         self.runtime.finish_prompt(iron_session_id);
+
+        // Check for pending workspace roots at turn boundary
+        self.runtime
+            .check_and_apply_pending_workspace_roots(iron_session_id);
 
         // Check for pending model switches at turn boundary
         self.runtime

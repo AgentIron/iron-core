@@ -335,6 +335,21 @@ impl SessionToolCatalog {
         arguments: Value,
         session: &DurableSession,
     ) -> ToolFuture {
+        self.execute_with_builtin_config(call_id, name, arguments, session, None)
+    }
+
+    /// Execute a tool with an optional session-configured builtin tool config.
+    ///
+    /// When `builtin_config` is provided and the tool is a local builtin,
+    /// a session-configured instance is created with the given allowed roots.
+    pub fn execute_with_builtin_config(
+        &self,
+        call_id: &str,
+        name: &str,
+        arguments: Value,
+        session: &DurableSession,
+        builtin_config: Option<crate::builtin::BuiltinToolConfig>,
+    ) -> ToolFuture {
         let tool_info = self.tool_map.get(name).cloned();
         let local_registry = Arc::clone(&self.local_registry);
         let connection_manager = Arc::clone(&self.connection_manager);
@@ -347,6 +362,24 @@ impl SessionToolCatalog {
             Some(ToolInfo::Local { name: tool_name }) => {
                 // Execute local tool
                 Box::pin(async move {
+                    // If a session-configured builtin config is provided, try to
+                    // instantiate a session-scoped builtin tool first.
+                    if let Some(ref config) = builtin_config {
+                        if let Some(tool) = crate::builtin::instantiate_builtin(&tool_name, config)
+                        {
+                            return tool.execute(&call_id_owned, arguments).await;
+                        }
+                        // instantiate_builtin returned None. Only treat this as an error
+                        // if the tool name is a known builtin; otherwise fall through to
+                        // the local registry for non-builtin local tools.
+                        if crate::builtin::is_builtin_name(&tool_name) {
+                            return Err(crate::error::RuntimeError::tool_execution(format!(
+                                "Builtin tool '{}' is configured for this session but could not be instantiated.",
+                                tool_name
+                            )));
+                        }
+                    }
+                    // Fall back to the globally-registered tool.
                     if let Some(tool) = local_registry.get(&tool_name) {
                         tool.execute(&call_id_owned, arguments).await
                     } else {

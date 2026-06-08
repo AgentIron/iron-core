@@ -13,6 +13,9 @@ pub struct EffectiveToolRequestContext<'a> {
     pub python_exec_available: bool,
     pub skill_instructions: Option<&'a str>,
     pub context_pressure: crate::context::ContextPressure,
+    /// Optional session workspace root snapshot. When provided, this overrides
+    /// Config.workspace_roots for runtime context rendering.
+    pub workspace_roots: Option<&'a [std::path::PathBuf]>,
 }
 
 /// Build an inference request using an effective tool view.
@@ -60,6 +63,7 @@ pub fn build_inference_request_with_effective_tools(
         context.python_exec_available,
         context.skill_instructions,
         context.context_pressure,
+        context.workspace_roots,
     );
     if !composed.is_empty() {
         request = request.with_instructions(composed);
@@ -84,6 +88,7 @@ pub fn build_inference_request(
             python_exec_available: tool_registry.contains("python_exec"),
             skill_instructions: None,
             context_pressure: crate::context::ContextPressure::None,
+            workspace_roots: None,
         },
         tool_registry,
     )
@@ -106,6 +111,7 @@ pub fn build_inference_request_with_context(
             python_exec_available: tool_registry.contains("python_exec"),
             skill_instructions: None,
             context_pressure: crate::context::ContextPressure::None,
+            workspace_roots: None,
         },
         tool_registry,
     )
@@ -128,6 +134,7 @@ pub fn build_inference_request_with_repo(
             python_exec_available: tool_registry.contains("python_exec"),
             skill_instructions: None,
             context_pressure: crate::context::ContextPressure::None,
+            workspace_roots: None,
         },
         tool_registry,
     )
@@ -172,6 +179,7 @@ pub fn build_inference_request_with_context_and_repo(
         context.python_exec_available || python_exec_available,
         context.skill_instructions,
         context.context_pressure,
+        context.workspace_roots,
     );
     if !composed.is_empty() {
         request = request.with_instructions(composed);
@@ -187,12 +195,19 @@ fn build_composed_instructions(
     python_exec_available: bool,
     skill_instructions: Option<&str>,
     context_pressure: crate::context::ContextPressure,
+    workspace_roots: Option<&[std::path::PathBuf]>,
 ) -> String {
     let baseline = crate::prompt::baseline::BASELINE_PROMPT;
 
     let repo_payload = repo_instruction_payload.cloned().unwrap_or_default();
 
-    let (working_dir, workspace_roots) = if config.workspace_roots.is_empty() {
+    let (working_dir, workspace_roots) = if let Some(roots) = workspace_roots {
+        if roots.is_empty() {
+            (std::env::current_dir().unwrap_or_default(), Vec::new())
+        } else {
+            (roots[0].clone(), roots.to_vec())
+        }
+    } else if config.workspace_roots.is_empty() {
         (std::env::current_dir().unwrap_or_default(), Vec::new())
     } else {
         (

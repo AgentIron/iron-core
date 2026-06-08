@@ -1714,6 +1714,25 @@ impl AgentSession {
         self.durable.lock().set_instructions(instructions);
     }
 
+    /// Set the workspace roots for this session.
+    ///
+    /// If the session is idle, roots are applied immediately and the session's
+    /// available skills are refreshed from the new roots.
+    ///
+    /// If a prompt is currently active, the roots are deferred until the prompt
+    /// completes, at which point they will be applied automatically.
+    ///
+    /// Returns `true` if the roots were applied immediately, or `false` if they
+    /// were deferred until the next turn boundary.
+    pub fn set_workspace_roots(
+        &self,
+        roots: Vec<std::path::PathBuf>,
+    ) -> Result<bool, RuntimeError> {
+        self.connection
+            .runtime()
+            .set_session_workspace_roots(self.id, roots)
+    }
+
     // -- Provider Credential APIs --
 
     /// Get the auth status for a provider.

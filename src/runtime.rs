@@ -56,6 +56,8 @@ struct RuntimeInner {
     resolver: Option<Arc<CredentialResolver>>,
     debug_sink: RwLock<Option<Arc<dyn crate::debug::DebugSink>>>,
     debug_sequence: crate::debug::SequenceGenerator,
+    /// Base builtin tool config used to create session-configured instances.
+    builtin_tool_config: Mutex<Option<crate::builtin::BuiltinToolConfig>>,
 }
 
 struct ActivePrompt {
@@ -213,6 +215,7 @@ impl IronRuntime {
             resolver: None,
             debug_sink: RwLock::new(None),
             debug_sequence: crate::debug::SequenceGenerator::new(),
+            builtin_tool_config: Mutex::new(None),
         };
 
         let this = Self {
@@ -295,6 +298,7 @@ impl IronRuntime {
             resolver: None,
             debug_sink: RwLock::new(None),
             debug_sequence: crate::debug::SequenceGenerator::new(),
+            builtin_tool_config: Mutex::new(None),
         };
 
         let this = Self {
@@ -508,6 +512,21 @@ impl IronRuntime {
     pub fn register_builtin_tools(&self, config: &crate::builtin::BuiltinToolConfig) {
         let mut registry = self.inner.tool_registry.write();
         crate::builtin::register_builtin_tools(&mut registry, config);
+        *self.inner.builtin_tool_config.lock() = Some(config.clone());
+    }
+
+    /// Create a session-configured BuiltinToolConfig with the given workspace roots.
+    ///
+    /// This preserves all other builtin policy/settings from the base config.
+    pub fn session_builtin_tool_config(
+        &self,
+        roots: &[std::path::PathBuf],
+    ) -> Option<crate::builtin::BuiltinToolConfig> {
+        let base = self.inner.builtin_tool_config.lock().clone()?;
+        Some(crate::builtin::BuiltinToolConfig {
+            allowed_roots: roots.to_vec(),
+            ..base
+        })
     }
 
     #[cfg(feature = "embedded-python")]
@@ -737,6 +756,123 @@ impl IronRuntime {
             .collect()
     }
 
+    /// Discover and refresh available skills for a specific session's workspace roots.
+    ///
+    /// This updates the session's available skill snapshot while preserving
+    /// already-active skill instructions.
+    pub fn refresh_session_skills(
+        &self,
+        session_id: SessionId,
+        roots: &[std::path::PathBuf],
+    ) -> Result<(), RuntimeError> {
+        if !self.inner.config.skills.enabled {
+            return Ok(());
+        }
+
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| RuntimeError::SessionNotFound(session_id.to_string()))?;
+
+        let available_skills = self.discover_available_skills_for_roots(roots);
+
+        let mut guard = session.lock();
+        let previously_active: Vec<String> = guard
+            .list_active_skills()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        guard.set_available_skills(available_skills.clone());
+
+        // Preserve already-active skills by re-activating them if they exist
+        // in the new available set
+        for skill in &available_skills {
+            if previously_active.contains(&skill.metadata.id)
+                || (skill.metadata.auto_activate && !skill.metadata.requires_trust)
+            {
+                guard.activate_skill(&skill.metadata.id, &skill.body, skill.resources.clone());
+            }
+        }
+
+        drop(guard);
+
+        // Invalidate tool catalog cache since available skills changed
+        let sessions = self.inner.sessions.read();
+        if let Some(rs) = sessions.get(&session_id) {
+            let mut cache = rs.tool_catalog_cache.lock();
+            *cache = None;
+        }
+
+        Ok(())
+    }
+
+    /// Discover available skills for the given workspace roots.
+    ///
+    /// Returns a list of LoadedSkill values discovered from project directories
+    /// under the provided roots, plus user-level and additional configured skills.
+    pub fn discover_available_skills_for_roots(
+        &self,
+        roots: &[std::path::PathBuf],
+    ) -> Vec<LoadedSkill> {
+        let mut sources: Vec<Box<dyn crate::skill::source::SkillSource>> = Vec::new();
+        let config = &self.inner.config;
+
+        if !config.skills.enabled {
+            return Vec::new();
+        }
+
+        // Project-level skills: .agents/skills/ in each workspace root
+        for root in roots {
+            let project_skills_dir = root.join(".agents").join("skills");
+            if project_skills_dir.exists()
+                && project_skills_dir.is_dir()
+                && config.skills.trust_project_skills
+            {
+                sources.push(Box::new(FilesystemSkillSource::new(
+                    project_skills_dir,
+                    SkillOrigin::ProjectFilesystem,
+                )));
+            }
+        }
+
+        // User-level skills: ~/.agents/skills/
+        let home_dir = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(std::path::PathBuf::from)
+            .ok();
+        if let Some(home) = home_dir {
+            let user_skills_dir = home.join(".agents").join("skills");
+            if user_skills_dir.exists() && user_skills_dir.is_dir() {
+                sources.push(Box::new(FilesystemSkillSource::new(
+                    user_skills_dir,
+                    SkillOrigin::UserFilesystem,
+                )));
+            }
+        }
+
+        // Additional configured skill directories
+        for dir in &config.skills.additional_skill_dirs {
+            if dir.exists() && dir.is_dir() {
+                sources.push(Box::new(FilesystemSkillSource::new(
+                    dir.clone(),
+                    SkillOrigin::UserFilesystem,
+                )));
+            }
+        }
+
+        // Runtime-registered skills (client-provided only)
+        let mut static_source = crate::skill::source::StaticSkillSource::new();
+        for skill in self.skill_catalog().list_all() {
+            if skill.metadata.origin == SkillOrigin::ClientProvided {
+                static_source.register(skill.clone());
+            }
+        }
+        sources.push(Box::new(static_source));
+
+        let catalog = SkillCatalog::discover(&sources);
+        catalog.list_all().into_iter().cloned().collect()
+    }
+
     /// Borrow the Tokio runtime handle used for orchestration.
     pub fn tokio_handle(&self) -> &tokio::runtime::Handle {
         &self.inner.tokio_handle
@@ -808,6 +944,14 @@ impl IronRuntime {
             );
             durable.repo_instruction_payload = Some(payload);
         }
+
+        // Seed workspace roots from config or current directory fallback
+        let roots = if self.inner.config.workspace_roots.is_empty() {
+            vec![std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))]
+        } else {
+            self.inner.config.workspace_roots.clone()
+        };
+        durable.workspace_roots = roots.clone();
 
         // Initialize MCP server enablement state for new session
         // Uses the single runtime-level default policy without per-server override
@@ -886,12 +1030,28 @@ impl IronRuntime {
         // Uses .entry() / is_none() guards so existing client choices are preserved.
         self.apply_runtime_mcp_policy_to_session(&mut durable);
         self.apply_runtime_plugin_policy_to_session(&mut durable);
+
+        // Backfill workspace roots for legacy sessions imported before this feature.
+        if durable.workspace_roots.is_empty() {
+            durable.workspace_roots = if self.inner.config.workspace_roots.is_empty() {
+                vec![std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))]
+            } else {
+                self.inner.config.workspace_roots.clone()
+            };
+        }
+        let roots = durable.workspace_roots.clone();
+
         let session = Arc::new(Mutex::new(durable));
         let runtime_session = RuntimeSession::new(session, connection_id);
         self.inner
             .sessions
             .write()
             .insert(session_id, Arc::new(runtime_session));
+
+        // Refresh skills for the backfilled roots so the session’s skill catalog
+        // and builtin allowed_roots reflect the effective workspace.
+        let _ = self.refresh_session_skills(session_id, &roots);
+
         Ok(())
     }
 
@@ -1225,6 +1385,69 @@ impl IronRuntime {
             .get(&session_id)
             .map(|rs| rs.active_prompt.lock().is_some())
             .unwrap_or(false)
+    }
+
+    /// Set workspace roots for a session.
+    ///
+    /// If the session is idle, roots are applied immediately and skills are refreshed.
+    /// If a prompt is active, roots are deferred until the prompt completes.
+    /// Returns whether the roots were applied immediately.
+    pub fn set_session_workspace_roots(
+        &self,
+        session_id: SessionId,
+        roots: Vec<std::path::PathBuf>,
+    ) -> Result<bool, RuntimeError> {
+        if self.is_shutdown() {
+            return Err(RuntimeError::Connection("Runtime is shut down".into()));
+        }
+
+        let sessions = self.inner.sessions.read();
+        let rs = sessions
+            .get(&session_id)
+            .ok_or_else(|| RuntimeError::SessionNotFound(session_id.to_string()))?;
+
+        if rs.active_prompt.lock().is_some() {
+            // Defer: store pending roots in DurableSession (latest wins)
+            let mut guard = rs.session.lock();
+            guard.set_pending_workspace_roots(roots);
+            Ok(false)
+        } else {
+            // Apply immediately: lock DurableSession while still holding sessions read lock
+            // to prevent a prompt from starting between the check and the mutation.
+            let mut guard = rs.session.lock();
+            guard.workspace_roots = roots.clone();
+            guard.clear_pending_workspace_roots();
+            drop(guard);
+            drop(sessions);
+
+            // Refresh skills for the new roots
+            self.refresh_session_skills(session_id, &roots)?;
+
+            Ok(true)
+        }
+    }
+
+    /// Check and apply any pending workspace roots for a session.
+    ///
+    /// This should be called at turn boundaries after a prompt completes.
+    pub fn check_and_apply_pending_workspace_roots(&self, session_id: SessionId) {
+        let sessions = self.inner.sessions.read();
+        let Some(rs) = sessions.get(&session_id) else {
+            return;
+        };
+
+        let mut guard = rs.session.lock();
+        let pending = guard.apply_pending_workspace_roots();
+        let roots = if pending {
+            guard.workspace_roots.clone()
+        } else {
+            return;
+        };
+        drop(guard);
+        drop(sessions);
+
+        // Refresh skills for the new roots
+        let _ = self.refresh_session_skills(session_id, &roots);
     }
 
     pub fn get_active_prompt_ephemeral(
@@ -2042,5 +2265,215 @@ mod tests {
 
         // Finish the prompt to clean up
         runtime.finish_prompt(session_id);
+    }
+
+    // -----------------------------------------------------------------------
+    // Session workspace roots tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn new_session_inherits_config_workspace_roots() {
+        let roots = vec![std::path::PathBuf::from("/project/a")];
+        let config = Config::default().with_workspace_roots(roots.clone());
+        let runtime = IronRuntime::new(config, MockProvider);
+        let conn = ConnectionId(1);
+        runtime.register_connection(conn);
+
+        let (_session_id, session) = runtime.create_session(conn).unwrap();
+        let guard = session.lock();
+        assert_eq!(guard.workspace_roots, roots);
+    }
+
+    #[test]
+    fn new_session_falls_back_to_current_dir_when_config_empty() {
+        let config = Config::default();
+        let runtime = IronRuntime::new(config, MockProvider);
+        let conn = ConnectionId(1);
+        runtime.register_connection(conn);
+
+        let (_session_id, session) = runtime.create_session(conn).unwrap();
+        let guard = session.lock();
+        assert!(!guard.workspace_roots.is_empty());
+        // Should be current dir, not empty
+        assert_eq!(
+            guard.workspace_roots[0],
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        );
+    }
+
+    #[test]
+    fn set_workspace_roots_on_idle_session_applies_immediately() {
+        let config =
+            Config::default().with_workspace_roots(vec![std::path::PathBuf::from("/original")]);
+        let runtime = IronRuntime::new(config, MockProvider);
+        let conn = ConnectionId(1);
+        runtime.register_connection(conn);
+
+        let (session_id, session) = runtime.create_session(conn).unwrap();
+        let new_roots = vec![std::path::PathBuf::from("/new")];
+        let applied = runtime
+            .set_session_workspace_roots(session_id, new_roots.clone())
+            .unwrap();
+
+        assert!(
+            applied,
+            "Roots should be applied immediately for idle session"
+        );
+        let guard = session.lock();
+        assert_eq!(guard.workspace_roots, new_roots);
+        assert!(guard.pending_workspace_roots.is_none());
+    }
+
+    #[test]
+    fn set_workspace_roots_during_active_prompt_is_deferred() {
+        let config =
+            Config::default().with_workspace_roots(vec![std::path::PathBuf::from("/original")]);
+        let runtime = IronRuntime::new(config, MockProvider);
+        let conn = ConnectionId(1);
+        runtime.register_connection(conn);
+
+        let (session_id, session) = runtime.create_session(conn).unwrap();
+
+        // Start a prompt
+        let _ephemeral = runtime.try_start_prompt(session_id).unwrap();
+
+        let new_roots = vec![std::path::PathBuf::from("/new")];
+        let applied = runtime
+            .set_session_workspace_roots(session_id, new_roots.clone())
+            .unwrap();
+
+        assert!(!applied, "Roots should be deferred when a prompt is active");
+
+        // Active roots should still be the original
+        let guard = session.lock();
+        assert_eq!(
+            guard.workspace_roots,
+            vec![std::path::PathBuf::from("/original")]
+        );
+        // But pending should be set
+        drop(guard);
+
+        // After finishing prompt, pending roots should be applied
+        runtime.finish_prompt(session_id);
+        runtime.check_and_apply_pending_workspace_roots(session_id);
+
+        let guard = session.lock();
+        assert_eq!(guard.workspace_roots, new_roots);
+        assert!(guard.pending_workspace_roots.is_none());
+    }
+
+    #[test]
+    fn multiple_deferred_updates_keep_only_latest() {
+        let config =
+            Config::default().with_workspace_roots(vec![std::path::PathBuf::from("/original")]);
+        let runtime = IronRuntime::new(config, MockProvider);
+        let conn = ConnectionId(1);
+        runtime.register_connection(conn);
+
+        let (session_id, _session) = runtime.create_session(conn).unwrap();
+
+        // Start a prompt
+        let _ephemeral = runtime.try_start_prompt(session_id).unwrap();
+
+        // Set roots multiple times while prompt is active
+        runtime
+            .set_session_workspace_roots(session_id, vec![std::path::PathBuf::from("/first")])
+            .unwrap();
+        runtime
+            .set_session_workspace_roots(session_id, vec![std::path::PathBuf::from("/second")])
+            .unwrap();
+        runtime
+            .set_session_workspace_roots(session_id, vec![std::path::PathBuf::from("/third")])
+            .unwrap();
+
+        // Finish prompt and apply pending
+        runtime.finish_prompt(session_id);
+        runtime.check_and_apply_pending_workspace_roots(session_id);
+
+        let session = runtime.get_session(session_id).unwrap();
+        let guard = session.lock();
+        assert_eq!(
+            guard.workspace_roots,
+            vec![std::path::PathBuf::from("/third")]
+        );
+    }
+
+    #[test]
+    fn workspace_root_changes_are_session_isolated() {
+        let config =
+            Config::default().with_workspace_roots(vec![std::path::PathBuf::from("/shared")]);
+        let runtime = IronRuntime::new(config, MockProvider);
+        let conn = ConnectionId(1);
+        runtime.register_connection(conn);
+
+        let (session_a_id, session_a) = runtime.create_session(conn).unwrap();
+        let (_session_b_id, session_b) = runtime.create_session(conn).unwrap();
+
+        // Change roots for session A only
+        runtime
+            .set_session_workspace_roots(session_a_id, vec![std::path::PathBuf::from("/a-only")])
+            .unwrap();
+
+        // Session A should have new roots
+        let guard_a = session_a.lock();
+        assert_eq!(
+            guard_a.workspace_roots,
+            vec![std::path::PathBuf::from("/a-only")]
+        );
+        drop(guard_a);
+
+        // Session B should still have original roots
+        let guard_b = session_b.lock();
+        assert_eq!(
+            guard_b.workspace_roots,
+            vec![std::path::PathBuf::from("/shared")]
+        );
+    }
+
+    #[test]
+    fn session_workspace_roots_serialization_compatibility() {
+        // Simulate loading an old session JSON that doesn't have workspace_roots fields
+        let old_session_json = r#"{
+            "id": 1,
+            "messages": [],
+            "tool_records": [],
+            "timeline": [],
+            "script_records": [],
+            "instructions": null,
+            "workspace_scope": null,
+            "compressed_blocks": [],
+            "uncompacted_tokens": 0,
+            "repo_instruction_payload": null,
+            "mcp_server_enablement": {},
+            "plugin_enablement": {"enabled": {}},
+            "skill_state": {"active": []},
+            "available_skills": [],
+            "next_visible_id": 1,
+            "current_model": null,
+            "model_switch_history": []
+        }"#;
+
+        let session: DurableSession = serde_json::from_str(old_session_json).unwrap();
+        assert!(session.workspace_roots.is_empty());
+        assert!(session.pending_workspace_roots.is_none());
+    }
+
+    #[test]
+    fn session_builtin_tool_config_preserves_base_policy() {
+        let base_config = crate::builtin::BuiltinToolConfig {
+            allowed_roots: vec![std::path::PathBuf::from("/base")],
+            ..Default::default()
+        };
+        let runtime = IronRuntime::new(Config::default(), MockProvider);
+        runtime.register_builtin_tools(&base_config);
+
+        let session_roots = vec![std::path::PathBuf::from("/session")];
+        let session_config = runtime.session_builtin_tool_config(&session_roots);
+
+        assert!(session_config.is_some());
+        let config = session_config.unwrap();
+        assert_eq!(config.allowed_roots, session_roots);
+        // Other fields should be preserved from base
+        assert_eq!(config.max_output_bytes, base_config.max_output_bytes);
     }
 }
