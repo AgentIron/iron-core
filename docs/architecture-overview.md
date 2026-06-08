@@ -68,29 +68,77 @@ Prompt-layer composition is handled separately from transcript compaction:
 
 ### Model Switching Architecture
 
-Model switching is implemented as a continuation export/import that preserves session identity:
+Model switching is implemented as a first-class continuation operation that preserves session identity:
 
-```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  User Request   │────▶│  Export/Import   │────▶│  New Runtime    │
-│  switch_model() │     │  Planning        │     │  Session        │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │  Context Adaptation  │
-                    │  - Size estimation   │
-                    │  - Compaction        │
-                    │  - Tail retention    │
-                    └──────────────────────┘
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │  Capability Recon    │
-                    │  - Tool filtering    │
-                    │  - Modality check    │
-                    │  - Window comparison │
-                    └──────────────────────┘
+```text
+                    ┌─────────────────────────────────┐
+                    │     Model Switch Flow           │
+                    └─────────────────────────────────┘
+                                     │
+         ┌───────────────────────────┼───────────────────────────┐
+         │                           │                           │
+         ▼                           ▼                           ▼
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────────────┐
+│  User Request   │     │   Plan Creation  │     │    Turn Boundary        │
+│ switch_model()  │────▶│                  │────▶│    Decision             │
+└─────────────────┘     └──────────────────┘     └─────────────────────────┘
+        │                        │                           │
+        │                        │              ┌────────────┴────────────┐
+        │                        │              │                         │
+        │                        │              ▼                         ▼
+        │                        │     ┌──────────────┐        ┌──────────────────┐
+        │                        │     │   Active     │        │      Idle        │
+        │                        │     │  (queue)     │        │ (apply now)      │
+        │                        │     └──────────────┘        └────────┬─────────┘
+        │                        │              │                       │
+        │                        ▼              │                       ▼
+        │               ┌──────────────────────┐│           ┌──────────────────────┐
+        │               │   Context Size       ││           │  Context Adaptation  │
+        │               │   Estimation         ││           │  - Size estimation   │
+        │               └──────────────────────┘│           │  - Compaction check  │
+        │                        │              │           │  - Tail retention    │
+        │                        ▼              │           └──────────┬───────────┘
+        │               ┌──────────────────────┐│                      │
+        │               │  Target Window       ││                      ▼
+        │               │  Comparison          ││           ┌──────────────────────┐
+        │               └──────────────────────┘│           │  Fits?               │
+        │                        │              │           └──────────┬───────────┘
+        │           ┌────────────┴────────────┐ │                      │
+        │           │                         │ │            ┌─────────┴──────────┐
+        │           ▼                         ▼ │            │                    │
+        │  ┌──────────────┐         ┌──────────────┐        ▼                    ▼
+        │  │  Fits        │         │  Too Large   │   ┌──────────┐       ┌──────────────┐
+        │  │  (no action) │         │  (compact)   │   │   Yes    │       │     No       │
+        │  └──────────────┘         └──────────────┘   └────┬─────┘       └──────┬───────┘
+        │                                                   │                    │
+        │                                                   ▼                    ▼
+        │                                        ┌──────────────────┐  ┌──────────────────┐
+        │                                        │  Compact older   │  │  Return Error    │
+        │                                        │  messages        │  │  "Context too    │
+        │                                        └────────┬─────────┘  │  large"          │
+        │                                                 │            └──────────────────┘
+        │                                                 ▼
+        │                                        ┌──────────────────┐
+        │                                        │  Retain tail     │
+        │                                        └────────┬─────────┘
+        │                                                 │
+        └─────────────────────────────────────────────────┼──────────────────────────────┘
+                                                          │
+                                                          ▼
+                                               ┌──────────────────────┐
+                                               │  Capability Recon    │
+                                               │  - Tool filtering    │
+                                               │  - Modality check    │
+                                               │  - Window comparison │
+                                               └──────────┬───────────┘
+                                                          │
+                                                          ▼
+                                               ┌──────────────────────┐
+                                               │  Apply Switch        │
+                                               │  - Update model      │
+                                               │  - Record timeline   │
+                                               │  - Emit events       │
+                                               └──────────────────────┘
 ```
 
 Key components:

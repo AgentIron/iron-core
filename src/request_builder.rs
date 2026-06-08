@@ -16,6 +16,9 @@ pub struct EffectiveToolRequestContext<'a> {
     /// Optional session workspace root snapshot. When provided, this overrides
     /// Config.workspace_roots for runtime context rendering.
     pub workspace_roots: Option<&'a [std::path::PathBuf]>,
+    /// When set, overrides `config.model` in the inference request.
+    /// Populated from `DurableSession::current_model` after a model switch.
+    pub effective_model: Option<&'a str>,
 }
 
 /// Build an inference request using an effective tool view.
@@ -51,7 +54,11 @@ pub fn build_inference_request_with_effective_tools(
         .map(|t| t.to_provider_definition())
         .collect();
 
-    let mut request = InferenceRequest::new(config.model.clone(), transcript)
+    let model = context
+        .effective_model
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| config.model.clone());
+    let mut request = InferenceRequest::new(model, transcript)
         .with_tools(provider_tools)
         .with_tool_policy(tool_policy)
         .with_generation(config.default_generation.clone());
@@ -89,6 +96,7 @@ pub fn build_inference_request(
             skill_instructions: None,
             context_pressure: crate::context::ContextPressure::None,
             workspace_roots: None,
+            effective_model: None,
         },
         tool_registry,
     )
@@ -112,6 +120,7 @@ pub fn build_inference_request_with_context(
             skill_instructions: None,
             context_pressure: crate::context::ContextPressure::None,
             workspace_roots: None,
+            effective_model: None,
         },
         tool_registry,
     )
@@ -135,6 +144,7 @@ pub fn build_inference_request_with_repo(
             skill_instructions: None,
             context_pressure: crate::context::ContextPressure::None,
             workspace_roots: None,
+            effective_model: None,
         },
         tool_registry,
     )
@@ -165,7 +175,11 @@ pub fn build_inference_request_with_context_and_repo(
         config.default_tool_policy.clone()
     };
 
-    let mut request = InferenceRequest::new(config.model.clone(), transcript)
+    let model = context
+        .effective_model
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| config.model.clone());
+    let mut request = InferenceRequest::new(model, transcript)
         .with_tools(tool_registry.provider_definitions())
         .with_tool_policy(tool_policy)
         .with_generation(config.default_generation.clone());

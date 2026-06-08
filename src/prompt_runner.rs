@@ -170,6 +170,7 @@ impl PromptRunner {
                 let messages = session.to_transcript_with_visible_ids(true).messages;
                 let skill_instructions = session.active_skill_instructions();
                 let workspace_roots = session.workspace_roots.clone();
+                let effective_model = session.current_model.clone();
                 drop(session);
 
                 let tool_registry = self.runtime.tool_registry();
@@ -235,6 +236,7 @@ impl PromptRunner {
                             skill_instructions: Some(&skill_instructions),
                             context_pressure,
                             workspace_roots: Some(&workspace_roots),
+                            effective_model: effective_model.as_deref(),
                         },
                         tool_catalog.definitions(),
                     )
@@ -250,6 +252,7 @@ impl PromptRunner {
                             skill_instructions: Some(&skill_instructions),
                             context_pressure,
                             workspace_roots: Some(&workspace_roots),
+                            effective_model: effective_model.as_deref(),
                         },
                         &tool_registry,
                     )

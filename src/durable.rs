@@ -138,12 +138,16 @@ pub enum TimelineEntry {
         message_index: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         visible_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     AgentMessage {
         index: u64,
         message_index: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         visible_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     ToolCallStarted {
         index: u64,
@@ -387,9 +391,19 @@ pub struct DurableSession {
     /// Current model identifier for this session
     #[serde(default)]
     pub current_model: Option<String>,
+    /// Provider slug when the session is using a managed provider
+    /// (set by a managed model switch)
+    #[serde(default)]
+    pub current_provider_slug: Option<String>,
+    /// Optional API key for the current managed provider
+    #[serde(default)]
+    pub current_provider_api_key: Option<String>,
     /// History of model switches for this session
     #[serde(default)]
     pub model_switch_history: Vec<crate::context::model_switch::ModelSwitchRecord>,
+    /// Tools hidden due to model capability differences
+    #[serde(default)]
+    pub hidden_tools: Vec<String>,
     /// Session-scoped active workspace roots.
     #[serde(default)]
     pub workspace_roots: Vec<std::path::PathBuf>,
@@ -417,7 +431,10 @@ impl DurableSession {
             available_skills: Vec::new(),
             next_visible_id: 1,
             current_model: None,
+            current_provider_slug: None,
+            current_provider_api_key: None,
             model_switch_history: Vec::new(),
+            hidden_tools: Vec::new(),
             workspace_roots: Vec::new(),
             pending_workspace_roots: None,
         }
@@ -442,6 +459,7 @@ impl DurableSession {
             index: timeline_index,
             message_index,
             visible_id: Some(visible_id),
+            model: self.current_model.clone(),
         });
         self.uncompacted_tokens += tokens;
     }
@@ -457,6 +475,7 @@ impl DurableSession {
             index: timeline_index,
             message_index,
             visible_id: Some(visible_id),
+            model: self.current_model.clone(),
         });
         self.uncompacted_tokens += tokens;
     }
@@ -474,6 +493,7 @@ impl DurableSession {
             index: timeline_index,
             message_index,
             visible_id: Some(visible_id),
+            model: self.current_model.clone(),
         });
         self.uncompacted_tokens += tokens;
     }
@@ -489,6 +509,7 @@ impl DurableSession {
             index: timeline_index,
             message_index,
             visible_id: Some(visible_id),
+            model: self.current_model.clone(),
         });
         self.uncompacted_tokens += tokens;
     }
@@ -811,6 +832,7 @@ impl DurableSession {
                 TimelineEntry::UserMessage {
                     message_index,
                     visible_id,
+                    model,
                     ..
                 } => {
                     if let Some(mapped) = message_map.get(&message_index).copied() {
@@ -818,12 +840,14 @@ impl DurableSession {
                             index,
                             message_index: mapped,
                             visible_id,
+                            model,
                         });
                     }
                 }
                 TimelineEntry::AgentMessage {
                     message_index,
                     visible_id,
+                    model,
                     ..
                 } => {
                     if let Some(mapped) = message_map.get(&message_index).copied() {
@@ -831,6 +855,7 @@ impl DurableSession {
                             index,
                             message_index: mapped,
                             visible_id,
+                            model,
                         });
                     }
                 }
@@ -1069,7 +1094,11 @@ impl DurableSession {
                     }
                 }
                 TimelineEntry::ModelSwitched { .. } => {
-                    // Model switches are metadata, not provider-facing messages
+                    // Model switches are metadata, not provider-facing messages.
+                    // They are intentionally excluded from the transcript sent to
+                    // inference providers to avoid confusing the model with synthetic
+                    // boundary markers. Switch history is available via
+                    // DurableSession::model_switch_history for client-side rendering.
                 }
             }
         }

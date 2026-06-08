@@ -1984,11 +1984,17 @@ impl AgentSession {
         let runtime = self.connection.runtime();
 
         if self.is_idle() {
+            let from_model = self
+                .durable
+                .lock()
+                .current_model
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+
             let capability_diff = runtime
                 .apply_model_switch(self.id, request.clone())
                 .map_err(|e| e.to_string())?;
 
-            // Extract model info for the event
             let (to_model, _to_provider) = match &request {
                 crate::context::model_switch::ModelSwitchRequest::Managed {
                     provider_slug,
@@ -2000,13 +2006,6 @@ impl AgentSession {
                     provider_name,
                 } => (model.clone(), Some(provider_name.clone())),
             };
-
-            let from_model = self
-                .durable
-                .lock()
-                .current_model
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string());
 
             self.emit_model_switch_event(PromptEvent::ModelSwitched {
                 from_model,

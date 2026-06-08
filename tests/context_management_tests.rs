@@ -2058,3 +2058,153 @@ fn model_switch_handoff_bundle_roundtrip() {
         );
     });
 }
+
+#[test]
+fn model_switch_larger_window_no_compaction() {
+    use iron_core::{Config, ContextManagementConfig, IronAgent, ModelSwitchRequest};
+    use iron_providers::ProviderEvent;
+
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::Output {
+                content: "Hello!".into(),
+            },
+            ProviderEvent::Complete,
+        ]]);
+
+        let mut config = Config::new();
+        config.context_management = ContextManagementConfig::new()
+            .with_context_window_hint(128_000)
+            .enabled();
+
+        let agent = IronAgent::new(config, provider);
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        // Establish conversation
+        let _ = session.prompt("hello").await;
+        assert!(session.is_idle());
+
+        let compressed_before = session.compressed_blocks().len();
+
+        // Switch to model with large window (no compaction needed)
+        let request = ModelSwitchRequest::Managed {
+            provider_slug: "openai".into(),
+            model: "gpt-4o".into(),
+            api_key: None,
+        };
+        let result = session.switch_model(request);
+        assert!(result.is_ok());
+
+        let compressed_after = session.compressed_blocks().len();
+        assert_eq!(
+            compressed_after, compressed_before,
+            "Switch to larger window should not trigger compaction"
+        );
+    });
+}
+
+#[test]
+fn model_switch_smaller_window_triggers_compaction() {
+    use iron_core::{Config, ContextManagementConfig, IronAgent, ModelSwitchRequest};
+    use iron_providers::ProviderEvent;
+
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::Output {
+                content: "This is a moderately long response from the agent that contains enough text to contribute meaningfully to the token count for compaction testing purposes.".into(),
+            },
+            ProviderEvent::Complete,
+        ]]);
+
+        let mut config = Config::new();
+        config.context_management = ContextManagementConfig::new()
+            .with_context_window_hint(300) // Small enough to trigger compaction but large enough for minimal tail
+            .enabled();
+
+        let agent = IronAgent::new(config, provider);
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        // Establish conversation with many turns to build up context beyond the window
+        for i in 0..10 {
+            let msg = format!("User message number {} with substantial content to ensure token accumulation exceeds the small target window we configured for this test", i);
+            let _ = session.prompt(msg.as_str()).await;
+        }
+        assert!(session.is_idle());
+
+        let compressed_before = session.compressed_blocks().len();
+
+        // Switch to model with small window (compaction needed)
+        let request = ModelSwitchRequest::Managed {
+            provider_slug: "openai".into(),
+            model: "gpt-4o-mini".into(),
+            api_key: None,
+        };
+        let result = session.switch_model(request);
+        assert!(
+            result.is_ok(),
+            "Switch should succeed with compaction: {:?}",
+            result
+        );
+
+        let compressed_after = session.compressed_blocks().len();
+        assert!(
+            compressed_after > compressed_before,
+            "Switch to smaller window should trigger compaction. Before: {}, After: {}",
+            compressed_before,
+            compressed_after
+        );
+
+        // Verify timeline has ModelSwitched entry with adapted=true
+        let timeline = session.timeline();
+        let switch_entries: Vec<_> = timeline.iter().filter(|e| e.is_model_switched()).collect();
+        assert_eq!(switch_entries.len(), 1);
+    });
+}
+
+#[test]
+fn model_switch_too_small_window_rejected() {
+    use iron_core::{Config, ContextManagementConfig, IronAgent, ModelSwitchRequest};
+    use iron_providers::ProviderEvent;
+
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::Output {
+                content: "This is a moderately long response from the agent that contains enough text to contribute meaningfully to the token count for testing the rejection path.".into(),
+            },
+            ProviderEvent::Complete,
+        ]]);
+
+        let mut config = Config::new();
+        config.context_management = ContextManagementConfig::new()
+            .with_context_window_hint(10) // Extremely small window
+            .enabled();
+
+        let agent = IronAgent::new(config, provider);
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        // Establish conversation with long messages
+        let _ = session.prompt("This is a very long user message with substantial content that will generate many tokens when estimated using the length-based heuristic, ensuring the total exceeds the minimal tail threshold").await;
+        assert!(session.is_idle());
+
+        // Switch to model with tiny window (should fail)
+        let request = ModelSwitchRequest::Managed {
+            provider_slug: "openai".into(),
+            model: "tiny-model".into(),
+            api_key: None,
+        };
+        let result = session.switch_model(request);
+        assert!(
+            result.is_err(),
+            "Switch to model with window too small for minimal tail should fail"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Context too large") || err.contains("too large"),
+            "Error should indicate context is too large: {}",
+            err
+        );
+    });
+}
