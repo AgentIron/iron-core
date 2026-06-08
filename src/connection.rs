@@ -251,14 +251,15 @@ impl IronConnection {
                 })
         };
 
-        let stop_reason = if let Some(ref ctx) = stored_context {
+        let (runner, stop_reason) = if let Some(ref ctx) = stored_context {
             match self.runtime.resolve_managed_provider(ctx).await {
                 Ok(provider) => {
                     let runner =
                         PromptRunner::new_managed(self.runtime.clone(), provider, ctx.clone());
-                    runner
+                    let stop_reason = runner
                         .run(&durable, &ephemeral, &sink, &config, max_iterations)
-                        .await
+                        .await;
+                    (Some(runner), stop_reason)
                 }
                 Err(e) => {
                     warn!(error = %e, "Failed to resolve stored managed provider");
@@ -266,30 +267,31 @@ impl IronConnection {
                         let mut session = durable.lock();
                         session.add_agent_text(format!("[Auth error: {}]", e));
                     }
-                    acp::StopReason::EndTurn
+                    (None, acp::StopReason::EndTurn)
                 }
             }
         } else {
             let runner = PromptRunner::new(self.runtime.clone());
-            runner
+            let stop_reason = runner
                 .run(&durable, &ephemeral, &sink, &config, max_iterations)
-                .await
+                .await;
+            (Some(runner), stop_reason)
         };
 
         self.runtime.finish_prompt(iron_session_id);
 
-        // Check for pending workspace roots at turn boundary
         self.runtime
             .check_and_apply_pending_workspace_roots(iron_session_id);
 
-        // Check for pending model switches at turn boundary
         self.runtime
             .check_and_apply_pending_model_switch(iron_session_id);
 
         if config.context_management.enabled {
-            PromptRunner::new(self.runtime.clone())
-                .maybe_compact_post_turn(&durable, &config, &client, &acp_session_id)
-                .await;
+            if let Some(ref runner) = runner {
+                runner
+                    .maybe_compact_post_turn(&durable, &config, &client, &acp_session_id)
+                    .await;
+            }
         }
 
         Ok(acp::PromptResponse::new(stop_reason))

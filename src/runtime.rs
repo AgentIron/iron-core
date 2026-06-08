@@ -1291,21 +1291,33 @@ impl IronRuntime {
 
             if user_agent_count > tail_count {
                 let cutoff = user_agent_count - tail_count;
+                let mut user_agent_seen = 0usize;
                 let positions_to_remove: std::collections::BTreeSet<usize> = session
                     .timeline
                     .iter()
                     .enumerate()
-                    .filter(|(_, entry)| {
-                        matches!(
+                    .filter_map(|(idx, entry)| {
+                        let is_user_agent = matches!(
                             entry,
                             crate::durable::TimelineEntry::UserMessage { .. }
                                 | crate::durable::TimelineEntry::AgentMessage { .. }
-                                | crate::durable::TimelineEntry::ToolCallStarted { .. }
+                        );
+                        let is_tool = matches!(
+                            entry,
+                            crate::durable::TimelineEntry::ToolCallStarted { .. }
                                 | crate::durable::TimelineEntry::ToolCallTerminal { .. }
-                        )
+                        );
+                        if !is_user_agent && !is_tool {
+                            return None;
+                        }
+                        if user_agent_seen >= cutoff {
+                            return None;
+                        }
+                        if is_user_agent {
+                            user_agent_seen += 1;
+                        }
+                        Some(idx)
                     })
-                    .take(cutoff)
-                    .map(|(idx, _)| idx)
                     .collect();
 
                 let mut visible_ids = Vec::new();

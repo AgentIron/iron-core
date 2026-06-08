@@ -70,7 +70,7 @@ Prompt-layer composition is handled separately from transcript compaction:
 
 Model switching is implemented as a first-class continuation operation that preserves session identity:
 
-```
+```text
                     ┌─────────────────────────────────┐
                     │     Model Switch Flow           │
                     └─────────────────────────────────┘

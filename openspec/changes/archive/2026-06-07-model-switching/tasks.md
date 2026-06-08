@@ -1,3 +1,5 @@
+# Model Switching Tasks
+
 ## 1. Data Model and Types
 
 - [x] 1.1 Add `ModelSwitchPlan` struct with source/target model, context adaptation plan, and capability diff

@@ -862,6 +862,10 @@ impl SessionToolCatalog {
             }
         }
 
+        let hidden_tools: std::collections::HashSet<&str> =
+            session.hidden_tools.iter().map(|s| s.as_str()).collect();
+        diagnostics.retain(|d| !hidden_tools.contains(d.name.as_str()));
+
         diagnostics
     }
 }
