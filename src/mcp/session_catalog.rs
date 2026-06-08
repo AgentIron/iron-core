@@ -374,8 +374,15 @@ impl SessionToolCatalog {
                         // the local registry for non-builtin local tools.
                         if matches!(
                             tool_name.as_str(),
-                            "read" | "write" | "edit" | "multiedit" | "glob" | "grep"
-                                | "webfetch" | "bash" | "powershell"
+                            "read"
+                                | "write"
+                                | "edit"
+                                | "multiedit"
+                                | "glob"
+                                | "grep"
+                                | "webfetch"
+                                | "bash"
+                                | "powershell"
                         ) {
                             return Err(crate::error::RuntimeError::tool_execution(format!(
                                 "Builtin tool '{}' is configured for this session but could not be instantiated.",
