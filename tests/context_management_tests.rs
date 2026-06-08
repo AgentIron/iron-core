@@ -18,6 +18,28 @@ fn make_session_with_messages(n: usize) -> DurableSession {
 }
 
 #[test]
+fn compress_tool_definition_mentions_tool_call_pair_boundary() {
+    let definition = CompressTool::definition();
+
+    assert!(definition
+        .description
+        .contains("must not split a tool call"));
+    assert!(definition.description.contains("include both or neither"));
+    assert!(
+        definition.input_schema["properties"]["content"]["items"]["properties"]["start_message_id"]
+            ["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("splits a tool call"))
+    );
+    assert!(
+        definition.input_schema["properties"]["content"]["items"]["properties"]["end_message_id"]
+            ["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("splits a tool call"))
+    );
+}
+
+#[test]
 fn telemetry_empty_session_reports_unknown_quality() {
     let registry = ToolRegistry::new();
     let snapshot = ContextTelemetry::for_session(
