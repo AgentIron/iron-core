@@ -789,9 +789,9 @@ impl IronRuntime {
         // Preserve already-active skills by re-activating them if they exist
         // in the new available set
         for skill in &available_skills {
-            if previously_active.contains(&skill.metadata.id) {
-                guard.activate_skill(&skill.metadata.id, &skill.body, skill.resources.clone());
-            } else if skill.metadata.auto_activate && !skill.metadata.requires_trust {
+            if previously_active.contains(&skill.metadata.id)
+                || (skill.metadata.auto_activate && !skill.metadata.requires_trust)
+            {
                 guard.activate_skill(&skill.metadata.id, &skill.body, skill.resources.clone());
             }
         }
@@ -826,13 +826,14 @@ impl IronRuntime {
         // Project-level skills: .agents/skills/ in each workspace root
         for root in roots {
             let project_skills_dir = root.join(".agents").join("skills");
-            if project_skills_dir.exists() && project_skills_dir.is_dir() {
-                if config.skills.trust_project_skills {
-                    sources.push(Box::new(FilesystemSkillSource::new(
-                        project_skills_dir,
-                        SkillOrigin::ProjectFilesystem,
-                    )));
-                }
+            if project_skills_dir.exists()
+                && project_skills_dir.is_dir()
+                && config.skills.trust_project_skills
+            {
+                sources.push(Box::new(FilesystemSkillSource::new(
+                    project_skills_dir,
+                    SkillOrigin::ProjectFilesystem,
+                )));
             }
         }
 
