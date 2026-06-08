@@ -238,10 +238,43 @@ impl IronConnection {
 
         let sink = AcpPromptSink::new(acp_session_id.clone(), client.clone());
 
-        let runner = PromptRunner::new(self.runtime.clone());
-        let stop_reason = runner
-            .run(&durable, &ephemeral, &sink, &config, max_iterations)
-            .await;
+        // Check if the session has a stored managed provider from a prior model switch
+        let stored_context = {
+            let session = durable.lock();
+            session
+                .current_provider_slug
+                .clone()
+                .map(|slug| ProviderPromptContext {
+                    provider_slug: crate::provider_credential::domain::ProviderSlug::new(slug),
+                    model: session.current_model.clone().unwrap_or_default(),
+                    api_key: session.current_provider_api_key.clone(),
+                })
+        };
+
+        let stop_reason = if let Some(ref ctx) = stored_context {
+            match self.runtime.resolve_managed_provider(ctx).await {
+                Ok(provider) => {
+                    let runner =
+                        PromptRunner::new_managed(self.runtime.clone(), provider, ctx.clone());
+                    runner
+                        .run(&durable, &ephemeral, &sink, &config, max_iterations)
+                        .await
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to resolve stored managed provider");
+                    {
+                        let mut session = durable.lock();
+                        session.add_agent_text(format!("[Auth error: {}]", e));
+                    }
+                    acp::StopReason::EndTurn
+                }
+            }
+        } else {
+            let runner = PromptRunner::new(self.runtime.clone());
+            runner
+                .run(&durable, &ephemeral, &sink, &config, max_iterations)
+                .await
+        };
 
         self.runtime.finish_prompt(iron_session_id);
 
@@ -254,7 +287,7 @@ impl IronConnection {
             .check_and_apply_pending_model_switch(iron_session_id);
 
         if config.context_management.enabled {
-            runner
+            PromptRunner::new(self.runtime.clone())
                 .maybe_compact_post_turn(&durable, &config, &client, &acp_session_id)
                 .await;
         }

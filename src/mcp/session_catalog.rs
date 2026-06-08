@@ -267,6 +267,12 @@ impl SessionToolCatalog {
             }
         }
 
+        // Filter out tools hidden by model capability differences
+        let hidden_tools: std::collections::HashSet<String> =
+            session.hidden_tools.iter().cloned().collect();
+        definitions.retain(|d| !hidden_tools.contains(&d.name));
+        tool_map.retain(|name, _| !hidden_tools.contains(name));
+
         Self {
             local_registry,
             mcp_registry,

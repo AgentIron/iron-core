@@ -40,6 +40,15 @@ pub struct HandoffBundle {
     pub metadata: HandoffBundleMetadata,
     /// Model switch history preserved across handoffs
     pub model_switch_history: Vec<ModelSwitchRecord>,
+    /// Current model after the most recent switch
+    pub current_model: Option<String>,
+    /// Current provider slug (if managed)
+    pub current_provider_slug: Option<String>,
+    /// Current provider API key (if managed)
+    pub current_provider_api_key: Option<String>,
+    /// Tools hidden due to model capability differences
+    #[serde(default)]
+    pub hidden_tools: Vec<String>,
 }
 
 pub struct HandoffExporter;
@@ -120,6 +129,10 @@ impl HandoffExporter {
                 size_estimate_tokens: size_estimate,
             },
             model_switch_history: session.model_switch_history.clone(),
+            current_model: session.current_model.clone(),
+            current_provider_slug: session.current_provider_slug.clone(),
+            current_provider_api_key: session.current_provider_api_key.clone(),
+            hidden_tools: session.hidden_tools.clone(),
         };
 
         if config.handoff_export.include_portability_notes && !loss_notes.is_empty() {
@@ -173,8 +186,12 @@ impl HandoffImporter {
         // Restore skill state so activated skills survive handoff
         target.skill_state = bundle.skill_state;
 
-        // Restore model switch history
+        // Restore model switch history and capability restrictions
         target.model_switch_history = bundle.model_switch_history.clone();
+        target.current_model = bundle.current_model.clone();
+        target.current_provider_slug = bundle.current_provider_slug.clone();
+        target.current_provider_api_key = bundle.current_provider_api_key.clone();
+        target.hidden_tools = bundle.hidden_tools.clone();
 
         // Recreate timeline entries from model switch history
         for record in &bundle.model_switch_history {
@@ -228,8 +245,12 @@ impl HandoffImporter {
         // Restore skill state so activated skills survive handoff
         session.skill_state = bundle.skill_state;
 
-        // Restore model switch history
+        // Restore model switch history and capability restrictions
         session.model_switch_history = bundle.model_switch_history.clone();
+        session.current_model = bundle.current_model.clone();
+        session.current_provider_slug = bundle.current_provider_slug.clone();
+        session.current_provider_api_key = bundle.current_provider_api_key.clone();
+        session.hidden_tools = bundle.hidden_tools.clone();
 
         // Recreate timeline entries from model switch history
         for record in &bundle.model_switch_history {

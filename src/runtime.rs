@@ -56,8 +56,8 @@ struct RuntimeInner {
     resolver: Option<Arc<CredentialResolver>>,
     debug_sink: RwLock<Option<Arc<dyn crate::debug::DebugSink>>>,
     debug_sequence: crate::debug::SequenceGenerator,
-    /// Base builtin tool config used to create session-configured instances.
     builtin_tool_config: Mutex<Option<crate::builtin::BuiltinToolConfig>>,
+    model_capability_registry: RwLock<crate::context::model_switch::ModelCapabilityRegistry>,
 }
 
 struct ActivePrompt {
@@ -80,6 +80,7 @@ struct CachedSessionToolCatalog {
     mcp_server_enablement: std::collections::HashMap<String, bool>,
     plugin_enablement: crate::plugin::session::SessionPluginEnablement,
     available_skills: Vec<(String, String)>,
+    hidden_tools: Vec<String>,
     catalog: Arc<SessionToolCatalog>,
 }
 
@@ -216,6 +217,9 @@ impl IronRuntime {
             debug_sink: RwLock::new(None),
             debug_sequence: crate::debug::SequenceGenerator::new(),
             builtin_tool_config: Mutex::new(None),
+            model_capability_registry: RwLock::new(
+                crate::context::model_switch::ModelCapabilityRegistry::new(),
+            ),
         };
 
         let this = Self {
@@ -299,6 +303,9 @@ impl IronRuntime {
             debug_sink: RwLock::new(None),
             debug_sequence: crate::debug::SequenceGenerator::new(),
             builtin_tool_config: Mutex::new(None),
+            model_capability_registry: RwLock::new(
+                crate::context::model_switch::ModelCapabilityRegistry::new(),
+            ),
         };
 
         let this = Self {
@@ -1202,18 +1209,23 @@ impl IronRuntime {
 
         let mut session = rs.session.lock();
         let from_model = session.current_model.clone();
-        let from_provider = None; // TODO: track provider in session
+        let from_provider = session.current_provider_slug.clone();
 
-        let (to_model, to_provider) = match &request {
+        let (to_model, to_provider, to_provider_slug, to_api_key) = match &request {
             crate::context::model_switch::ModelSwitchRequest::Managed {
                 provider_slug,
                 model,
-                ..
-            } => (model.clone(), Some(provider_slug.clone())),
+                api_key,
+            } => (
+                model.clone(),
+                Some(provider_slug.clone()),
+                Some(provider_slug.clone()),
+                api_key.clone(),
+            ),
             crate::context::model_switch::ModelSwitchRequest::Unmanaged {
                 model,
                 provider_name,
-            } => (model.clone(), Some(provider_name.clone())),
+            } => (model.clone(), Some(provider_name.clone()), None, None),
         };
 
         // Create adaptation plan
@@ -1224,12 +1236,38 @@ impl IronRuntime {
                 &session.compressed_blocks,
             );
         let target_window = config.context_management.context_window_hint;
-        let plan = crate::context::model_switch::ModelSwitchPlanner::create_plan(
-            from_model.as_deref().unwrap_or("unknown"),
+        let cap_registry = self.inner.model_capability_registry.read();
+        let source_model_id = from_model.as_deref().unwrap_or("unknown");
+        let source_provider_id = session
+            .current_provider_slug
+            .as_deref()
+            .unwrap_or("unknown");
+        let target_provider_id = to_provider.as_deref().unwrap_or("unknown");
+        let source_caps = cap_registry
+            .get(source_provider_id, source_model_id)
+            .cloned();
+        let target_caps = cap_registry.get(target_provider_id, &to_model).cloned();
+        drop(cap_registry);
+
+        let plan = crate::context::model_switch::ModelSwitchPlanner::create_plan_with_capabilities(
+            source_model_id,
             &to_model,
             target_window,
             current_tokens,
+            source_caps.as_ref(),
+            target_caps.as_ref(),
         );
+
+        // Reject switch if even minimal tail cannot fit target window
+        if !plan.context_adaptation.tail_fits {
+            return Err(RuntimeError::Connection(format!(
+                "Context too large for target model '{}'. Even a minimal tail of {} messages (~{} tokens) exceeds the target window of {} tokens. Consider starting a new session or manually compacting context.",
+                to_model,
+                plan.context_adaptation.tail_messages,
+                plan.context_adaptation.retained_tokens,
+                target_window.unwrap_or(0)
+            )));
+        }
 
         // Trigger compaction if needed and enabled
         let adapted = if plan.context_adaptation.needs_compaction
@@ -1238,9 +1276,100 @@ impl IronRuntime {
                 .model_switch
                 .compact_on_window_shrink
         {
-            // TODO: integrate with actual compaction engine
-            // For now, mark that adaptation was attempted
-            true
+            let tail_count = plan.context_adaptation.tail_messages;
+            let user_agent_count = session
+                .timeline
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        crate::durable::TimelineEntry::UserMessage { .. }
+                            | crate::durable::TimelineEntry::AgentMessage { .. }
+                    )
+                })
+                .count();
+
+            if user_agent_count > tail_count {
+                let cutoff = user_agent_count - tail_count;
+                let positions_to_remove: std::collections::BTreeSet<usize> = session
+                    .timeline
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| {
+                        matches!(
+                            entry,
+                            crate::durable::TimelineEntry::UserMessage { .. }
+                                | crate::durable::TimelineEntry::AgentMessage { .. }
+                                | crate::durable::TimelineEntry::ToolCallStarted { .. }
+                                | crate::durable::TimelineEntry::ToolCallTerminal { .. }
+                        )
+                    })
+                    .take(cutoff)
+                    .map(|(idx, _)| idx)
+                    .collect();
+
+                let mut visible_ids = Vec::new();
+                let mut content_parts = Vec::new();
+                for (idx, entry) in session.timeline.iter().enumerate() {
+                    if !positions_to_remove.contains(&idx) {
+                        continue;
+                    }
+                    if let crate::durable::TimelineEntry::UserMessage {
+                        message_index,
+                        visible_id: Some(vid),
+                        ..
+                    }
+                    | crate::durable::TimelineEntry::AgentMessage {
+                        message_index,
+                        visible_id: Some(vid),
+                        ..
+                    } = entry
+                    {
+                        visible_ids.push(vid.clone());
+                        if let Some(msg) = session.messages.get(*message_index) {
+                            content_parts.push(format!("[{}] {}", vid, msg.text_content()));
+                        }
+                    }
+                }
+
+                if !positions_to_remove.is_empty() {
+                    let source_range = if visible_ids.len() >= 2 {
+                        format!(
+                            "{}-{}",
+                            visible_ids.first().unwrap(),
+                            visible_ids.last().unwrap()
+                        )
+                    } else if let Some(id) = visible_ids.first() {
+                        id.clone()
+                    } else {
+                        "unknown".to_string()
+                    };
+
+                    let block_id = format!("c{:04}", session.compressed_blocks.len() + 1);
+                    let tokens_before: usize = content_parts.iter().map(|s| s.len() / 4).sum();
+                    let block = crate::context::models::CompressedBlock {
+                        id: block_id,
+                        topic: format!("Auto-compressed during model switch to {}", to_model),
+                        source_range,
+                        summary: format!(
+                            "[Auto-compressed during model switch. Original messages preserved below.]\n\n{}",
+                            content_parts.join("\n\n")
+                        ),
+                        created_at: chrono::Utc::now(),
+                        token_estimate_before: Some(tokens_before as u32),
+                        token_estimate_after: Some((content_parts.iter().map(|s| s.len()).sum::<usize>() / 4) as u32),
+                    };
+
+                    session.remove_timeline_positions(&positions_to_remove);
+                    session.compressed_blocks.push(block);
+                    session.uncompacted_tokens = plan.context_adaptation.retained_tokens;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
         } else {
             false
         };
@@ -1264,8 +1393,11 @@ impl IronRuntime {
             ),
         });
 
-        // Update current model
+        // Update current model and capability restrictions
         session.current_model = Some(to_model.clone());
+        session.current_provider_slug = to_provider_slug;
+        session.current_provider_api_key = to_api_key;
+        session.hidden_tools = plan.capability_diff.hidden_tools.clone();
 
         // Emit model switch applied debug event
         self.emit_debug(crate::debug::DebugEvent {
@@ -1365,6 +1497,17 @@ impl IronRuntime {
                 });
             }
         }
+    }
+
+    /// Register capability metadata for a model in the capability registry.
+    pub fn register_model_capability(
+        &self,
+        metadata: crate::context::model_switch::ModelCapabilityMetadata,
+    ) {
+        self.inner
+            .model_capability_registry
+            .write()
+            .register(metadata);
     }
 
     pub fn cancel_active_prompt(&self, session_id: SessionId) -> bool {
@@ -1540,6 +1683,7 @@ impl IronRuntime {
                     && cached.mcp_server_enablement == session_guard.mcp_server_enablement
                     && cached.plugin_enablement == session_guard.plugin_enablement
                     && cached.available_skills == available_skills
+                    && cached.hidden_tools == session_guard.hidden_tools
                 {
                     return Some((*cached.catalog).clone());
                 }
@@ -1580,6 +1724,7 @@ impl IronRuntime {
                 mcp_server_enablement: session_guard.mcp_server_enablement.clone(),
                 plugin_enablement: session_guard.plugin_enablement.clone(),
                 available_skills,
+                hidden_tools: session_guard.hidden_tools.clone(),
                 catalog: catalog.clone(),
             });
         }
