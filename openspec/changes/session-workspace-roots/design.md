@@ -95,8 +95,8 @@ Alternative considered: remove `Config.workspace_roots`. Rejected because that w
 
 Rollback: revert the change; sessions serialized with new root fields remain loadable by current code only if unknown fields are ignored by the consumer, so this should be released as a forward migration with compatibility tests.
 
-## Open Questions
+## Design Decisions
 
-1. Should `set_workspace_roots()` return an enum such as `Applied` vs `Deferred`, or should callers inspect session state separately?
-2. Should clients have an API to read both active and pending roots for UI display?
-3. Should project skill rescanning include user-level and additional configured skill dirs each time, or only project dirs plus the existing runtime baseline?
+1. `AgentSession::set_workspace_roots(...)` returns `Result<bool, RuntimeError>` where `true` = roots applied immediately, `false` = deferred until the next turn boundary.
+2. Clients can read active roots via `AgentSession::workspace_roots()`. Pending roots are internal and applied automatically at turn boundaries.
+3. Skill rescanning uses the full discovery pipeline: project dirs from workspace roots, user-level dirs (`~/.agents/skills/`), additional configured dirs, and runtime-registered skills.

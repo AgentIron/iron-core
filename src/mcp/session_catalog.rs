@@ -369,6 +369,12 @@ impl SessionToolCatalog {
                         {
                             return tool.execute(&call_id_owned, arguments).await;
                         }
+                        // Session-configured builtin was present but instantiation failed;
+                        // do not fall through to the global registry.
+                        return Err(crate::error::RuntimeError::tool_execution(format!(
+                            "Builtin tool '{}' is configured for this session but could not be instantiated.",
+                            tool_name
+                        )));
                     }
                     // Fall back to the globally-registered tool.
                     if let Some(tool) = local_registry.get(&tool_name) {

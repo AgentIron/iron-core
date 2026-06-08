@@ -70,7 +70,6 @@ struct RuntimeSession {
     active_prompt: Mutex<Option<ActivePrompt>>,
     tool_catalog_cache: Mutex<Option<CachedSessionToolCatalog>>,
     pending_model_switch: Mutex<Option<PendingModelSwitch>>,
-    pending_workspace_roots: Mutex<Option<Vec<std::path::PathBuf>>>,
     turn_counter: std::sync::atomic::AtomicU64,
 }
 
@@ -92,7 +91,6 @@ impl RuntimeSession {
             active_prompt: Mutex::new(None),
             tool_catalog_cache: Mutex::new(None),
             pending_model_switch: Mutex::new(None),
-            pending_workspace_roots: Mutex::new(None),
             turn_counter: std::sync::atomic::AtomicU64::new(1),
         }
     }
@@ -862,10 +860,12 @@ impl IronRuntime {
             }
         }
 
-        // Runtime-registered skills
+        // Runtime-registered skills (client-provided only)
         let mut static_source = crate::skill::source::StaticSkillSource::new();
         for skill in self.skill_catalog().list_all() {
-            static_source.register(skill.clone());
+            if skill.metadata.origin == SkillOrigin::ClientProvided {
+                static_source.register(skill.clone());
+            }
         }
         sources.push(Box::new(static_source));
 
@@ -951,7 +951,7 @@ impl IronRuntime {
         } else {
             self.inner.config.workspace_roots.clone()
         };
-        durable.workspace_roots = roots;
+        durable.workspace_roots = roots.clone();
 
         // Initialize MCP server enablement state for new session
         // Uses the single runtime-level default policy without per-server override
@@ -1030,12 +1030,28 @@ impl IronRuntime {
         // Uses .entry() / is_none() guards so existing client choices are preserved.
         self.apply_runtime_mcp_policy_to_session(&mut durable);
         self.apply_runtime_plugin_policy_to_session(&mut durable);
+
+        // Backfill workspace roots for legacy sessions imported before this feature.
+        if durable.workspace_roots.is_empty() {
+            durable.workspace_roots = if self.inner.config.workspace_roots.is_empty() {
+                vec![std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))]
+            } else {
+                self.inner.config.workspace_roots.clone()
+            };
+        }
+        let roots = durable.workspace_roots.clone();
+
         let session = Arc::new(Mutex::new(durable));
         let runtime_session = RuntimeSession::new(session, connection_id);
         self.inner
             .sessions
             .write()
             .insert(session_id, Arc::new(runtime_session));
+
+        // Refresh skills for the backfilled roots so the session’s skill catalog
+        // and builtin allowed_roots reflect the effective workspace.
+        let _ = self.refresh_session_skills(session_id, &roots);
+
         Ok(())
     }
 
@@ -1391,20 +1407,18 @@ impl IronRuntime {
             .ok_or_else(|| RuntimeError::SessionNotFound(session_id.to_string()))?;
 
         if rs.active_prompt.lock().is_some() {
-            // Defer: store pending roots on RuntimeSession (latest wins)
-            let mut pending = rs.pending_workspace_roots.lock();
-            *pending = Some(roots);
+            // Defer: store pending roots in DurableSession (latest wins)
+            let mut guard = rs.session.lock();
+            guard.set_pending_workspace_roots(roots);
             Ok(false)
         } else {
-            // Apply immediately
-            drop(sessions); // Release read lock before taking write lock on session
-            let session = self
-                .get_session(session_id)
-                .ok_or_else(|| RuntimeError::SessionNotFound(session_id.to_string()))?;
-            let mut guard = session.lock();
+            // Apply immediately: lock DurableSession while still holding sessions read lock
+            // to prevent a prompt from starting between the check and the mutation.
+            let mut guard = rs.session.lock();
             guard.workspace_roots = roots.clone();
             guard.clear_pending_workspace_roots();
             drop(guard);
+            drop(sessions);
 
             // Refresh skills for the new roots
             self.refresh_session_skills(session_id, &roots)?;
@@ -1422,23 +1436,18 @@ impl IronRuntime {
             return;
         };
 
-        let pending = {
-            let mut pending = rs.pending_workspace_roots.lock();
-            pending.take()
+        let mut guard = rs.session.lock();
+        let pending = guard.apply_pending_workspace_roots();
+        let roots = if pending {
+            guard.workspace_roots.clone()
+        } else {
+            return;
         };
+        drop(guard);
+        drop(sessions);
 
-        if let Some(roots) = pending {
-            drop(sessions); // Release read lock
-            if let Some(session) = self.get_session(session_id) {
-                let mut guard = session.lock();
-                guard.workspace_roots = roots.clone();
-                guard.clear_pending_workspace_roots();
-                drop(guard);
-
-                // Refresh skills for the new roots
-                let _ = self.refresh_session_skills(session_id, &roots);
-            }
-        }
+        // Refresh skills for the new roots
+        let _ = self.refresh_session_skills(session_id, &roots);
     }
 
     pub fn get_active_prompt_ephemeral(
