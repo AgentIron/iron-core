@@ -15,7 +15,7 @@ impl CompressTool {
     pub fn definition() -> ToolDefinition {
         ToolDefinition::new(
             COMPRESS_TOOL_NAME,
-            "Compress resolved older conversation context. Your summaries permanently replace the selected ranges, so preserve all durable facts, decisions, constraints, file paths, errors, tool results, and user intent needed for future work.",
+            "Compress resolved older conversation context. Ranges must not split a tool call from its result message; include both or neither. Your summaries permanently replace the selected ranges, so preserve all durable facts, decisions, constraints, file paths, errors, tool results, and user intent needed for future work.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -29,8 +29,14 @@ impl CompressTool {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "start_message_id": { "type": "string" },
-                                "end_message_id": { "type": "string" },
+                                "start_message_id": {
+                                    "type": "string",
+                                    "description": "Inclusive first message ID in the range; do not choose a boundary that splits a tool call from its result."
+                                },
+                                "end_message_id": {
+                                    "type": "string",
+                                    "description": "Inclusive last message ID in the range; do not choose a boundary that splits a tool call from its result."
+                                },
                                 "summary": {
                                     "type": "string",
                                     "description": "Durable replacement summary for this range."
