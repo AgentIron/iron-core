@@ -1264,20 +1264,19 @@ fn validate_skill_settings_input(input: &SkillSettingsInput) -> Result<(), Confi
     Ok(())
 }
 
+type SerializedMcpTransport = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 /// Serialize an MCP transport into database columns.
 fn serialize_mcp_transport(
     transport: &crate::mcp::server::McpTransport,
-) -> Result<
-    (
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ),
-    ConfigError,
-> {
+) -> Result<SerializedMcpTransport, ConfigError> {
     use crate::mcp::server::McpTransport;
     match transport {
         McpTransport::Stdio { command, args, env } => {
@@ -1296,7 +1295,7 @@ fn serialize_mcp_transport(
             let headers_json = config
                 .headers
                 .as_ref()
-                .map(|h| serde_json::to_string(h))
+                .map(serde_json::to_string)
                 .transpose()?;
             Ok((
                 "http".to_string(),
@@ -1311,7 +1310,7 @@ fn serialize_mcp_transport(
             let headers_json = config
                 .headers
                 .as_ref()
-                .map(|h| serde_json::to_string(h))
+                .map(serde_json::to_string)
                 .transpose()?;
             Ok((
                 "http_sse".to_string(),

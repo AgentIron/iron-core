@@ -854,7 +854,7 @@ async fn test_runtime_settings_snapshot() {
     let snapshot = store.load_runtime_settings().await.unwrap();
     assert_eq!(snapshot.provider_configs.len(), 1);
     assert!(snapshot.default_model.is_some());
-    assert_eq!(snapshot.skill_settings.trust_project_skills, false);
+    assert!(!snapshot.skill_settings.trust_project_skills);
 }
 
 #[tokio::test]
