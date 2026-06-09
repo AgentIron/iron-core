@@ -79,6 +79,8 @@ fn test_mcp_server_registration_stores_configuration() {
     let server_config = McpServerConfig {
         id: "my-server".to_string(),
         label: "My Test Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -107,6 +109,8 @@ fn test_mcp_server_health_transitions() {
     let server_config = McpServerConfig {
         id: "my-server".to_string(),
         label: "My Test Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -144,6 +148,8 @@ fn test_tool_discovery_updates_registry() {
     let server_config = McpServerConfig {
         id: "my-server".to_string(),
         label: "My Test Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -181,6 +187,8 @@ async fn test_session_tool_catalog_includes_mcp_tools_when_enabled_and_usable() 
     let server_config = McpServerConfig {
         id: "my-server".to_string(),
         label: "My Test Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -225,6 +233,8 @@ async fn test_session_tool_catalog_excludes_disabled_mcp_servers() {
     let server_config = McpServerConfig {
         id: "disabled-server".to_string(),
         label: "Disabled Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -267,6 +277,8 @@ async fn test_session_tool_catalog_excludes_errored_mcp_servers() {
     let server_config = McpServerConfig {
         id: "errored-server".to_string(),
         label: "Errored Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -307,6 +319,8 @@ async fn test_session_tool_catalog_cache_invalidates_on_mcp_registry_change() {
     let server_config = McpServerConfig {
         id: "cached-server".to_string(),
         label: "Cached Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -358,6 +372,8 @@ async fn test_session_tool_catalog_filters_consistently() {
     let enabled_config = McpServerConfig {
         id: "enabled-server".to_string(),
         label: "Enabled Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8081".to_string()),
         },
@@ -368,6 +384,8 @@ async fn test_session_tool_catalog_filters_consistently() {
     let disabled_config = McpServerConfig {
         id: "disabled-server".to_string(),
         label: "Disabled Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8082".to_string()),
         },
@@ -438,6 +456,8 @@ done
     let server_config = McpServerConfig {
         id: "my-server".to_string(),
         label: "My Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -502,6 +522,8 @@ async fn test_mcp_tool_execution_requires_approval() {
     let server_config = McpServerConfig {
         id: "approval-server".to_string(),
         label: "Approval Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -586,6 +608,8 @@ done
     let server_config = McpServerConfig {
         id: "lifecycle-server".to_string(),
         label: "Lifecycle Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -642,6 +666,8 @@ async fn test_mcp_unavailable_tool_diagnostics_disabled_server() {
     let server_config = McpServerConfig {
         id: "diagnostics-server".to_string(),
         label: "Diagnostics Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -708,6 +734,8 @@ async fn test_mcp_unavailable_tool_diagnostics_unknown_tool() {
     let server_config = McpServerConfig {
         id: "tools-server".to_string(),
         label: "Tools Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -806,6 +834,8 @@ async fn test_mcp_runtime_default_enablement_semantics() {
     let server_config = McpServerConfig {
         id: "override-server".to_string(),
         label: "Override Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -841,6 +871,8 @@ async fn test_mcp_runtime_default_enablement_semantics() {
     let server_config2 = McpServerConfig {
         id: "override-server2".to_string(),
         label: "Override Server 2".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -1132,6 +1164,8 @@ async fn test_http_mcp_client_parses_streamable_http_sse_response() {
     let config = McpServerConfig {
         id: "streamable-http".to_string(),
         label: "Streamable HTTP".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new(format!("http://127.0.0.1:{}", port)),
         },
@@ -1168,6 +1202,8 @@ async fn test_http_mcp_client_initialize_accepts_absent_response_id() {
     let config = McpServerConfig {
         id: "http-absent-init-id".to_string(),
         label: "HTTP absent initialize id".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new(format!("http://127.0.0.1:{}", port)),
         },
@@ -1193,6 +1229,8 @@ async fn test_http_mcp_client_initialize_accepts_explicit_null_response_id() {
     let config = McpServerConfig {
         id: "http-null-init-id".to_string(),
         label: "HTTP null initialize id".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new(format!("http://127.0.0.1:{}", port)),
         },
@@ -1218,6 +1256,8 @@ async fn test_http_mcp_client_rejects_post_bootstrap_id_less_response() {
     let config = McpServerConfig {
         id: "http-post-bootstrap-idless".to_string(),
         label: "HTTP post-bootstrap id-less response".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new(format!("http://127.0.0.1:{}", port)),
         },
@@ -1253,6 +1293,8 @@ async fn test_http_mcp_client_sends_accept_header() {
     let config = McpServerConfig {
         id: "test-accept".to_string(),
         label: "Test Accept Header".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new(format!("http://127.0.0.1:{}", port)),
         },
@@ -1292,6 +1334,8 @@ async fn test_http_mcp_client_sends_custom_headers() {
     let config = McpServerConfig {
         id: "test-custom-headers".to_string(),
         label: "Test Custom Headers".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig {
                 url: format!("http://127.0.0.1:{}", port),

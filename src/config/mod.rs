@@ -9,9 +9,16 @@
 //!    construction time.
 //!
 //! 2. **Durable configuration store** ([`ConfigStore`]) — a SQLite-backed
-//!    persistent store for profiles, prompts, schedule entries, and encrypted
-//!    provider credentials. The store is designed for desktop application use
-//!    and manages its own schema migrations.
+//!    persistent store for profiles, prompts, schedule entries, encrypted
+//!    provider credentials, and shared runtime settings. The store is designed
+//!    for desktop application use and manages its own schema migrations.
+//!
+//!    Runtime settings include provider configuration (without credentials),
+//!    custom models, default model selection, MCP server definitions, and
+//!    skill settings. These are shared between the AgentIron desktop app and
+//!    headless/CLI consumers through typed APIs rather than direct SQLite
+//!    access. Provider credentials remain in the encrypted credential store
+//!    and are not stored in provider runtime configuration.
 //!
 //! ## Platform-default paths
 //!
@@ -571,7 +578,9 @@ mod migrations;
 
 pub use error::ConfigError;
 pub use records::{
-    CredentialRecord, ProfileInput, ProfileRecord, PromptInput, PromptRecord, ScheduleInput,
-    ScheduleRecord,
+    CredentialRecord, CustomModelInput, CustomModelRecord, DefaultModelInput, DefaultModelRecord,
+    McpServerConfigInput, McpServerConfigRecord, ProfileInput, ProfileRecord, PromptInput,
+    PromptRecord, ProviderConfigInput, ProviderConfigRecord, RuntimeSettingsSnapshot,
+    ScheduleInput, ScheduleRecord, SkillSettingsInput, SkillSettingsRecord,
 };
 pub use store::{default_config_path, ConfigStore, OpenOptions};

@@ -129,6 +129,8 @@ async fn register_server_connects_and_discovers_tools_end_to_end() {
     agent.register_mcp_server(McpServerConfig {
         id: "stdio-server".to_string(),
         label: "Fake stdio server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -168,6 +170,8 @@ async fn prompt_request_includes_visible_mcp_tools() {
     agent.register_mcp_server(McpServerConfig {
         id: "stdio-server".to_string(),
         label: "Fake stdio server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -235,6 +239,8 @@ async fn model_issued_mcp_tool_call_executes_through_runtime() {
     agent.register_mcp_server(McpServerConfig {
         id: "stdio-server".to_string(),
         label: "Fake stdio server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -281,6 +287,8 @@ async fn model_issued_mcp_tool_call_respects_real_approval_flow() {
     agent.register_mcp_server(McpServerConfig {
         id: "stdio-server".to_string(),
         label: "Fake stdio server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -331,6 +339,8 @@ async fn model_issued_unavailable_mcp_tool_uses_precise_canonical_diagnostics() 
     agent.register_mcp_server(McpServerConfig {
         id: "stdio-server".to_string(),
         label: "Fake stdio server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -365,6 +375,8 @@ async fn reconnect_and_rediscover_restore_tools() {
     agent.register_mcp_server(McpServerConfig {
         id: "stdio-server".to_string(),
         label: "Fake stdio server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -468,6 +480,8 @@ async fn python_exec_child_call_can_reach_visible_mcp_tool() {
     agent.register_mcp_server(McpServerConfig {
         id: "stdio-server".to_string(),
         label: "Fake stdio server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -523,6 +537,8 @@ async fn python_exec_child_unavailable_mcp_tool_uses_precise_canonical_diagnosti
     agent.register_mcp_server(McpServerConfig {
         id: "stdio-server".to_string(),
         label: "Fake stdio server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],

@@ -1,55 +1,119 @@
 /// Embedded migration SQL for the config store schema.
 ///
 /// Migrations are applied in order. Each migration is idempotent where possible.
-pub const MIGRATIONS: &[(i64, &str)] = &[(
-    1,
-    r#"
-        CREATE TABLE IF NOT EXISTS schema_version (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            version INTEGER NOT NULL
-        );
+pub const MIGRATIONS: &[(i64, &str)] = &[
+    (
+        1,
+        r#"
+            CREATE TABLE IF NOT EXISTS schema_version (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL
+            );
 
-        CREATE TABLE IF NOT EXISTS profiles (
-            id TEXT PRIMARY KEY,
-            schema_version INTEGER NOT NULL,
-            payload TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
+            CREATE TABLE IF NOT EXISTS profiles (
+                id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
 
-        CREATE TABLE IF NOT EXISTS prompts (
-            id TEXT PRIMARY KEY,
-            schema_version INTEGER NOT NULL,
-            payload TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
+            CREATE TABLE IF NOT EXISTS prompts (
+                id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
 
-        CREATE TABLE IF NOT EXISTS schedule (
-            id TEXT PRIMARY KEY,
-            schema_version INTEGER NOT NULL,
-            payload TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
+            CREATE TABLE IF NOT EXISTS schedule (
+                id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
 
-        CREATE TABLE IF NOT EXISTS credentials (
-            provider_slug TEXT PRIMARY KEY,
-            credential_mode TEXT NOT NULL,
-            encrypted_payload BLOB NOT NULL,
-            nonce BLOB NOT NULL,
-            encryption_metadata TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
+            CREATE TABLE IF NOT EXISTS credentials (
+                provider_slug TEXT PRIMARY KEY,
+                credential_mode TEXT NOT NULL,
+                encrypted_payload BLOB NOT NULL,
+                nonce BLOB NOT NULL,
+                encryption_metadata TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
 
-        INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1);
-        "#,
-)];
+            INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1);
+            "#,
+    ),
+    (
+        2,
+        r#"
+            CREATE TABLE IF NOT EXISTS provider_configs (
+                provider_slug TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                base_url TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS custom_models (
+                provider_slug TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                context_window INTEGER NULL,
+                output_limit INTEGER NULL,
+                supports_tool_calls INTEGER NOT NULL DEFAULT 0,
+                supports_reasoning INTEGER NOT NULL DEFAULT 0,
+                supports_vision INTEGER NOT NULL DEFAULT 0,
+                cost_input_per_million REAL NULL,
+                cost_output_per_million REAL NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider_slug, model_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS runtime_defaults (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                provider_slug TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS mcp_servers (
+                id TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                description TEXT NULL,
+                transport_kind TEXT NOT NULL,
+                command TEXT NULL,
+                args_json TEXT NULL,
+                env_json TEXT NULL,
+                inherited_env_vars_json TEXT NULL,
+                url TEXT NULL,
+                headers_json TEXT NULL,
+                working_dir TEXT NULL,
+                enabled_by_default INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS skill_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                trust_project_skills INTEGER NOT NULL,
+                additional_skill_dirs_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 2);
+            "#,
+    ),
+];
 
 /// The current schema version.
 #[allow(dead_code)]
-pub const CURRENT_SCHEMA_VERSION: i64 = 1;
+pub const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 /// Apply all pending migrations to the database.
 pub async fn apply_migrations(pool: &sqlx::SqlitePool) -> Result<(), super::error::ConfigError> {

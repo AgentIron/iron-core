@@ -6,9 +6,10 @@ use super::{
     migrations,
     records::*,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -533,6 +534,843 @@ impl ConfigStore {
             .acquire()
             .await
             .map_err(|e| ConfigError::Query(e.to_string()))
+    }
+
+    // ============================================================================
+    // Provider Config APIs
+    // ============================================================================
+
+    /// Store or replace a provider runtime configuration.
+    pub async fn set_provider_config(
+        &self,
+        input: &ProviderConfigInput,
+    ) -> Result<ProviderConfigRecord, ConfigError> {
+        if input.provider_slug.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "Provider slug must not be empty".to_string(),
+            ));
+        }
+        if input.display_name.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "Provider display name must not be empty".to_string(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO provider_configs (provider_slug, display_name, enabled, base_url, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider_slug) DO UPDATE SET
+                display_name = excluded.display_name,
+                enabled = excluded.enabled,
+                base_url = excluded.base_url,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&input.provider_slug)
+        .bind(&input.display_name)
+        .bind(input.enabled)
+        .bind(&input.base_url)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        Ok(ProviderConfigRecord {
+            provider_slug: input.provider_slug.clone(),
+            display_name: input.display_name.clone(),
+            enabled: input.enabled,
+            base_url: input.base_url.clone(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+    }
+
+    /// Get a provider runtime configuration by slug.
+    pub async fn get_provider_config(
+        &self,
+        provider_slug: &str,
+    ) -> Result<Option<ProviderConfigRecord>, ConfigError> {
+        let row = sqlx::query(
+            "SELECT provider_slug, display_name, enabled, base_url, created_at, updated_at FROM provider_configs WHERE provider_slug = ?",
+        )
+        .bind(provider_slug)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        match row {
+            Some(row) => Ok(Some(ProviderConfigRecord {
+                provider_slug: row.get("provider_slug"),
+                display_name: row.get("display_name"),
+                enabled: row.get::<i64, _>("enabled") != 0,
+                base_url: row.get("base_url"),
+                created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// List all provider runtime configurations.
+    pub async fn list_provider_configs(&self) -> Result<Vec<ProviderConfigRecord>, ConfigError> {
+        let rows = sqlx::query(
+            "SELECT provider_slug, display_name, enabled, base_url, created_at, updated_at FROM provider_configs ORDER BY updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(ProviderConfigRecord {
+                    provider_slug: row.get("provider_slug"),
+                    display_name: row.get("display_name"),
+                    enabled: row.get::<i64, _>("enabled") != 0,
+                    base_url: row.get("base_url"),
+                    created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                    updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+                })
+            })
+            .collect()
+    }
+
+    /// Remove a provider runtime configuration by slug.
+    pub async fn remove_provider_config(&self, provider_slug: &str) -> Result<(), ConfigError> {
+        sqlx::query("DELETE FROM provider_configs WHERE provider_slug = ?")
+            .bind(provider_slug)
+            .execute(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+        Ok(())
+    }
+
+    // ============================================================================
+    // Custom Model APIs
+    // ============================================================================
+
+    /// Store or replace a custom model record.
+    pub async fn set_custom_model(
+        &self,
+        input: &CustomModelInput,
+    ) -> Result<CustomModelRecord, ConfigError> {
+        if input.provider_slug.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "Provider slug must not be empty".to_string(),
+            ));
+        }
+        if input.model_id.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "Model ID must not be empty".to_string(),
+            ));
+        }
+        if input.display_name.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "Display name must not be empty".to_string(),
+            ));
+        }
+        if matches!(input.context_window, Some(0)) {
+            return Err(ConfigError::Validation(
+                "Context window must be greater than 0 when set".to_string(),
+            ));
+        }
+        if matches!(input.output_limit, Some(0)) {
+            return Err(ConfigError::Validation(
+                "Output limit must be greater than 0 when set".to_string(),
+            ));
+        }
+        validate_optional_non_negative_f64(input.cost_input_per_million, "Input cost per million")?;
+        validate_optional_non_negative_f64(
+            input.cost_output_per_million,
+            "Output cost per million",
+        )?;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO custom_models (provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, cost_input_per_million, cost_output_per_million, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider_slug, model_id) DO UPDATE SET
+                display_name = excluded.display_name,
+                context_window = excluded.context_window,
+                output_limit = excluded.output_limit,
+                supports_tool_calls = excluded.supports_tool_calls,
+                supports_reasoning = excluded.supports_reasoning,
+                supports_vision = excluded.supports_vision,
+                cost_input_per_million = excluded.cost_input_per_million,
+                cost_output_per_million = excluded.cost_output_per_million,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&input.provider_slug)
+        .bind(&input.model_id)
+        .bind(&input.display_name)
+        .bind(input.context_window.map(|v| v as i64))
+        .bind(input.output_limit.map(|v| v as i64))
+        .bind(input.supports_tool_calls)
+        .bind(input.supports_reasoning)
+        .bind(input.supports_vision)
+        .bind(input.cost_input_per_million)
+        .bind(input.cost_output_per_million)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        Ok(CustomModelRecord {
+            provider_slug: input.provider_slug.clone(),
+            model_id: input.model_id.clone(),
+            display_name: input.display_name.clone(),
+            context_window: input.context_window,
+            output_limit: input.output_limit,
+            supports_tool_calls: input.supports_tool_calls,
+            supports_reasoning: input.supports_reasoning,
+            supports_vision: input.supports_vision,
+            cost_input_per_million: input.cost_input_per_million,
+            cost_output_per_million: input.cost_output_per_million,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+    }
+
+    /// Get a custom model by provider slug and model ID.
+    pub async fn get_custom_model(
+        &self,
+        provider_slug: &str,
+        model_id: &str,
+    ) -> Result<Option<CustomModelRecord>, ConfigError> {
+        let row = sqlx::query(
+            "SELECT provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, cost_input_per_million, cost_output_per_million, created_at, updated_at FROM custom_models WHERE provider_slug = ? AND model_id = ?",
+        )
+        .bind(provider_slug)
+        .bind(model_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        match row {
+            Some(row) => Ok(Some(CustomModelRecord {
+                provider_slug: row.get("provider_slug"),
+                model_id: row.get("model_id"),
+                display_name: row.get("display_name"),
+                context_window: row
+                    .get::<Option<i64>, _>("context_window")
+                    .map(|v| v as u32),
+                output_limit: row.get::<Option<i64>, _>("output_limit").map(|v| v as u32),
+                supports_tool_calls: row.get::<i64, _>("supports_tool_calls") != 0,
+                supports_reasoning: row.get::<i64, _>("supports_reasoning") != 0,
+                supports_vision: row.get::<i64, _>("supports_vision") != 0,
+                cost_input_per_million: row.get("cost_input_per_million"),
+                cost_output_per_million: row.get("cost_output_per_million"),
+                created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// List custom models, optionally filtered by provider slug.
+    pub async fn list_custom_models(
+        &self,
+        provider_slug: Option<&str>,
+    ) -> Result<Vec<CustomModelRecord>, ConfigError> {
+        let rows = if let Some(slug) = provider_slug {
+            sqlx::query(
+                "SELECT provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, cost_input_per_million, cost_output_per_million, created_at, updated_at FROM custom_models WHERE provider_slug = ? ORDER BY updated_at DESC",
+            )
+            .bind(slug)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(ConfigError::from)?
+        } else {
+            sqlx::query(
+                "SELECT provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, cost_input_per_million, cost_output_per_million, created_at, updated_at FROM custom_models ORDER BY updated_at DESC",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(ConfigError::from)?
+        };
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(CustomModelRecord {
+                    provider_slug: row.get("provider_slug"),
+                    model_id: row.get("model_id"),
+                    display_name: row.get("display_name"),
+                    context_window: row
+                        .get::<Option<i64>, _>("context_window")
+                        .map(|v| v as u32),
+                    output_limit: row.get::<Option<i64>, _>("output_limit").map(|v| v as u32),
+                    supports_tool_calls: row.get::<i64, _>("supports_tool_calls") != 0,
+                    supports_reasoning: row.get::<i64, _>("supports_reasoning") != 0,
+                    supports_vision: row.get::<i64, _>("supports_vision") != 0,
+                    cost_input_per_million: row.get("cost_input_per_million"),
+                    cost_output_per_million: row.get("cost_output_per_million"),
+                    created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                    updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+                })
+            })
+            .collect()
+    }
+
+    /// Remove a custom model by provider slug and model ID.
+    pub async fn remove_custom_model(
+        &self,
+        provider_slug: &str,
+        model_id: &str,
+    ) -> Result<(), ConfigError> {
+        sqlx::query("DELETE FROM custom_models WHERE provider_slug = ? AND model_id = ?")
+            .bind(provider_slug)
+            .bind(model_id)
+            .execute(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+        Ok(())
+    }
+
+    // ============================================================================
+    // Default Model APIs
+    // ============================================================================
+
+    /// Set the default model selection.
+    pub async fn set_default_model(
+        &self,
+        input: &DefaultModelInput,
+    ) -> Result<DefaultModelRecord, ConfigError> {
+        if input.provider_slug.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "Provider slug must not be empty".to_string(),
+            ));
+        }
+        if input.model_id.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "Model ID must not be empty".to_string(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO runtime_defaults (id, provider_slug, model_id, updated_at)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                provider_slug = excluded.provider_slug,
+                model_id = excluded.model_id,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&input.provider_slug)
+        .bind(&input.model_id)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        Ok(DefaultModelRecord {
+            provider_slug: input.provider_slug.clone(),
+            model_id: input.model_id.clone(),
+            updated_at: Utc::now(),
+        })
+    }
+
+    /// Get the default model selection.
+    pub async fn get_default_model(&self) -> Result<Option<DefaultModelRecord>, ConfigError> {
+        let row = sqlx::query(
+            "SELECT provider_slug, model_id, updated_at FROM runtime_defaults WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        match row {
+            Some(row) => Ok(Some(DefaultModelRecord {
+                provider_slug: row.get("provider_slug"),
+                model_id: row.get("model_id"),
+                updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Clear the default model selection.
+    pub async fn clear_default_model(&self) -> Result<(), ConfigError> {
+        sqlx::query("DELETE FROM runtime_defaults WHERE id = 1")
+            .execute(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+        Ok(())
+    }
+
+    // ============================================================================
+    // MCP Server APIs
+    // ============================================================================
+
+    /// Store or replace an MCP server configuration.
+    pub async fn set_mcp_server(
+        &self,
+        input: &McpServerConfigInput,
+    ) -> Result<McpServerConfigRecord, ConfigError> {
+        if input.id.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "MCP server ID must not be empty".to_string(),
+            ));
+        }
+        if input.label.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "MCP server label must not be empty".to_string(),
+            ));
+        }
+        validate_mcp_server_input(input)?;
+        let (transport_kind, command, args_json, env_json, url, headers_json) =
+            serialize_mcp_transport(&input.transport)?;
+        let inherited_env_vars_json = serde_json::to_string(&input.inherited_env_vars)?;
+        let working_dir_str = input
+            .working_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            r#"
+            INSERT INTO mcp_servers (id, label, description, transport_kind, command, args_json, env_json, inherited_env_vars_json, url, headers_json, working_dir, enabled_by_default, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                label = excluded.label,
+                description = excluded.description,
+                transport_kind = excluded.transport_kind,
+                command = excluded.command,
+                args_json = excluded.args_json,
+                env_json = excluded.env_json,
+                inherited_env_vars_json = excluded.inherited_env_vars_json,
+                url = excluded.url,
+                headers_json = excluded.headers_json,
+                working_dir = excluded.working_dir,
+                enabled_by_default = excluded.enabled_by_default,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&input.id)
+        .bind(&input.label)
+        .bind(&input.description)
+        .bind(&transport_kind)
+        .bind(&command)
+        .bind(&args_json)
+        .bind(&env_json)
+        .bind(&inherited_env_vars_json)
+        .bind(&url)
+        .bind(&headers_json)
+        .bind(&working_dir_str)
+        .bind(input.enabled_by_default)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        Ok(McpServerConfigRecord {
+            id: input.id.clone(),
+            label: input.label.clone(),
+            description: input.description.clone(),
+            transport: input.transport.clone(),
+            working_dir: input.working_dir.clone(),
+            enabled_by_default: input.enabled_by_default,
+            inherited_env_vars: input.inherited_env_vars.clone(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+    }
+
+    /// Get an MCP server configuration by ID.
+    pub async fn get_mcp_server(
+        &self,
+        id: &str,
+    ) -> Result<Option<McpServerConfigRecord>, ConfigError> {
+        let row = sqlx::query(
+            "SELECT id, label, description, transport_kind, command, args_json, env_json, inherited_env_vars_json, url, headers_json, working_dir, enabled_by_default, created_at, updated_at FROM mcp_servers WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        match row {
+            Some(row) => {
+                let transport = deserialize_mcp_transport(
+                    row.get("transport_kind"),
+                    row.get("command"),
+                    row.get("args_json"),
+                    row.get("env_json"),
+                    row.get("url"),
+                    row.get("headers_json"),
+                )?;
+                let inherited_env_vars: Vec<String> =
+                    serde_json::from_str(&row.get::<String, _>("inherited_env_vars_json"))?;
+                let working_dir: Option<String> = row.get("working_dir");
+                Ok(Some(McpServerConfigRecord {
+                    id: row.get("id"),
+                    label: row.get("label"),
+                    description: row.get("description"),
+                    transport,
+                    working_dir: working_dir.map(PathBuf::from),
+                    enabled_by_default: row.get::<i64, _>("enabled_by_default") != 0,
+                    inherited_env_vars,
+                    created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                    updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// List all MCP server configurations.
+    pub async fn list_mcp_servers(&self) -> Result<Vec<McpServerConfigRecord>, ConfigError> {
+        let rows = sqlx::query(
+            "SELECT id, label, description, transport_kind, command, args_json, env_json, inherited_env_vars_json, url, headers_json, working_dir, enabled_by_default, created_at, updated_at FROM mcp_servers ORDER BY updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        let mut servers = Vec::new();
+        for row in rows {
+            let transport = deserialize_mcp_transport(
+                row.get("transport_kind"),
+                row.get("command"),
+                row.get("args_json"),
+                row.get("env_json"),
+                row.get("url"),
+                row.get("headers_json"),
+            )?;
+            let inherited_env_vars: Vec<String> =
+                serde_json::from_str(&row.get::<String, _>("inherited_env_vars_json"))?;
+            let working_dir: Option<String> = row.get("working_dir");
+            servers.push(McpServerConfigRecord {
+                id: row.get("id"),
+                label: row.get("label"),
+                description: row.get("description"),
+                transport,
+                working_dir: working_dir.map(PathBuf::from),
+                enabled_by_default: row.get::<i64, _>("enabled_by_default") != 0,
+                inherited_env_vars,
+                created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+            });
+        }
+        Ok(servers)
+    }
+
+    /// Remove an MCP server configuration by ID.
+    pub async fn remove_mcp_server(&self, id: &str) -> Result<(), ConfigError> {
+        sqlx::query("DELETE FROM mcp_servers WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+        Ok(())
+    }
+
+    // ============================================================================
+    // Skill Settings APIs
+    // ============================================================================
+
+    /// Store or replace skill settings.
+    pub async fn set_skill_settings(
+        &self,
+        input: &SkillSettingsInput,
+    ) -> Result<SkillSettingsRecord, ConfigError> {
+        validate_skill_settings_input(input)?;
+        let additional_skill_dirs_json = serde_json::to_string(&input.additional_skill_dirs)?;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO skill_settings (id, trust_project_skills, additional_skill_dirs_json, updated_at)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                trust_project_skills = excluded.trust_project_skills,
+                additional_skill_dirs_json = excluded.additional_skill_dirs_json,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(input.trust_project_skills)
+        .bind(&additional_skill_dirs_json)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        Ok(SkillSettingsRecord {
+            trust_project_skills: input.trust_project_skills,
+            additional_skill_dirs: input.additional_skill_dirs.clone(),
+            updated_at: Utc::now(),
+        })
+    }
+
+    /// Get skill settings, returning defaults if not set.
+    pub async fn get_skill_settings(&self) -> Result<SkillSettingsRecord, ConfigError> {
+        let row = sqlx::query(
+            "SELECT trust_project_skills, additional_skill_dirs_json, updated_at FROM skill_settings WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        match row {
+            Some(row) => {
+                let additional_skill_dirs_json: String = row.get("additional_skill_dirs_json");
+                let additional_skill_dirs: Vec<PathBuf> =
+                    serde_json::from_str(&additional_skill_dirs_json)?;
+                Ok(SkillSettingsRecord {
+                    trust_project_skills: row.get::<i64, _>("trust_project_skills") != 0,
+                    additional_skill_dirs,
+                    updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+                })
+            }
+            None => Ok(SkillSettingsRecord {
+                trust_project_skills: false,
+                additional_skill_dirs: Vec::new(),
+                updated_at: Utc::now(),
+            }),
+        }
+    }
+
+    // ============================================================================
+    // Runtime Settings Snapshot
+    // ============================================================================
+
+    /// Load a validated runtime settings snapshot from the config store.
+    pub async fn load_runtime_settings(&self) -> Result<RuntimeSettingsSnapshot, ConfigError> {
+        let provider_configs = self.list_provider_configs().await?;
+        let custom_models = self.list_custom_models(None).await?;
+        let default_model = self.get_default_model().await?;
+        let mcp_servers = self.list_mcp_servers().await?;
+        let skill_settings = self.get_skill_settings().await?;
+
+        // Validate cross-record consistency
+        if let Some(ref default) = default_model {
+            if default.provider_slug.trim().is_empty() {
+                return Err(ConfigError::Validation(
+                    "Default model provider slug is empty".to_string(),
+                ));
+            }
+            if default.model_id.trim().is_empty() {
+                return Err(ConfigError::Validation(
+                    "Default model ID is empty".to_string(),
+                ));
+            }
+        }
+
+        // Validate MCP server IDs are unique (defensive; DB has PK)
+        let mut seen_ids = std::collections::HashSet::new();
+        for server in &mcp_servers {
+            if !seen_ids.insert(&server.id) {
+                return Err(ConfigError::Validation(format!(
+                    "Duplicate MCP server ID: {}",
+                    server.id
+                )));
+            }
+        }
+
+        // Validate inherited_env_vars entries are names only
+        for server in &mcp_servers {
+            for var_name in &server.inherited_env_vars {
+                validate_env_var_name(var_name)?;
+            }
+        }
+
+        validate_skill_settings_input(&SkillSettingsInput {
+            trust_project_skills: skill_settings.trust_project_skills,
+            additional_skill_dirs: skill_settings.additional_skill_dirs.clone(),
+        })?;
+
+        Ok(RuntimeSettingsSnapshot {
+            provider_configs,
+            custom_models,
+            default_model,
+            mcp_servers,
+            skill_settings,
+        })
+    }
+}
+
+/// Parse an RFC3339 datetime string into a `DateTime<Utc>`.
+fn parse_datetime(s: String) -> Result<DateTime<Utc>, ConfigError> {
+    Ok(chrono::DateTime::parse_from_rfc3339(&s)
+        .map_err(|e| ConfigError::Deserialization(e.to_string()))?
+        .with_timezone(&Utc))
+}
+
+fn validate_optional_non_negative_f64(value: Option<f64>, label: &str) -> Result<(), ConfigError> {
+    if let Some(value) = value {
+        if !value.is_finite() || value < 0.0 {
+            return Err(ConfigError::Validation(format!(
+                "{} must be finite and non-negative when set",
+                label
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_env_var_name(name: &str) -> Result<(), ConfigError> {
+    if name.trim().is_empty() {
+        return Err(ConfigError::Validation(
+            "Inherited environment variable name must not be empty".to_string(),
+        ));
+    }
+    if name.contains('=') {
+        return Err(ConfigError::Validation(format!(
+            "Inherited environment variable '{}' contains '=' and is not a valid variable name",
+            name
+        )));
+    }
+    Ok(())
+}
+
+fn validate_mcp_server_input(input: &McpServerConfigInput) -> Result<(), ConfigError> {
+    use crate::mcp::server::McpTransport;
+
+    match &input.transport {
+        McpTransport::Stdio { command, .. } => {
+            if command.trim().is_empty() {
+                return Err(ConfigError::Validation(
+                    "MCP stdio command must not be empty".to_string(),
+                ));
+            }
+        }
+        McpTransport::Http { config } | McpTransport::HttpSse { config } => {
+            if config.url.trim().is_empty() {
+                return Err(ConfigError::Validation(
+                    "MCP HTTP URL must not be empty".to_string(),
+                ));
+            }
+        }
+    }
+
+    for name in &input.inherited_env_vars {
+        validate_env_var_name(name)?;
+    }
+
+    Ok(())
+}
+
+fn validate_skill_settings_input(input: &SkillSettingsInput) -> Result<(), ConfigError> {
+    for dir in &input.additional_skill_dirs {
+        if dir.as_os_str().is_empty() {
+            return Err(ConfigError::Validation(
+                "Additional skill directory must not be empty".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Serialize an MCP transport into database columns.
+fn serialize_mcp_transport(
+    transport: &crate::mcp::server::McpTransport,
+) -> Result<
+    (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ),
+    ConfigError,
+> {
+    use crate::mcp::server::McpTransport;
+    match transport {
+        McpTransport::Stdio { command, args, env } => {
+            let args_json = serde_json::to_string(args)?;
+            let env_json = serde_json::to_string(env)?;
+            Ok((
+                "stdio".to_string(),
+                Some(command.clone()),
+                Some(args_json),
+                Some(env_json),
+                None,
+                None,
+            ))
+        }
+        McpTransport::Http { config } => {
+            let headers_json = config
+                .headers
+                .as_ref()
+                .map(|h| serde_json::to_string(h))
+                .transpose()?;
+            Ok((
+                "http".to_string(),
+                None,
+                None,
+                None,
+                Some(config.url.clone()),
+                headers_json,
+            ))
+        }
+        McpTransport::HttpSse { config } => {
+            let headers_json = config
+                .headers
+                .as_ref()
+                .map(|h| serde_json::to_string(h))
+                .transpose()?;
+            Ok((
+                "http_sse".to_string(),
+                None,
+                None,
+                None,
+                Some(config.url.clone()),
+                headers_json,
+            ))
+        }
+    }
+}
+
+/// Deserialize MCP transport from database columns.
+fn deserialize_mcp_transport(
+    transport_kind: String,
+    command: Option<String>,
+    args_json: Option<String>,
+    env_json: Option<String>,
+    url: Option<String>,
+    headers_json: Option<String>,
+) -> Result<crate::mcp::server::McpTransport, ConfigError> {
+    use crate::mcp::server::{HttpConfig, McpTransport};
+    match transport_kind.as_str() {
+        "stdio" => {
+            let command = command
+                .ok_or_else(|| ConfigError::Deserialization("Missing stdio command".to_string()))?;
+            let args: Vec<String> = args_json
+                .map(|s| serde_json::from_str(&s))
+                .transpose()?
+                .unwrap_or_default();
+            let env: HashMap<String, String> = env_json
+                .map(|s| serde_json::from_str(&s))
+                .transpose()?
+                .unwrap_or_default();
+            Ok(McpTransport::Stdio { command, args, env })
+        }
+        "http" => {
+            let url =
+                url.ok_or_else(|| ConfigError::Deserialization("Missing HTTP URL".to_string()))?;
+            let headers: Option<HashMap<String, String>> =
+                headers_json.map(|s| serde_json::from_str(&s)).transpose()?;
+            Ok(McpTransport::Http {
+                config: HttpConfig { url, headers },
+            })
+        }
+        "http_sse" => {
+            let url = url
+                .ok_or_else(|| ConfigError::Deserialization("Missing HTTP+SSE URL".to_string()))?;
+            let headers: Option<HashMap<String, String>> =
+                headers_json.map(|s| serde_json::from_str(&s)).transpose()?;
+            Ok(McpTransport::HttpSse {
+                config: HttpConfig { url, headers },
+            })
+        }
+        other => Err(ConfigError::Deserialization(format!(
+            "Unknown MCP transport kind: {}",
+            other
+        ))),
     }
 }
 

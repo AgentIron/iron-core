@@ -85,12 +85,21 @@ pub struct McpServerConfig {
     pub id: String,
     /// Display label for this server
     pub label: String,
+    /// Optional description for this server
+    #[serde(default)]
+    pub description: Option<String>,
     /// Transport configuration
     pub transport: McpTransport,
     /// Whether this server should be enabled by default for new sessions
     pub enabled_by_default: bool,
     /// Optional working directory for stdio transports
     pub working_dir: Option<PathBuf>,
+    /// Names of parent environment variables to inherit for stdio transports.
+    /// The runtime copies the parent value for each named variable into the
+    /// subprocess environment after sanitization and before applying the
+    /// configured `env` map.
+    #[serde(default)]
+    pub inherited_env_vars: Vec<String>,
 }
 
 /// Runtime state for a configured MCP server

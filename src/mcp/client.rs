@@ -156,8 +156,14 @@ impl StdioMcpClient {
         };
 
         let mut cmd = Command::new(command);
+        let mut base_env = sanitized_stdio_env();
+        for var_name in &config.inherited_env_vars {
+            if let Ok(value) = std::env::var(var_name) {
+                base_env.insert(var_name.clone(), value);
+            }
+        }
         cmd.args(args)
-            .envs(sanitized_stdio_env())
+            .envs(base_env)
             .envs(env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
