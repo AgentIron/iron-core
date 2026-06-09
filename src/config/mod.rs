@@ -587,6 +587,7 @@ pub use records::{
     CredentialRecord, CustomModelInput, CustomModelRecord, DefaultModelInput, DefaultModelRecord,
     McpServerConfigInput, McpServerConfigRecord, ProfileInput, ProfileRecord, PromptInput,
     PromptRecord, ProviderConfigInput, ProviderConfigRecord, RuntimeSettingsSnapshot,
-    ScheduleInput, ScheduleRecord, SkillSettingsInput, SkillSettingsRecord,
+    SavedHandoffInput, SavedHandoffMetadata, SavedHandoffRecord, ScheduleInput, ScheduleRecord,
+    SkillSettingsInput, SkillSettingsRecord,
 };
 pub use store::{default_config_path, ConfigStore, OpenOptions};

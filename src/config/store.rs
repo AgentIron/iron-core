@@ -120,6 +120,11 @@ impl ConfigStore {
         })
     }
 
+    /// Access the underlying SQLite pool (for tests and direct queries).
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     // Profile APIs
 
     /// Store or replace a profile record.
@@ -1481,6 +1486,195 @@ fn deserialize_mcp_transport(
             "Unknown MCP transport kind: {}",
             other
         ))),
+    }
+}
+
+// ============================================================================
+// Saved Handoff APIs (Issue #69)
+// ============================================================================
+
+impl ConfigStore {
+    /// Save or replace a handoff bundle.
+    ///
+    /// Returns `ConfigError::Validation` if the ID or name is empty, or if the
+    /// bundle version is not supported.
+    pub async fn save_handoff(&self, input: &SavedHandoffInput) -> Result<(), ConfigError> {
+        // Validate ID
+        if input.id.is_empty() {
+            return Err(ConfigError::Validation(
+                "Handoff ID must not be empty".to_string(),
+            ));
+        }
+
+        // Validate name
+        if input.name.is_empty() {
+            return Err(ConfigError::Validation(
+                "Handoff name must not be empty".to_string(),
+            ));
+        }
+
+        // Validate bundle version
+        if input.bundle.version != crate::context::handoff::HANDOFF_BUNDLE_VERSION {
+            return Err(ConfigError::Validation(format!(
+                "Unsupported handoff bundle version: {} (expected {})",
+                input.bundle.version,
+                crate::context::handoff::HANDOFF_BUNDLE_VERSION
+            )));
+        }
+
+        // Serialize bundle
+        let bundle_json = serde_json::to_string(&input.bundle)
+            .map_err(|e| ConfigError::Serialization(e.to_string()))?;
+
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            r#"
+            INSERT INTO saved_handoffs (id, name, bundle_json, bundle_version, source_session_id, source_model, source_provider, size_estimate_tokens, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                bundle_json = excluded.bundle_json,
+                bundle_version = excluded.bundle_version,
+                source_session_id = excluded.source_session_id,
+                source_model = excluded.source_model,
+                source_provider = excluded.source_provider,
+                size_estimate_tokens = excluded.size_estimate_tokens,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&input.id)
+        .bind(&input.name)
+        .bind(&bundle_json)
+        .bind(&input.bundle.version)
+        .bind(&input.bundle.metadata.source_session_id)
+        .bind(&input.bundle.metadata.source_model)
+        .bind(&input.bundle.metadata.source_provider)
+        .bind(input.bundle.metadata.size_estimate_tokens as i64)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        Ok(())
+    }
+
+    /// Load a saved handoff by ID.
+    ///
+    /// Returns `Ok(None)` if the handoff does not exist.
+    /// Returns a typed error if the stored bundle is malformed or has an
+    /// unsupported version.
+    pub async fn load_handoff(&self, id: &str) -> Result<Option<SavedHandoffRecord>, ConfigError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, name, bundle_json, bundle_version, source_session_id,
+                   source_model, source_provider, size_estimate_tokens,
+                   created_at, updated_at
+            FROM saved_handoffs
+            WHERE id = ?
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        match row {
+            Some(row) => {
+                let bundle_json: String = row.get("bundle_json");
+                let bundle: crate::context::handoff::HandoffBundle =
+                    serde_json::from_str(&bundle_json)
+                        .map_err(|e| ConfigError::Deserialization(e.to_string()))?;
+
+                // Validate loaded bundle version
+                if bundle.version != crate::context::handoff::HANDOFF_BUNDLE_VERSION {
+                    return Err(ConfigError::Validation(format!(
+                        "Unsupported stored handoff bundle version: {} (expected {})",
+                        bundle.version,
+                        crate::context::handoff::HANDOFF_BUNDLE_VERSION
+                    )));
+                }
+
+                Ok(Some(SavedHandoffRecord {
+                    metadata: SavedHandoffMetadata {
+                        id: row.get("id"),
+                        name: row.get("name"),
+                        bundle_version: row.get("bundle_version"),
+                        source_session_id: row.get("source_session_id"),
+                        source_model: row.get("source_model"),
+                        source_provider: row.get("source_provider"),
+                        size_estimate_tokens: row.get::<i64, _>("size_estimate_tokens") as usize,
+                        created_at: chrono::DateTime::parse_from_rfc3339(
+                            &row.get::<String, _>("created_at"),
+                        )
+                        .map_err(|e| ConfigError::Deserialization(e.to_string()))?
+                        .with_timezone(&Utc),
+                        updated_at: chrono::DateTime::parse_from_rfc3339(
+                            &row.get::<String, _>("updated_at"),
+                        )
+                        .map_err(|e| ConfigError::Deserialization(e.to_string()))?
+                        .with_timezone(&Utc),
+                    },
+                    bundle,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// List all saved handoff metadata.
+    ///
+    /// Returns metadata only; full bundles are not deserialized.
+    pub async fn list_handoffs(&self) -> Result<Vec<SavedHandoffMetadata>, ConfigError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, name, bundle_version, source_session_id,
+                   source_model, source_provider, size_estimate_tokens,
+                   created_at, updated_at
+            FROM saved_handoffs
+            ORDER BY updated_at DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| SavedHandoffMetadata {
+                id: row.get("id"),
+                name: row.get("name"),
+                bundle_version: row.get("bundle_version"),
+                source_session_id: row.get("source_session_id"),
+                source_model: row.get("source_model"),
+                source_provider: row.get("source_provider"),
+                size_estimate_tokens: row.get::<i64, _>("size_estimate_tokens") as usize,
+                created_at: chrono::DateTime::parse_from_rfc3339(
+                    &row.get::<String, _>("created_at"),
+                )
+                .map_err(|e| ConfigError::Deserialization(e.to_string()))
+                .unwrap_or_else(|_| Utc::now().into())
+                .with_timezone(&Utc),
+                updated_at: chrono::DateTime::parse_from_rfc3339(
+                    &row.get::<String, _>("updated_at"),
+                )
+                .map_err(|e| ConfigError::Deserialization(e.to_string()))
+                .unwrap_or_else(|_| Utc::now().into())
+                .with_timezone(&Utc),
+            })
+            .collect())
+    }
+
+    /// Delete a saved handoff by ID.
+    pub async fn delete_handoff(&self, id: &str) -> Result<(), ConfigError> {
+        sqlx::query("DELETE FROM saved_handoffs WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+
+        Ok(())
     }
 }
 

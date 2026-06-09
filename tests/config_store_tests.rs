@@ -1016,7 +1016,7 @@ async fn test_migrations_v1_to_v2() {
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
 
     // Verify v2/v3 tables exist by using the new APIs
     store
@@ -1368,7 +1368,7 @@ async fn test_migrations_v2_to_v3_custom_models_columns() {
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
 
     // Verify the new columns have correct defaults for existing rows
     let retrieved = store
@@ -1458,4 +1458,281 @@ async fn test_custom_model_extends_builtin_catalog() {
     assert!(custom_entry.supports_reasoning);
     assert_eq!(custom_entry.reasoning_effort_values, vec!["low", "high"]);
     assert!(custom_entry.is_custom);
+}
+
+// ============================================================================
+// Saved Handoff Tests (Issue #69)
+// ============================================================================
+
+fn create_test_handoff_bundle(id: &str) -> iron_core::context::handoff::HandoffBundle {
+    iron_core::context::handoff::HandoffBundle {
+        version: iron_core::context::handoff::HANDOFF_BUNDLE_VERSION.to_string(),
+        instructions: Some("Test instructions".to_string()),
+        handoff_note: format!("Test handoff for {}", id),
+        compressed_blocks: vec![],
+        recent_tail: vec![],
+        skill_state: iron_core::skill::SessionSkillState { active: vec![] },
+        metadata: iron_core::context::handoff::HandoffBundleMetadata {
+            version: iron_core::context::handoff::HANDOFF_BUNDLE_VERSION.to_string(),
+            source_model: "gpt-4o".to_string(),
+            source_provider: Some("openai".to_string()),
+            source_session_id: format!("session-{}", id),
+            size_estimate_tokens: 1000,
+        },
+        model_switch_history: vec![],
+        current_model: Some("gpt-4o".to_string()),
+        current_provider_slug: Some("openai".to_string()),
+        current_provider_api_key: Some("sk-test-key".to_string()),
+        hidden_tools: vec![],
+    }
+}
+
+#[tokio::test]
+async fn test_saved_handoff_roundtrip() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let bundle = create_test_handoff_bundle("test1");
+    let input = iron_core::config::SavedHandoffInput {
+        id: "handoff-1".to_string(),
+        name: "Test Handoff 1".to_string(),
+        bundle: bundle.clone(),
+    };
+
+    store.save_handoff(&input).await.unwrap();
+
+    let loaded = store.load_handoff("handoff-1").await.unwrap();
+    assert!(loaded.is_some());
+    let loaded = loaded.unwrap();
+
+    assert_eq!(loaded.metadata.id, "handoff-1");
+    assert_eq!(loaded.metadata.name, "Test Handoff 1");
+    assert_eq!(loaded.bundle, bundle);
+    assert_eq!(
+        loaded.bundle.current_provider_api_key,
+        Some("sk-test-key".to_string())
+    );
+}
+
+#[tokio::test]
+async fn test_saved_handoff_missing_returns_none() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+    let result = store.load_handoff("nonexistent").await.unwrap();
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn test_saved_handoff_list_metadata_only() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let bundle1 = create_test_handoff_bundle("test1");
+    let input1 = iron_core::config::SavedHandoffInput {
+        id: "handoff-1".to_string(),
+        name: "Test Handoff 1".to_string(),
+        bundle: bundle1,
+    };
+    store.save_handoff(&input1).await.unwrap();
+
+    let bundle2 = create_test_handoff_bundle("test2");
+    let input2 = iron_core::config::SavedHandoffInput {
+        id: "handoff-2".to_string(),
+        name: "Test Handoff 2".to_string(),
+        bundle: bundle2,
+    };
+    store.save_handoff(&input2).await.unwrap();
+
+    let list = store.list_handoffs().await.unwrap();
+    assert_eq!(list.len(), 2);
+
+    // Verify metadata is present but bundle is not loaded
+    let meta1 = list.iter().find(|m| m.id == "handoff-1").unwrap();
+    assert_eq!(meta1.name, "Test Handoff 1");
+    assert_eq!(meta1.source_model, Some("gpt-4o".to_string()));
+    assert_eq!(meta1.source_provider, Some("openai".to_string()));
+    assert_eq!(meta1.size_estimate_tokens, 1000);
+}
+
+#[tokio::test]
+async fn test_saved_handoff_update_replace() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let bundle1 = create_test_handoff_bundle("test1");
+    let input1 = iron_core::config::SavedHandoffInput {
+        id: "handoff-1".to_string(),
+        name: "Original Name".to_string(),
+        bundle: bundle1.clone(),
+    };
+    store.save_handoff(&input1).await.unwrap();
+
+    let original = store.load_handoff("handoff-1").await.unwrap().unwrap();
+    let original_created = original.metadata.created_at;
+
+    // Small delay to ensure updated_at changes
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let mut bundle2 = create_test_handoff_bundle("test2");
+    bundle2.handoff_note = "Updated note".to_string();
+    let input2 = iron_core::config::SavedHandoffInput {
+        id: "handoff-1".to_string(),
+        name: "Updated Name".to_string(),
+        bundle: bundle2.clone(),
+    };
+    store.save_handoff(&input2).await.unwrap();
+
+    let updated = store.load_handoff("handoff-1").await.unwrap().unwrap();
+    assert_eq!(updated.metadata.name, "Updated Name");
+    assert_eq!(updated.bundle.handoff_note, "Updated note");
+    assert_eq!(updated.metadata.created_at, original_created);
+    assert!(updated.metadata.updated_at > original_created);
+}
+
+#[tokio::test]
+async fn test_saved_handoff_delete() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let bundle = create_test_handoff_bundle("test1");
+    let input = iron_core::config::SavedHandoffInput {
+        id: "handoff-1".to_string(),
+        name: "Test Handoff".to_string(),
+        bundle,
+    };
+    store.save_handoff(&input).await.unwrap();
+    assert!(store.load_handoff("handoff-1").await.unwrap().is_some());
+
+    store.delete_handoff("handoff-1").await.unwrap();
+    assert!(store.load_handoff("handoff-1").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_saved_handoff_empty_id_rejected() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let bundle = create_test_handoff_bundle("test1");
+    let input = iron_core::config::SavedHandoffInput {
+        id: "".to_string(),
+        name: "Test".to_string(),
+        bundle,
+    };
+    let err = store.save_handoff(&input).await.unwrap_err();
+    assert!(
+        matches!(err, iron_core::config::ConfigError::Validation(ref msg) if msg.contains("Handoff ID"))
+    );
+}
+
+#[tokio::test]
+async fn test_saved_handoff_empty_name_rejected() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let bundle = create_test_handoff_bundle("test1");
+    let input = iron_core::config::SavedHandoffInput {
+        id: "handoff-1".to_string(),
+        name: "".to_string(),
+        bundle,
+    };
+    let err = store.save_handoff(&input).await.unwrap_err();
+    assert!(
+        matches!(err, iron_core::config::ConfigError::Validation(ref msg) if msg.contains("Handoff name"))
+    );
+}
+
+#[tokio::test]
+async fn test_saved_handoff_unsupported_version_rejected() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let mut bundle = create_test_handoff_bundle("test1");
+    bundle.version = "99".to_string();
+    let input = iron_core::config::SavedHandoffInput {
+        id: "handoff-1".to_string(),
+        name: "Test".to_string(),
+        bundle,
+    };
+    let err = store.save_handoff(&input).await.unwrap_err();
+    assert!(
+        matches!(err, iron_core::config::ConfigError::Validation(ref msg) if msg.contains("Unsupported handoff bundle version"))
+    );
+}
+
+#[tokio::test]
+async fn test_saved_handoff_malformed_bundle_rejected_on_load() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    // Insert a malformed bundle directly into the database
+    sqlx::query(
+        "INSERT INTO saved_handoffs (id, name, bundle_json, bundle_version, source_session_id, source_model, source_provider, size_estimate_tokens, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind("bad-handoff")
+    .bind("Bad Handoff")
+    .bind("{invalid json")
+    .bind("1")
+    .bind::<Option<String>>(None)
+    .bind::<Option<String>>(None)
+    .bind::<Option<String>>(None)
+    .bind(0i64)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let err = store.load_handoff("bad-handoff").await.unwrap_err();
+    assert!(matches!(
+        err,
+        iron_core::config::ConfigError::Deserialization(_)
+    ));
+}
+
+#[tokio::test]
+async fn test_saved_handoff_unsupported_version_rejected_on_load() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    // Insert a bundle with unsupported version directly into the database
+    sqlx::query(
+        "INSERT INTO saved_handoffs (id, name, bundle_json, bundle_version, source_session_id, source_model, source_provider, size_estimate_tokens, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind("old-handoff")
+    .bind("Old Handoff")
+    .bind(r#"{"version":"0","instructions":null,"handoff_note":"","compressed_blocks":[],"recent_tail":[],"skill_state":{"active":[]},"metadata":{"version":"0","source_model":"","source_provider":null,"source_session_id":"","size_estimate_tokens":0},"model_switch_history":[],"current_model":null,"current_provider_slug":null,"current_provider_api_key":null,"hidden_tools":[]}"#)
+    .bind("0")
+    .bind::<Option<String>>(None)
+    .bind::<Option<String>>(None)
+    .bind::<Option<String>>(None)
+    .bind(0i64)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let err = store.load_handoff("old-handoff").await.unwrap_err();
+    assert!(
+        matches!(err, iron_core::config::ConfigError::Validation(ref msg) if msg.contains("Unsupported stored handoff bundle version"))
+    );
+}
+
+#[tokio::test]
+async fn test_saved_handoff_migration_preserves_existing_data() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    // Create a profile before the migration would run (it already ran during open)
+    let profile = ProfileInput {
+        id: "migration-test-profile".to_string(),
+        schema_version: 1,
+        payload: json!({"name": "Test Profile"}),
+    };
+    store.set_profile(&profile).await.unwrap();
+
+    // Verify profile still exists
+    let retrieved = store.get_profile("migration-test-profile").await.unwrap();
+    assert!(retrieved.is_some());
+
+    // Verify saved handoff table exists and works
+    let bundle = create_test_handoff_bundle("migration-test");
+    let input = iron_core::config::SavedHandoffInput {
+        id: "migration-handoff".to_string(),
+        name: "Migration Test Handoff".to_string(),
+        bundle,
+    };
+    store.save_handoff(&input).await.unwrap();
+
+    let loaded = store.load_handoff("migration-handoff").await.unwrap();
+    assert!(loaded.is_some());
 }
