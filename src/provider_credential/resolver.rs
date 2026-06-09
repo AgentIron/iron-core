@@ -9,12 +9,15 @@ use crate::provider_credential::domain::{
     CredentialMode, OAuthTokenSet, ProviderAuthError, ProviderAuthResult, ProviderAuthStatus,
     ProviderPromptContext, ProviderSlug, ResolvedCredential, StoredCredential,
 };
+use crate::provider_credential::durable_store::FallibleCredentialStore;
 use crate::provider_credential::oauth::{refresh_access_token, v1_oauth_metadata};
 use crate::provider_credential::store::DynCredentialStore;
 use iron_providers::ProviderCredential;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tracing::warn;
 
 /// Margin before expiry to trigger proactive refresh.
 pub const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
@@ -28,8 +31,13 @@ pub struct CredentialSupport {
 
 /// Resolves provider credentials for a prompt from stored state and optional
 /// client-supplied API keys.
+///
+/// When a [`FallibleCredentialStore`] is provided, durable store errors are
+/// surfaced as [`ProviderAuthError::StoreError`] rather than being silently
+/// treated as missing credentials.
 pub struct CredentialResolver {
     store: DynCredentialStore,
+    fallible_store: Option<Arc<dyn FallibleCredentialStore>>,
     support_map: HashMap<String, CredentialSupport>,
     http_client: reqwest::Client,
     status_overrides: Mutex<HashMap<String, ProviderAuthStatus>>,
@@ -81,6 +89,25 @@ impl CredentialResolver {
     pub fn new(store: DynCredentialStore) -> Self {
         Self {
             store,
+            fallible_store: None,
+            support_map: build_v1_support_map(),
+            http_client: reqwest::Client::new(),
+            status_overrides: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Create a new resolver with a fallible store that surfaces durable errors.
+    ///
+    /// When constructed this way, credential lookups and mutations that encounter
+    /// database, encryption, or key-source failures return
+    /// [`ProviderAuthError::StoreError`] instead of silently returning `None`.
+    pub fn with_fallible_store(
+        store: DynCredentialStore,
+        fallible: Arc<dyn FallibleCredentialStore>,
+    ) -> Self {
+        Self {
+            store,
+            fallible_store: Some(fallible),
             support_map: build_v1_support_map(),
             http_client: reqwest::Client::new(),
             status_overrides: Mutex::new(HashMap::new()),
@@ -138,7 +165,16 @@ impl CredentialResolver {
         }
 
         // Look up OAuth credential from store
-        let stored = self.store.get(&context.provider_slug).await;
+        let stored = if let Some(ref fallible) = self.fallible_store {
+            fallible.get(&context.provider_slug).await.map_err(|e| {
+                ProviderAuthError::StoreError {
+                    provider: slug_str.to_string(),
+                    reason: e.to_string(),
+                }
+            })?
+        } else {
+            self.store.get(&context.provider_slug).await
+        };
 
         match stored {
             Some(StoredCredential::ApiKey(key)) => {
@@ -199,6 +235,8 @@ impl CredentialResolver {
     /// Derive the client-visible auth status for a provider.
     ///
     /// This checks both the optional API key and the stored OAuth credential.
+    /// When a fallible store is configured, store errors are logged but do not
+    /// propagate — status returns `NotConfigured` on failure.
     pub async fn status(&self, slug: &ProviderSlug, api_key: Option<&str>) -> ProviderAuthStatus {
         let slug_str = slug.as_str();
         let support = self.support_for(slug_str);
@@ -211,7 +249,19 @@ impl CredentialResolver {
             };
         }
 
-        match self.store.get(slug).await {
+        let stored = if let Some(ref fallible) = self.fallible_store {
+            match fallible.get(slug).await {
+                Ok(cred) => cred,
+                Err(e) => {
+                    warn!(provider = %slug.as_str(), error = %e, "Fallible credential store error in status()");
+                    return ProviderAuthStatus::NotConfigured;
+                }
+            }
+        } else {
+            self.store.get(slug).await
+        };
+
+        match stored {
             Some(StoredCredential::ApiKey(_)) => {
                 if support.api_key {
                     ProviderAuthStatus::ConfiguredApiKey
@@ -242,9 +292,27 @@ impl CredentialResolver {
 
     /// Remove OAuth credential for a provider without touching API keys.
     pub async fn disconnect_oauth(&self, slug: &ProviderSlug) {
-        // Only remove if the stored credential is OAuth
-        if let Some(StoredCredential::OAuthBearer(_)) = self.store.get(slug).await {
-            self.store.remove(slug).await;
+        let stored = if let Some(ref fallible) = self.fallible_store {
+            match fallible.get(slug).await {
+                Ok(cred) => cred,
+                Err(e) => {
+                    warn!(provider = %slug.as_str(), error = %e, "Fallible credential store error reading credential in disconnect_oauth()");
+                    self.clear_status_override(slug.as_str());
+                    return;
+                }
+            }
+        } else {
+            self.store.get(slug).await
+        };
+
+        if let Some(StoredCredential::OAuthBearer(_)) = stored {
+            if let Some(ref fallible) = self.fallible_store {
+                if let Err(e) = fallible.remove(slug).await {
+                    warn!(provider = %slug.as_str(), error = %e, "Fallible credential store error removing credential in disconnect_oauth()");
+                }
+            } else {
+                self.store.remove(slug).await;
+            }
         }
         self.clear_status_override(slug.as_str());
     }
@@ -294,7 +362,17 @@ impl CredentialResolver {
         &self,
         slug: &ProviderSlug,
     ) -> ProviderAuthResult<ResolvedCredential> {
-        let stored = self.store.get(slug).await;
+        let stored = if let Some(ref fallible) = self.fallible_store {
+            fallible
+                .get(slug)
+                .await
+                .map_err(|e| ProviderAuthError::StoreError {
+                    provider: slug.as_str().to_string(),
+                    reason: e.to_string(),
+                })?
+        } else {
+            self.store.get(slug).await
+        };
 
         match stored {
             Some(StoredCredential::OAuthBearer(tokens)) => {
@@ -350,9 +428,19 @@ impl CredentialResolver {
         let new_set = result.into_token_set(Some(tokens.refresh_token.clone()));
 
         // Persist the refreshed credential
-        self.store
-            .set(slug, StoredCredential::OAuthBearer(new_set.clone()))
-            .await;
+        if let Some(ref fallible) = self.fallible_store {
+            fallible
+                .set(slug, StoredCredential::OAuthBearer(new_set.clone()))
+                .await
+                .map_err(|e| ProviderAuthError::StoreError {
+                    provider: slug.as_str().to_string(),
+                    reason: e.to_string(),
+                })?;
+        } else {
+            self.store
+                .set(slug, StoredCredential::OAuthBearer(new_set.clone()))
+                .await;
+        }
 
         self.clear_status_override(slug.as_str());
         Ok(new_set)

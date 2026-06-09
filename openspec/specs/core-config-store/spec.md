@@ -1,13 +1,24 @@
-## ADDED Requirements
+## Purpose
+
+Define the durable, core-owned AgentIron configuration store used for profiles, prompts, schedules, domain-scoped opaque settings, and encrypted provider credentials.
+
+## Requirements
 
 ### Requirement: Core exposes a durable config module
 
 The system SHALL provide a public `iron_core::config` module for durable AgentIron configuration owned by `iron-core`.
 
+The durable store API SHALL integrate with the existing `iron_core::config` runtime-configuration module without replacing or renaming existing `Config` and `ConfigSource` APIs. Durable-store internals MAY live in nested implementation modules, but callers SHALL be able to use `iron_core::config::ConfigStore` and related public config-store types.
+
 #### Scenario: Caller opens default config store
 - **WHEN** a caller invokes the default config store constructor
 - **THEN** the system opens the core-owned durable configuration store for the current OS user
 - **AND** the caller does not need to know the concrete storage backend
+
+#### Scenario: Existing runtime config remains available
+- **WHEN** callers use existing runtime configuration APIs such as `iron_core::config::Config` or `iron_core::config::ConfigSource`
+- **THEN** those APIs remain available in the `iron_core::config` module
+- **AND** durable-store additions do not force callers to migrate existing runtime configuration code
 
 #### Scenario: Caller opens explicit config path
 - **WHEN** a caller invokes the explicit-path config store constructor with a database path
@@ -48,8 +59,14 @@ The system SHALL use SQLite via `sqlx` as the initial default durable config bac
 
 The system SHALL resolve platform-default configuration database paths for Linux, macOS, and Windows.
 
-#### Scenario: Linux default path
+#### Scenario: Linux default path with XDG config home
 - **WHEN** the default config store is opened on Linux
+- **AND** `XDG_CONFIG_HOME` is set to a non-empty path
+- **THEN** the database path is `$XDG_CONFIG_HOME/agentiron/config.db`
+
+#### Scenario: Linux default path without XDG config home
+- **WHEN** the default config store is opened on Linux
+- **AND** `XDG_CONFIG_HOME` is unset or empty
 - **THEN** the database path is `~/.config/agentiron/config.db`
 
 #### Scenario: macOS default path
@@ -64,6 +81,8 @@ The system SHALL resolve platform-default configuration database paths for Linux
 
 The system SHALL own and apply migrations for the config schema when a config store is opened.
 
+Migrations SHALL be embedded in the compiled `iron-core` binary or otherwise compiled into crate code. The system SHALL NOT require external migration files to be packaged or discoverable at runtime.
+
 #### Scenario: Empty database opens
 - **WHEN** the config store opens an empty database
 - **THEN** migrations create the initial `profiles`, `prompts`, `credentials`, and `schedule` tables
@@ -76,9 +95,20 @@ The system SHALL own and apply migrations for the config schema when a config st
 - **WHEN** the config store opens a database at an older supported schema version
 - **THEN** pending migrations are applied before CRUD APIs are available
 
+#### Scenario: Runtime migration files are absent
+- **WHEN** the config store opens in an installed or packaged environment
+- **AND** no migration directory exists next to the executable or crate sources
+- **THEN** schema migration still succeeds using the compiled-in migrations
+
+#### Scenario: In-memory store opens
+- **WHEN** an in-memory config store is created for tests or embedders
+- **THEN** the same compiled-in migrations are applied to the in-memory database before CRUD APIs are available
+
 ### Requirement: Config APIs return actionable errors
 
 Config APIs SHALL return typed errors for expected failures and SHALL NOT panic for expected storage, migration, serialization, encryption, key-source, or concurrency failures.
+
+Public config APIs SHALL use `Result<T, ConfigError>` for fallible operations. Read-by-ID methods SHALL return `Result<Option<T>, ConfigError>` unless a method is explicitly documented as requiring existence, in which case missing records SHALL return `ConfigError::NotFound`.
 
 #### Scenario: Database cannot be opened
 - **WHEN** the config store cannot open the configured path
@@ -92,6 +122,10 @@ Config APIs SHALL return typed errors for expected failures and SHALL NOT panic 
 - **WHEN** a caller requests a record by ID and the record does not exist
 - **THEN** the API returns either `None` or a typed not-found error according to the method contract
 
+#### Scenario: Durable credential persistence fails
+- **WHEN** provider credential storage backed by the config store encounters key-source, encryption, decryption, database, or busy-timeout failure
+- **THEN** the failure is surfaced as a typed error rather than being collapsed into a missing credential or ignored write
+
 #### Scenario: Write lock times out
 - **WHEN** another `iron-core` process holds the write lock beyond the configured busy timeout
 - **THEN** the write operation returns an actionable busy-timeout error
@@ -99,6 +133,8 @@ Config APIs SHALL return typed errors for expected failures and SHALL NOT panic 
 ### Requirement: Config store supports opaque profile records
 
 The system SHALL provide async CRUD storage for profile records using stable identifiers and versioned opaque payloads, without defining final `AgentProfile` semantics in IC-1.
+
+Profile records SHALL use caller-provided non-empty string IDs, an integer `schema_version`, an opaque JSON payload, and created/updated timestamps maintained by the store.
 
 #### Scenario: Profile record roundtrips
 - **WHEN** a caller stores a profile record with an opaque payload and schema version
@@ -112,6 +148,8 @@ The system SHALL provide async CRUD storage for profile records using stable ide
 
 The system SHALL provide async CRUD storage for prompt records using stable identifiers and versioned opaque payloads or bodies, without defining final stored-prompt semantics in IC-1.
 
+Prompt records SHALL use caller-provided non-empty string IDs, an integer `schema_version`, an opaque JSON payload or body field, and created/updated timestamps maintained by the store.
+
 #### Scenario: Prompt record roundtrips
 - **WHEN** a caller stores a prompt record with an opaque payload or body and schema version
 - **THEN** the caller can retrieve the same record by stable ID
@@ -124,6 +162,8 @@ The system SHALL provide async CRUD storage for prompt records using stable iden
 
 The system SHALL provide async CRUD storage for schedule records using stable identifiers and versioned opaque payloads, without defining scheduler execution semantics in IC-1.
 
+Schedule records SHALL use caller-provided non-empty string IDs, an integer `schema_version`, an opaque JSON payload, and created/updated timestamps maintained by the store.
+
 #### Scenario: Schedule record roundtrips
 - **WHEN** a caller stores a schedule record with an opaque payload and schema version
 - **THEN** the caller can retrieve the same record by stable ID
@@ -131,6 +171,19 @@ The system SHALL provide async CRUD storage for schedule records using stable id
 #### Scenario: Scheduler semantics are deferred
 - **WHEN** IC-1 stores a schedule record
 - **THEN** the store does not require cron, recurrence, execution, or dispatch semantics that belong to IC-8
+
+### Requirement: Opaque record writes use replace semantics
+
+The profile, prompt, and schedule APIs SHALL support create/update operations that replace the stored opaque payload and schema version for a record ID while preserving the stable ID and updating the `updated_at` timestamp.
+
+#### Scenario: Opaque record is updated
+- **WHEN** a caller updates an existing profile, prompt, or schedule record by ID
+- **THEN** the store replaces the record payload and schema version atomically
+- **AND** the `updated_at` timestamp changes
+
+#### Scenario: Opaque record is deleted
+- **WHEN** a caller deletes a profile, prompt, or schedule record by ID
+- **THEN** subsequent read-by-ID calls return `Ok(None)` unless the API method explicitly requires existence
 
 ### Requirement: Config writes are transactional
 

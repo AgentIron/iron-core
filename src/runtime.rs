@@ -270,6 +270,30 @@ impl IronRuntime {
         runtime
     }
 
+    /// Create a new runtime with both infallible and fallible credential stores.
+    ///
+    /// When a fallible store is provided, the resolver surfaces durable store
+    /// errors (encryption failures, database busy, etc.) as actionable errors
+    /// rather than silently returning missing credentials.
+    pub fn new_with_fallible_credential_store<P>(
+        config: Config,
+        provider: P,
+        credential_store: DynCredentialStore,
+        fallible_store: Arc<dyn crate::provider_credential::FallibleCredentialStore>,
+    ) -> Self
+    where
+        P: Provider + 'static,
+    {
+        let mut runtime = Self::new(config, provider);
+        if let Some(inner) = Arc::get_mut(&mut runtime.inner) {
+            inner.resolver = Some(Arc::new(CredentialResolver::with_fallible_store(
+                credential_store,
+                fallible_store,
+            )));
+        }
+        runtime
+    }
+
     /// Create a new runtime using an existing Tokio runtime handle.
     pub fn from_handle<P>(config: Config, provider: P, handle: tokio::runtime::Handle) -> Self
     where
@@ -354,6 +378,28 @@ impl IronRuntime {
         let mut runtime = Self::from_handle(config, provider, handle);
         if let Some(inner) = Arc::get_mut(&mut runtime.inner) {
             inner.resolver = Some(Arc::new(CredentialResolver::new(credential_store)));
+        }
+        runtime
+    }
+
+    /// Create a new runtime using an existing Tokio runtime handle, with both
+    /// infallible and fallible credential stores.
+    pub fn from_handle_with_fallible_credential_store<P>(
+        config: Config,
+        provider: P,
+        handle: tokio::runtime::Handle,
+        credential_store: DynCredentialStore,
+        fallible_store: Arc<dyn crate::provider_credential::FallibleCredentialStore>,
+    ) -> Self
+    where
+        P: Provider + 'static,
+    {
+        let mut runtime = Self::from_handle(config, provider, handle);
+        if let Some(inner) = Arc::get_mut(&mut runtime.inner) {
+            inner.resolver = Some(Arc::new(CredentialResolver::with_fallible_store(
+                credential_store,
+                fallible_store,
+            )));
         }
         runtime
     }

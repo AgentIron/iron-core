@@ -7,9 +7,11 @@ The current provider credential design intentionally allowed app-owned storage. 
 ## Goals
 
 - Provide a public `iron_core::config` module for durable AgentIron configuration.
+- Add durable configuration APIs to the existing `iron_core::config` module without replacing existing runtime `Config`/`ConfigSource` APIs.
 - Make `ConfigStore` the public abstraction instead of exposing `ConfigDb` or SQL concepts.
 - Use SQLite via `sqlx` as the initial default backend and hard dependency.
 - Keep SQLite schema details private to `iron-core` except where documented for migration/debugging.
+- Compile migrations into the binary/crate code so installed applications do not need packaged migration files.
 - Store durable records needed by IC-1: profiles, prompts, provider credentials, and schedule entries.
 - Keep profile, prompt, and schedule payload semantics minimal/opaque until their dedicated issues define domain types.
 - Persist provider credentials through the existing provider credential boundary.
@@ -40,13 +42,15 @@ The API should group operations by config domain, for example credentials, profi
 
 All async operations should return `Result<T, ConfigError>`. Expected failures such as path resolution, directory creation, database open, migration, serialization, deserialization, key lookup, encryption, decryption, query, uniqueness conflict, not found, and busy timeout should be represented as errors rather than panics.
 
+The existing `iron_core::config` module already contains runtime configuration types such as `Config` and `ConfigSource`. IC-1 should add `ConfigStore` and related durable-store types to that module without renaming or removing the runtime configuration surface. Private implementation code may live in nested modules, but the caller-facing durable entry point should be `iron_core::config::ConfigStore`.
+
 ## SQLite Backend
 
 SQLite is the initial implementation and a hard dependency for IC-1. Use `sqlx` with SQLite support. `ConfigStore::open()` resolves the default path, creates parent directories, opens the database, applies migrations, and configures the connection/pool.
 
 Default paths:
 
-- Linux: `~/.config/agentiron/config.db`
+- Linux: `$XDG_CONFIG_HOME/agentiron/config.db` when `XDG_CONFIG_HOME` is set and non-empty; otherwise `~/.config/agentiron/config.db`
 - macOS: `~/Library/Application Support/com.agentiron/iron-core/config.db`
 - Windows: `%APPDATA%/AgentIron/config.db`
 
@@ -69,11 +73,17 @@ Recommended minimum shape:
 
 Migrations should be idempotent from a caller perspective: opening an existing older database applies pending migrations, and opening a current database is a no-op.
 
+Migration packaging decision: migrations must be embedded in the compiled `iron-core` binary or represented directly in crate code. `ConfigStore::open()`, `ConfigStore::open_at(path)`, and the in-memory/test constructor should all apply the same embedded migrations. The implementation must not depend on finding migration files at runtime because `iron-core` does not have a reliable packaging story for extra migration assets.
+
+Opaque profile, prompt, and schedule records should use caller-provided non-empty string IDs, an integer schema version, an opaque JSON payload/body, and store-maintained created/updated timestamps. IC-1 should use simple full-replace update semantics rather than patch semantics. Read-by-ID APIs should return `Result<Option<Record>, ConfigError>` unless a method explicitly documents that missing records are exceptional.
+
 ## Credential Storage Model
 
 Store at most one credential per provider. The provider slug should be unique in the credentials table. Setting an API key replaces an existing OAuth credential for that provider. Setting OAuth replaces an existing API key for that provider.
 
-This aligns the durable implementation with `ProviderCredentialStore::set(slug, credential)`. Provider orchestration may still prefer a caller-supplied API key over stored credentials for a prompt, but the core durable store itself does not retain both API-key and OAuth credential modes simultaneously for one provider.
+This aligns the durable implementation with `ProviderCredentialStore::set(slug, credential)`. Provider orchestration may still prefer a prompt-supplied or runtime-supplied API key over stored credentials for a prompt, but the core durable store itself does not retain both API-key and OAuth credential modes simultaneously for one provider. OAuth disconnect removes a stored OAuth credential and leaves a stored API-key credential unchanged, but it does not restore an API key that was previously replaced by OAuth in the durable store.
+
+The existing `ProviderCredentialStore` boundary is currently infallible. IC-1 should make the boundary fallible or introduce an equivalent fallible durable credential boundary so SQLite, key-source, encryption, decryption, serialization, and busy-timeout failures are not silently treated as missing credentials or ignored writes. In-memory and null stores can return successful simple results, but durable persistence must surface typed errors through provider credential orchestration.
 
 Credential rows should not expose secret material through list/status APIs. APIs that list configured providers may return provider slug, credential mode, status metadata, and timestamps, but not decrypted secrets.
 
@@ -93,12 +103,20 @@ Supported key sources for IC-1:
 
 If no valid key source is available, credential read/write operations should fail with a credential-key error. Non-secret config operations may continue to work. The implementation must not silently store credential payloads in plaintext.
 
-Environment variable details can be finalized during implementation, but requirements should include:
+Environment variable mode details:
 
-- The variable name is core-owned and documented.
-- The value must be validated before use.
-- Invalid, missing, or weakly formatted key material returns an actionable `ConfigError`.
+- The core-owned variable name is `AGENTIRON_CONFIG_ENCRYPTION_KEY`.
+- The value must be base64-encoded 32-byte key material.
+- Invalid base64, wrong key length, missing values in environment-key mode, or otherwise unusable key material return an actionable `ConfigError`/credential key error.
 - Debug/log/error output must not include the key value.
+
+Credential encryption details:
+
+- Use an authenticated encryption scheme with 32-byte keys and random per-row nonces, such as XChaCha20-Poly1305.
+- Store nonce and algorithm/key metadata needed for future migration alongside the encrypted payload.
+- Include non-secret associated data such as provider slug, credential mode, and credential payload schema version where practical so encrypted rows are bound to their metadata.
+- Corrupt ciphertext, authentication failure, unknown algorithm, unsupported encryption metadata, or key mismatch should return typed decryption/key errors rather than panicking or returning plaintext.
+- Key rotation is out of scope for IC-1, but row metadata should not prevent a future rotation/migration path.
 
 ## Relationship to Provider Credential Orchestration
 

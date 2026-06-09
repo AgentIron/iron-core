@@ -6,16 +6,18 @@ This change makes `iron-core` the owner of AgentIron durable configuration. The 
 
 ## What Changes
 
-- Add a public `iron_core::config` module with `ConfigStore::open()`, `ConfigStore::open_at(path)`, and an in-memory/test constructor.
+- Extend the public `iron_core::config` module with `ConfigStore::open()`, `ConfigStore::open_at(path)`, and an in-memory/test constructor.
+- Integrate `ConfigStore` into the existing `iron_core::config` module without removing or renaming existing runtime `Config` APIs.
 - Provide a SQLite-backed default durable store behind the `ConfigStore` API using `sqlx`.
 - Create and migrate the initial schema for `profiles`, `prompts`, `credentials`, and `schedule`.
+- Compile migrations into the binary/crate code rather than relying on packaged external migration files; in-memory stores use the same migrations.
 - Keep profile, prompt, and schedule records intentionally minimal/opaque in IC-1; IC-2, IC-6, and IC-8 define their domain semantics later.
 - Provide async config-domain CRUD APIs that return typed `Result` errors rather than panicking.
-- Implement the existing `ProviderCredentialStore` boundary using `ConfigStore` credentials so provider credentials can persist without frontend-owned storage.
+- Make the provider credential store boundary fallible and implement it using `ConfigStore` credentials so provider credentials can persist without frontend-owned storage while surfacing SQLite/key/encryption failures.
 - Store at most one credential per provider; setting a new credential for a provider replaces any prior credential for that provider, regardless of mode.
 - Encrypt credential payloads at rest before writing SQLite rows.
 - Support credential encryption keys from OS keyring by default and from an explicit environment variable mode for headless Linux/cron operation.
-- Resolve platform-default config paths for Linux, macOS, and Windows and create parent directories as needed.
+- Resolve platform-default config paths for Linux, macOS, and Windows, honor `XDG_CONFIG_HOME` on Linux, and create parent directories as needed.
 - Configure SQLite for multiple `iron-core` processes with WAL, transactional writes, and a finite busy timeout.
 
 ## Capabilities
@@ -30,7 +32,7 @@ This change makes `iron-core` the owner of AgentIron durable configuration. The 
 
 ## Impact
 
-- **Core API**: new public `iron_core::config` module, `ConfigStore` type, domain record/input types, grouped config APIs, and `ConfigError`.
+- **Core API**: existing public `iron_core::config` module gains `ConfigStore`, domain record/input types, grouped config APIs, and `ConfigError`.
 - **Storage**: new hard SQLite dependency through `sqlx`; schema and migrations are owned by `iron-core`.
 - **Credentials**: `iron-core` owns the default durable credential store and encryption-at-rest policy; existing in-memory/client-supplied stores remain supported.
 - **Platform behavior**: `ConfigStore::open()` uses OS-specific application config locations; explicit paths and in-memory stores support tests and embedders.
