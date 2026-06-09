@@ -100,6 +100,8 @@ pub struct CustomModelRecord {
     pub supports_tool_calls: bool,
     pub supports_reasoning: bool,
     pub supports_vision: bool,
+    pub supports_streaming: bool,
+    pub reasoning_effort_values: Vec<String>,
     pub cost_input_per_million: Option<f64>,
     pub cost_output_per_million: Option<f64>,
     pub created_at: DateTime<Utc>,
@@ -117,6 +119,8 @@ pub struct CustomModelInput {
     pub supports_tool_calls: bool,
     pub supports_reasoning: bool,
     pub supports_vision: bool,
+    pub supports_streaming: bool,
+    pub reasoning_effort_values: Vec<String>,
     pub cost_input_per_million: Option<f64>,
     pub cost_output_per_million: Option<f64>,
 }

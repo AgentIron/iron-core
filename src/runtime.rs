@@ -240,6 +240,7 @@ impl IronRuntime {
         }
 
         this.register_compress_tool();
+        this.hydrate_builtin_model_capability_registry();
 
         // Emit runtime configuration debug event (new())
         let config_event = crate::debug::redact_config(&this.inner.config);
@@ -350,6 +351,7 @@ impl IronRuntime {
         }
 
         this.register_compress_tool();
+        this.hydrate_builtin_model_capability_registry();
 
         // Emit runtime configuration debug event
         let config_event = crate::debug::redact_config(&this.inner.config);
@@ -1293,6 +1295,12 @@ impl IronRuntime {
             .get(source_provider_id, source_model_id)
             .cloned();
         let target_caps = cap_registry.get(target_provider_id, &to_model).cloned();
+        if target_caps.is_none() {
+            return Err(RuntimeError::Connection(format!(
+                "Unknown target model '{}/{}': not present in the model capability registry",
+                target_provider_id, to_model
+            )));
+        }
         drop(cap_registry);
 
         let plan = crate::context::model_switch::ModelSwitchPlanner::create_plan_with_capabilities(
@@ -1566,6 +1574,62 @@ impl IronRuntime {
             .model_capability_registry
             .write()
             .register(metadata);
+    }
+
+    /// Hydrate the model capability registry with compiled-in built-in model metadata.
+    fn hydrate_builtin_model_capability_registry(&self) {
+        use crate::config::builtin_models::builtin_model_catalog;
+
+        let mut registry = self.inner.model_capability_registry.write();
+        for entry in builtin_model_catalog() {
+            let metadata = crate::context::model_switch::ModelCapabilityMetadata {
+                model: entry.model_id,
+                provider: entry.provider_slug,
+                context_window: entry.context_window.unwrap_or(0),
+                supports_tools: entry.supports_tool_calls,
+                supports_streaming: entry.supports_streaming,
+                supports_reasoning_effort: entry.supports_reasoning,
+                reasoning_effort_values: entry.reasoning_effort_values,
+                supported_modalities: entry.supported_modalities,
+                unsupported_tools: entry.unsupported_tools,
+            };
+            registry.register(metadata);
+        }
+    }
+
+    /// Hydrate the model capability registry from a runtime settings snapshot.
+    ///
+    /// This builds the effective model catalog from built-in provider metadata
+    /// and ConfigStore custom model records, then registers every entry into
+    /// the in-memory capability registry so that model switches and capability
+    /// diffs can reason about both built-in and custom models.
+    pub fn hydrate_model_capability_registry(
+        &self,
+        settings: &crate::config::RuntimeSettingsSnapshot,
+    ) -> Result<(), crate::config::ConfigError> {
+        use crate::config::builtin_models::builtin_model_catalog;
+        use crate::config::effective_catalog::build_effective_catalog;
+
+        let catalog = build_effective_catalog(&builtin_model_catalog(), &settings.custom_models)?;
+
+        let mut registry = self.inner.model_capability_registry.write();
+        *registry = crate::context::model_switch::ModelCapabilityRegistry::new();
+        for entry in catalog.all_entries() {
+            let metadata = crate::context::model_switch::ModelCapabilityMetadata::from(entry);
+            registry.register(metadata);
+        }
+
+        Ok(())
+    }
+
+    /// Return a read lock on the model capability registry.
+    ///
+    /// Exposed primarily for tests and diagnostics.
+    pub fn model_capability_registry(
+        &self,
+    ) -> parking_lot::RwLockReadGuard<'_, crate::context::model_switch::ModelCapabilityRegistry>
+    {
+        self.inner.model_capability_registry.read()
     }
 
     pub fn cancel_active_prompt(&self, session_id: SessionId) -> bool {
@@ -2678,5 +2742,148 @@ mod tests {
         assert_eq!(config.allowed_roots, session_roots);
         // Other fields should be preserved from base
         assert_eq!(config.max_output_bytes, base_config.max_output_bytes);
+    }
+
+    // ============================================================================
+    // Model capability registry hydration tests (issue #68)
+    // ============================================================================
+
+    #[test]
+    fn runtime_startup_registers_builtin_model_capabilities() {
+        let runtime = IronRuntime::new(Config::default(), MockProvider);
+
+        let registry = runtime.model_capability_registry();
+        assert!(registry.get("openai", "gpt-4o").is_some());
+        assert!(registry
+            .get("anthropic", "claude-3-7-sonnet-20250219")
+            .is_some());
+    }
+
+    #[test]
+    fn hydrate_model_capability_registry_loads_builtin_models() {
+        let runtime = IronRuntime::new(Config::default(), MockProvider);
+        let settings = crate::config::RuntimeSettingsSnapshot {
+            provider_configs: vec![],
+            custom_models: vec![],
+            default_model: None,
+            mcp_servers: vec![],
+            skill_settings: crate::config::SkillSettingsRecord {
+                trust_project_skills: false,
+                additional_skill_dirs: vec![],
+                updated_at: chrono::Utc::now(),
+            },
+        };
+
+        runtime
+            .hydrate_model_capability_registry(&settings)
+            .unwrap();
+
+        let registry = runtime.model_capability_registry();
+        assert!(
+            registry.get("openai", "gpt-4o").is_some(),
+            "Built-in openai/gpt-4o should be registered"
+        );
+        assert!(
+            registry
+                .get("anthropic", "claude-3-7-sonnet-20250219")
+                .is_some(),
+            "Built-in anthropic/sonnet should be registered"
+        );
+    }
+
+    #[test]
+    fn hydrate_model_capability_registry_loads_custom_models() {
+        use chrono::Utc;
+
+        let runtime = IronRuntime::new(Config::default(), MockProvider);
+        let settings = crate::config::RuntimeSettingsSnapshot {
+            provider_configs: vec![],
+            custom_models: vec![crate::config::CustomModelRecord {
+                provider_slug: "openai".to_string(),
+                model_id: "custom-model".to_string(),
+                display_name: "Custom Model".to_string(),
+                context_window: Some(256_000),
+                output_limit: Some(8_192),
+                supports_tool_calls: true,
+                supports_reasoning: true,
+                supports_vision: true,
+                supports_streaming: false,
+                reasoning_effort_values: vec!["low".to_string(), "high".to_string()],
+                cost_input_per_million: Some(5.0),
+                cost_output_per_million: Some(15.0),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }],
+            default_model: None,
+            mcp_servers: vec![],
+            skill_settings: crate::config::SkillSettingsRecord {
+                trust_project_skills: false,
+                additional_skill_dirs: vec![],
+                updated_at: chrono::Utc::now(),
+            },
+        };
+
+        runtime
+            .hydrate_model_capability_registry(&settings)
+            .unwrap();
+
+        let registry = runtime.model_capability_registry();
+        let custom = registry.get("openai", "custom-model").unwrap();
+        assert_eq!(custom.context_window, 256_000);
+        assert!(custom.supports_tools);
+        assert!(!custom.supports_streaming);
+        assert!(custom.supports_reasoning_effort);
+        assert_eq!(custom.reasoning_effort_values, vec!["low", "high"]);
+    }
+
+    #[test]
+    fn hydrate_model_capability_registry_enables_capability_diffs() {
+        use chrono::Utc;
+
+        let runtime = IronRuntime::new(Config::default(), MockProvider);
+        let settings = crate::config::RuntimeSettingsSnapshot {
+            provider_configs: vec![],
+            custom_models: vec![crate::config::CustomModelRecord {
+                provider_slug: "custom-provider".to_string(),
+                model_id: "custom-model".to_string(),
+                display_name: "Custom".to_string(),
+                context_window: Some(50_000),
+                output_limit: Some(4_096),
+                supports_tool_calls: false,
+                supports_reasoning: false,
+                supports_vision: false,
+                supports_streaming: true,
+                reasoning_effort_values: vec![],
+                cost_input_per_million: None,
+                cost_output_per_million: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }],
+            default_model: None,
+            mcp_servers: vec![],
+            skill_settings: crate::config::SkillSettingsRecord {
+                trust_project_skills: false,
+                additional_skill_dirs: vec![],
+                updated_at: chrono::Utc::now(),
+            },
+        };
+
+        runtime
+            .hydrate_model_capability_registry(&settings)
+            .unwrap();
+
+        let registry = runtime.model_capability_registry();
+        let diff = registry
+            .compare("openai", "gpt-4o", "custom-provider", "custom-model")
+            .expect("Both models should be present in the hydrated registry");
+
+        assert!(
+            diff.window_shrink.is_some(),
+            "Expected window shrink from 128k to 50k"
+        );
+        assert!(
+            !diff.tools_supported,
+            "Expected custom model to be marked as lacking tool support"
+        );
     }
 }

@@ -646,6 +646,26 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// Return the union of built-in provider slugs and persisted provider config slugs.
+    pub async fn known_provider_slugs(
+        &self,
+    ) -> Result<std::collections::HashSet<String>, ConfigError> {
+        let mut slugs = std::collections::HashSet::new();
+
+        // Built-in providers from iron-providers
+        let registry = iron_providers::ProviderRegistry::default();
+        for slug in registry.slugs() {
+            slugs.insert(slug.to_string());
+        }
+
+        // Persisted provider configs
+        for config in self.list_provider_configs().await? {
+            slugs.insert(config.provider_slug);
+        }
+
+        Ok(slugs)
+    }
+
     // ============================================================================
     // Custom Model APIs
     // ============================================================================
@@ -685,11 +705,35 @@ impl ConfigStore {
             input.cost_output_per_million,
             "Output cost per million",
         )?;
+
+        // Validate provider slug is known (built-in or persisted provider config)
+        let known_slugs = self.known_provider_slugs().await?;
+        if !known_slugs.contains(&input.provider_slug) {
+            return Err(ConfigError::Validation(format!(
+                "Provider slug '{}' is not recognized. Add a provider config first or use a built-in provider slug.",
+                input.provider_slug
+            )));
+        }
+
+        // Enforce extend-only semantics: custom models must not shadow built-ins.
+        let empty_custom_models: Vec<CustomModelRecord> = Vec::new();
+        let builtin_catalog = super::effective_catalog::build_effective_catalog(
+            &super::builtin_models::builtin_model_catalog(),
+            &empty_custom_models,
+        )?;
+        if builtin_catalog.contains(&input.provider_slug, &input.model_id) {
+            return Err(ConfigError::Validation(format!(
+                "Custom model ({} / {}) conflicts with a built-in model id",
+                input.provider_slug, input.model_id
+            )));
+        }
+
+        let reasoning_json = serde_json::to_string(&input.reasoning_effort_values)?;
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             r#"
-            INSERT INTO custom_models (provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, cost_input_per_million, cost_output_per_million, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO custom_models (provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, supports_streaming, reasoning_effort_values_json, cost_input_per_million, cost_output_per_million, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(provider_slug, model_id) DO UPDATE SET
                 display_name = excluded.display_name,
                 context_window = excluded.context_window,
@@ -697,6 +741,8 @@ impl ConfigStore {
                 supports_tool_calls = excluded.supports_tool_calls,
                 supports_reasoning = excluded.supports_reasoning,
                 supports_vision = excluded.supports_vision,
+                supports_streaming = excluded.supports_streaming,
+                reasoning_effort_values_json = excluded.reasoning_effort_values_json,
                 cost_input_per_million = excluded.cost_input_per_million,
                 cost_output_per_million = excluded.cost_output_per_million,
                 updated_at = excluded.updated_at
@@ -710,6 +756,8 @@ impl ConfigStore {
         .bind(input.supports_tool_calls)
         .bind(input.supports_reasoning)
         .bind(input.supports_vision)
+        .bind(input.supports_streaming)
+        .bind(reasoning_json)
         .bind(input.cost_input_per_million)
         .bind(input.cost_output_per_million)
         .bind(&now)
@@ -727,6 +775,8 @@ impl ConfigStore {
             supports_tool_calls: input.supports_tool_calls,
             supports_reasoning: input.supports_reasoning,
             supports_vision: input.supports_vision,
+            supports_streaming: input.supports_streaming,
+            reasoning_effort_values: input.reasoning_effort_values.clone(),
             cost_input_per_million: input.cost_input_per_million,
             cost_output_per_million: input.cost_output_per_million,
             created_at: Utc::now(),
@@ -741,7 +791,7 @@ impl ConfigStore {
         model_id: &str,
     ) -> Result<Option<CustomModelRecord>, ConfigError> {
         let row = sqlx::query(
-            "SELECT provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, cost_input_per_million, cost_output_per_million, created_at, updated_at FROM custom_models WHERE provider_slug = ? AND model_id = ?",
+            "SELECT provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, supports_streaming, reasoning_effort_values_json, cost_input_per_million, cost_output_per_million, created_at, updated_at FROM custom_models WHERE provider_slug = ? AND model_id = ?",
         )
         .bind(provider_slug)
         .bind(model_id)
@@ -754,13 +804,15 @@ impl ConfigStore {
                 provider_slug: row.get("provider_slug"),
                 model_id: row.get("model_id"),
                 display_name: row.get("display_name"),
-                context_window: row
-                    .get::<Option<i64>, _>("context_window")
-                    .map(|v| v as u32),
-                output_limit: row.get::<Option<i64>, _>("output_limit").map(|v| v as u32),
+                context_window: normalize_optional_u32(row.get::<Option<i64>, _>("context_window")),
+                output_limit: normalize_optional_u32(row.get::<Option<i64>, _>("output_limit")),
                 supports_tool_calls: row.get::<i64, _>("supports_tool_calls") != 0,
                 supports_reasoning: row.get::<i64, _>("supports_reasoning") != 0,
                 supports_vision: row.get::<i64, _>("supports_vision") != 0,
+                supports_streaming: row.get::<i64, _>("supports_streaming") != 0,
+                reasoning_effort_values: parse_reasoning_effort_values(
+                    row.get::<Option<String>, _>("reasoning_effort_values_json"),
+                )?,
                 cost_input_per_million: row.get("cost_input_per_million"),
                 cost_output_per_million: row.get("cost_output_per_million"),
                 created_at: parse_datetime(row.get::<String, _>("created_at"))?,
@@ -777,7 +829,7 @@ impl ConfigStore {
     ) -> Result<Vec<CustomModelRecord>, ConfigError> {
         let rows = if let Some(slug) = provider_slug {
             sqlx::query(
-                "SELECT provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, cost_input_per_million, cost_output_per_million, created_at, updated_at FROM custom_models WHERE provider_slug = ? ORDER BY updated_at DESC",
+                "SELECT provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, supports_streaming, reasoning_effort_values_json, cost_input_per_million, cost_output_per_million, created_at, updated_at FROM custom_models WHERE provider_slug = ? ORDER BY updated_at DESC",
             )
             .bind(slug)
             .fetch_all(&self.pool)
@@ -785,7 +837,7 @@ impl ConfigStore {
             .map_err(ConfigError::from)?
         } else {
             sqlx::query(
-                "SELECT provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, cost_input_per_million, cost_output_per_million, created_at, updated_at FROM custom_models ORDER BY updated_at DESC",
+                "SELECT provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, supports_streaming, reasoning_effort_values_json, cost_input_per_million, cost_output_per_million, created_at, updated_at FROM custom_models ORDER BY updated_at DESC",
             )
             .fetch_all(&self.pool)
             .await
@@ -798,13 +850,17 @@ impl ConfigStore {
                     provider_slug: row.get("provider_slug"),
                     model_id: row.get("model_id"),
                     display_name: row.get("display_name"),
-                    context_window: row
-                        .get::<Option<i64>, _>("context_window")
-                        .map(|v| v as u32),
-                    output_limit: row.get::<Option<i64>, _>("output_limit").map(|v| v as u32),
+                    context_window: normalize_optional_u32(
+                        row.get::<Option<i64>, _>("context_window"),
+                    ),
+                    output_limit: normalize_optional_u32(row.get::<Option<i64>, _>("output_limit")),
                     supports_tool_calls: row.get::<i64, _>("supports_tool_calls") != 0,
                     supports_reasoning: row.get::<i64, _>("supports_reasoning") != 0,
                     supports_vision: row.get::<i64, _>("supports_vision") != 0,
+                    supports_streaming: row.get::<i64, _>("supports_streaming") != 0,
+                    reasoning_effort_values: parse_reasoning_effort_values(
+                        row.get::<Option<String>, _>("reasoning_effort_values_json"),
+                    )?,
                     cost_input_per_million: row.get("cost_input_per_million"),
                     cost_output_per_million: row.get("cost_output_per_million"),
                     created_at: parse_datetime(row.get::<String, _>("created_at"))?,
@@ -848,6 +904,20 @@ impl ConfigStore {
                 "Model ID must not be empty".to_string(),
             ));
         }
+
+        // Validate that the requested default model exists in the effective catalog.
+        let custom_models = self.list_custom_models(None).await?;
+        let catalog = super::effective_catalog::build_effective_catalog(
+            &super::builtin_models::builtin_model_catalog(),
+            &custom_models,
+        )?;
+        if !catalog.contains(&input.provider_slug, &input.model_id) {
+            return Err(ConfigError::Validation(format!(
+                "Default model ({} / {}) is not present in the model catalog",
+                input.provider_slug, input.model_id
+            )));
+        }
+
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             r#"
@@ -1145,6 +1215,18 @@ impl ConfigStore {
         let mcp_servers = self.list_mcp_servers().await?;
         let skill_settings = self.get_skill_settings().await?;
 
+        // Validate all persisted custom models reference known provider slugs.
+        let known_provider_slugs = self.known_provider_slugs().await?;
+        if let Some(model) = custom_models
+            .iter()
+            .find(|model| !known_provider_slugs.contains(&model.provider_slug))
+        {
+            return Err(ConfigError::Validation(format!(
+                "Custom model ({} / {}) references an unknown provider slug",
+                model.provider_slug, model.model_id
+            )));
+        }
+
         // Validate cross-record consistency
         if let Some(ref default) = default_model {
             if default.provider_slug.trim().is_empty() {
@@ -1156,6 +1238,18 @@ impl ConfigStore {
                 return Err(ConfigError::Validation(
                     "Default model ID is empty".to_string(),
                 ));
+            }
+
+            // Validate default model exists in effective catalog (built-in + custom)
+            let catalog = super::effective_catalog::build_effective_catalog(
+                &super::builtin_models::builtin_model_catalog(),
+                &custom_models,
+            )?;
+            if !catalog.contains(&default.provider_slug, &default.model_id) {
+                return Err(ConfigError::Validation(format!(
+                    "Default model ({} / {}) is not present in the model catalog",
+                    default.provider_slug, default.model_id
+                )));
             }
         }
 
@@ -1197,6 +1291,23 @@ fn parse_datetime(s: String) -> Result<DateTime<Utc>, ConfigError> {
     Ok(chrono::DateTime::parse_from_rfc3339(&s)
         .map_err(|e| ConfigError::Deserialization(e.to_string()))?
         .with_timezone(&Utc))
+}
+
+/// Normalize an optional i64 value from the database to Option<u32>,
+/// treating negative values as None to avoid wraparound.
+fn normalize_optional_u32(value: Option<i64>) -> Option<u32> {
+    value.and_then(|v| if v < 0 { None } else { Some(v as u32) })
+}
+
+/// Parse reasoning effort values JSON. NULL or empty string defaults to empty Vec.
+fn parse_reasoning_effort_values(json: Option<String>) -> Result<Vec<String>, ConfigError> {
+    match json {
+        None => Ok(Vec::new()),
+        Some(s) if s.trim().is_empty() => Ok(Vec::new()),
+        Some(s) => serde_json::from_str(&s).map_err(|e| {
+            ConfigError::Deserialization(format!("Invalid reasoning_effort_values JSON: {}", e))
+        }),
+    }
 }
 
 fn validate_optional_non_negative_f64(value: Option<f64>, label: &str) -> Result<(), ConfigError> {

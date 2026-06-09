@@ -109,11 +109,20 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
             INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 2);
             "#,
     ),
+    (
+        3,
+        r#"
+            ALTER TABLE custom_models ADD COLUMN supports_streaming INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE custom_models ADD COLUMN reasoning_effort_values_json TEXT NULL;
+
+            INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 3);
+            "#,
+    ),
 ];
 
 /// The current schema version.
 #[allow(dead_code)]
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 /// Apply all pending migrations to the database.
 pub async fn apply_migrations(pool: &sqlx::SqlitePool) -> Result<(), super::error::ConfigError> {
