@@ -5,7 +5,8 @@ pub const MIGRATIONS: &[(i64, &str)] = &[(
     1,
     r#"
         CREATE TABLE IF NOT EXISTS schema_version (
-            version INTEGER PRIMARY KEY
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            version INTEGER NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS profiles (
@@ -42,7 +43,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[(
             updated_at TEXT NOT NULL
         );
 
-        INSERT OR IGNORE INTO schema_version (version) VALUES (1);
+        INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1);
         "#,
 )];
 
@@ -53,17 +54,22 @@ pub const CURRENT_SCHEMA_VERSION: i64 = 1;
 /// Apply all pending migrations to the database.
 pub async fn apply_migrations(pool: &sqlx::SqlitePool) -> Result<(), super::error::ConfigError> {
     // Create schema_version table if it doesn't exist
-    sqlx::query("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
+    sqlx::query("CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)")
         .execute(pool)
         .await
-        .map_err(super::error::ConfigError::from)?;
+        .map_err(|e| super::error::ConfigError::Migration(format!("Failed to initialize schema_version table: {}", e)))?;
 
     // Check current version
     let current_version: Option<i64> =
-        sqlx::query_scalar("SELECT version FROM schema_version LIMIT 1")
+        sqlx::query_scalar("SELECT version FROM schema_version WHERE id = 1")
             .fetch_optional(pool)
             .await
-            .map_err(super::error::ConfigError::from)?;
+            .map_err(|e| {
+                super::error::ConfigError::Migration(format!(
+                    "Failed to read schema version: {}",
+                    e
+                ))
+            })?;
 
     let current_version = current_version.unwrap_or(0);
 
@@ -75,11 +81,11 @@ pub async fn apply_migrations(pool: &sqlx::SqlitePool) -> Result<(), super::erro
                 .await
                 .map_err(|e| super::error::ConfigError::Migration(e.to_string()))?;
 
-            sqlx::query(sql).execute(&mut *tx).await.map_err(|e| {
+            sqlx::raw_sql(sql).execute(&mut *tx).await.map_err(|e| {
                 super::error::ConfigError::Migration(format!("Migration {} failed: {}", version, e))
             })?;
 
-            sqlx::query("INSERT OR REPLACE INTO schema_version (version) VALUES (?)")
+            sqlx::query("INSERT INTO schema_version (id, version) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET version = excluded.version")
                 .bind(*version)
                 .execute(&mut *tx)
                 .await

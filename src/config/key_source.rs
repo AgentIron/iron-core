@@ -28,15 +28,13 @@ impl KeySource for OsKeyringKeySource {
 
         match entry.get_password() {
             Ok(password) => {
-                let decoded =
-                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &password)
-                        .map_err(|e| {
-                        ConfigError::KeyUnavailable(format!("Invalid key encoding: {}", e))
-                    })?;
+                let decoded = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &password,
+                )
+                .map_err(|e| ConfigError::InvalidKey(format!("Invalid key encoding: {}", e)))?;
                 if decoded.len() != 32 {
-                    return Err(ConfigError::KeyUnavailable(
-                        "Key must be 32 bytes".to_string(),
-                    ));
+                    return Err(ConfigError::InvalidKey("Key must be 32 bytes".to_string()));
                 }
                 let mut key = [0u8; 32];
                 key.copy_from_slice(&decoded);
@@ -47,9 +45,31 @@ impl KeySource for OsKeyringKeySource {
                 let key = super::crypto::XChaCha20Poly1305Cipher::generate_key();
                 let encoded =
                     base64::Engine::encode(&base64::engine::general_purpose::STANDARD, key);
-                entry.set_password(&encoded).map_err(|e| {
-                    ConfigError::KeyUnavailable(format!("Failed to store key: {}", e))
-                })?;
+                // Try to store; if another process already stored a key, read theirs
+                if let Err(e) = entry.set_password(&encoded) {
+                    // Another process may have won the race; read what they stored
+                    if let Ok(password) = entry.get_password() {
+                        let decoded = base64::Engine::decode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &password,
+                        )
+                        .map_err(|e| {
+                            ConfigError::InvalidKey(format!("Invalid key encoding: {}", e))
+                        })?;
+                        if decoded.len() != 32 {
+                            return Err(ConfigError::InvalidKey(
+                                "Key must be 32 bytes".to_string(),
+                            ));
+                        }
+                        let mut peer_key = [0u8; 32];
+                        peer_key.copy_from_slice(&decoded);
+                        return Ok(peer_key);
+                    }
+                    return Err(ConfigError::KeyUnavailable(format!(
+                        "Failed to store key: {}",
+                        e
+                    )));
+                }
                 Ok(key)
             }
             Err(e) => Err(ConfigError::KeyUnavailable(format!("Keyring error: {}", e))),
@@ -77,12 +97,10 @@ impl KeySource for EnvVarKeySource {
         })?;
 
         let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &value)
-            .map_err(|e| ConfigError::KeyUnavailable(format!("Invalid base64: {}", e)))?;
+            .map_err(|e| ConfigError::InvalidKey(format!("Invalid base64: {}", e)))?;
 
         if decoded.len() != 32 {
-            return Err(ConfigError::KeyUnavailable(
-                "Key must be 32 bytes".to_string(),
-            ));
+            return Err(ConfigError::InvalidKey("Key must be 32 bytes".to_string()));
         }
 
         let mut key = [0u8; 32];

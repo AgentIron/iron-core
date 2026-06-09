@@ -84,13 +84,19 @@ impl CredentialCipher for XChaCha20Poly1305Cipher {
         encrypted: &EncryptedPayload,
         associated_data: &[u8],
     ) -> Result<Vec<u8>, super::error::ConfigError> {
-        if !encrypted.metadata.starts_with("xchacha20poly1305:") {
+        if encrypted.metadata != "xchacha20poly1305:v1" {
             return Err(super::error::ConfigError::Decryption(format!(
                 "Unsupported encryption metadata: {}",
                 encrypted.metadata
             )));
         }
 
+        if encrypted.nonce.len() != 24 {
+            return Err(super::error::ConfigError::Decryption(format!(
+                "Invalid nonce length: expected 24, got {}",
+                encrypted.nonce.len()
+            )));
+        }
         let nonce = XNonce::from_slice(&encrypted.nonce);
         let payload = chacha20poly1305::aead::Payload {
             msg: encrypted.ciphertext.as_ref(),

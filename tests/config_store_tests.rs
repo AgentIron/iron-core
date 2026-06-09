@@ -271,7 +271,7 @@ async fn test_two_instances_same_database_path() {
 }
 
 #[tokio::test]
-async fn test_concurrent_reads_with_wal_mode() {
+async fn test_concurrent_reads_arc_shared() {
     let store = ConfigStore::open_in_memory().await.unwrap();
 
     // Seed data
@@ -623,7 +623,7 @@ mod linux_path_tests {
 
     static PATH_LOCK: Mutex<()> = Mutex::new(());
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_linux_default_path_with_xdg_config_home() {
         let _lock = PATH_LOCK.lock().unwrap();
         let original = std::env::var("XDG_CONFIG_HOME").ok();
@@ -642,7 +642,7 @@ mod linux_path_tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_linux_default_path_fallback_without_xdg() {
         let _lock = PATH_LOCK.lock().unwrap();
         let original = std::env::var("XDG_CONFIG_HOME").ok();

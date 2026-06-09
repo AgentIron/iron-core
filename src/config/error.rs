@@ -39,6 +39,10 @@ pub enum ConfigError {
     #[error("Credential key unavailable: {0}")]
     KeyUnavailable(String),
 
+    /// Invalid or malformed credential encryption key.
+    #[error("Invalid credential key: {0}")]
+    InvalidKey(String),
+
     /// Encryption failed.
     #[error("Encryption failed: {0}")]
     Encryption(String),
@@ -84,6 +88,12 @@ impl From<std::io::Error> for ConfigError {
 
 impl From<serde_json::Error> for ConfigError {
     fn from(err: serde_json::Error) -> Self {
-        ConfigError::Serialization(err.to_string())
+        use serde_json::error::Category;
+        match err.classify() {
+            Category::Io => ConfigError::Serialization(format!("IO error: {}", err)),
+            Category::Syntax | Category::Data | Category::Eof => {
+                ConfigError::Deserialization(err.to_string())
+            }
+        }
     }
 }
