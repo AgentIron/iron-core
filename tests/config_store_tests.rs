@@ -938,7 +938,80 @@ async fn test_skill_settings_reject_empty_additional_dir() {
 
 #[tokio::test]
 async fn test_migrations_v1_to_v2() {
-    let store = ConfigStore::open_in_memory().await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("v1-config.db");
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&db_path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+
+    sqlx::raw_sql(
+        r#"
+        CREATE TABLE schema_version (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            version INTEGER NOT NULL
+        );
+
+        CREATE TABLE profiles (
+            id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE prompts (
+            id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE schedule (
+            id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE credentials (
+            provider_slug TEXT PRIMARY KEY,
+            credential_mode TEXT NOT NULL,
+            encrypted_payload BLOB NOT NULL,
+            nonce BLOB NOT NULL,
+            encryption_metadata TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        INSERT INTO schema_version (id, version) VALUES (1, 1);
+        INSERT INTO profiles (id, schema_version, payload, created_at, updated_at)
+        VALUES ('legacy-profile', 1, '{"name":"Legacy"}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    drop(pool);
+
+    let store = open_test_store(&db_path).await;
+
+    let legacy_profile = store.get_profile("legacy-profile").await.unwrap().unwrap();
+    assert_eq!(legacy_profile.payload, json!({"name": "Legacy"}));
+
+    let mut conn = store.acquire().await.unwrap();
+    let version: i64 = sqlx::query_scalar("SELECT version FROM schema_version WHERE id = 1")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(version, 2);
 
     // Verify v2 tables exist by using the new APIs
     store

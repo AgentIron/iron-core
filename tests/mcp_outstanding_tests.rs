@@ -740,12 +740,14 @@ async fn stdio_transport_applies_working_dir_and_uses_safe_environment() {
 
     let mut env = HashMap::new();
     env.insert("EXPLICIT_ALLOWED".to_string(), "present".to_string());
+    let inherited_key = "TEST_INHERITED_ALLOWED";
+    std::env::set_var(inherited_key, "allowed-value");
 
     let config = McpServerConfig {
         id: "review-stdio".to_string(),
         label: "Review stdio".to_string(),
         description: None,
-        inherited_env_vars: vec![],
+        inherited_env_vars: vec![inherited_key.to_string()],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -782,23 +784,11 @@ async fn stdio_transport_applies_working_dir_and_uses_safe_environment() {
 
     std::env::remove_var(sensitive_key);
 
-    // Verify that a non-sensitive inherited env var IS present in the
-    // subprocess (the hybrid approach inherits all non-sensitive vars).
-    let inherited_key = std::env::vars()
-        .map(|(key, _)| key)
-        .find(|key| key.starts_with("CARGO_"))
-        .expect("expected at least one CARGO_* env var during tests");
-
     let inherited_env = client
         .call_tool("env_tool", json!({"key": inherited_key}))
         .await
         .unwrap();
-    assert_ne!(
-        inherited_env["result"],
-        json!("<missing>"),
-        "non-sensitive inherited var '{}' should be present in subprocess",
-        inherited_key
-    );
+    assert_eq!(inherited_env["result"], json!("allowed-value"));
 
     let explicit_env = client
         .call_tool("env_tool", json!({"key": "EXPLICIT_ALLOWED"}))
@@ -807,6 +797,7 @@ async fn stdio_transport_applies_working_dir_and_uses_safe_environment() {
     assert_eq!(explicit_env["result"], json!("present"));
 
     client.close().await;
+    std::env::remove_var(inherited_key);
 }
 
 #[tokio::test]
