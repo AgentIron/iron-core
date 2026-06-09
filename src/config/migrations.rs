@@ -173,7 +173,7 @@ pub async fn apply_migrations(pool: &sqlx::SqlitePool) -> Result<(), super::erro
                 .await
                 .map_err(|e| super::error::ConfigError::Migration(e.to_string()))?;
 
-            sqlx::raw_sql(sql).execute(&mut *tx).await.map_err(|e| {
+            sqlx::raw_sql(*sql).execute(&mut *tx).await.map_err(|e| {
                 super::error::ConfigError::Migration(format!("Migration {} failed: {}", version, e))
             })?;
 
