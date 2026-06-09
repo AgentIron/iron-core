@@ -1,8 +1,4 @@
-## Purpose
-
-Define how `iron-core` resolves, persists, refreshes, reports, and disconnects provider credentials while preserving provider-safe boundaries and durable credential storage semantics.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Core SHALL support core-owned provider credential storage
 
@@ -100,6 +96,23 @@ Existing API-key provider behavior SHALL continue to work, and API-key credentia
 - **THEN** `iron-core` SHALL select the supplied API-key credential for provider invocation
 - **AND** SHALL NOT require the durable store to retain both credential modes for that provider
 
+### Requirement: Core SHALL support OAuth disconnect without removing API keys
+
+`iron-core` SHALL provide a provider OAuth disconnect operation that removes OAuth credential material for the provider without removing API-key configuration that is currently stored or supplied outside the durable OAuth credential. Because the core durable credential store keeps at most one stored credential per provider, disconnect SHALL NOT restore a previously replaced stored API-key credential.
+
+#### Scenario: OAuth credential is disconnected
+- **WHEN** a client disconnects OAuth for a provider whose durable stored credential is OAuth
+- **THEN** `iron-core` SHALL remove OAuth credential material for that provider through the credential store boundary
+
+#### Scenario: Stored API-key credential is present during disconnect
+- **WHEN** a client disconnects OAuth for a provider whose durable stored credential is an API key
+- **THEN** `iron-core` SHALL NOT remove the stored API-key credential
+
+#### Scenario: Supplied API-key configuration exists during disconnect
+- **WHEN** a client disconnects OAuth for a provider
+- **AND** API-key configuration is supplied by prompt context, runtime context, environment, or another non-durable-store path
+- **THEN** `iron-core` SHALL NOT remove that API-key configuration
+
 ### Requirement: Core SHALL encrypt durable provider credential payloads at rest
 
 Provider credential secret payloads persisted by the core config store SHALL be encrypted before being written to durable storage and decrypted only when returning `StoredCredential` values through authorized core APIs.
@@ -165,110 +178,3 @@ The system SHALL NOT silently fall back to storing provider credential payloads 
 #### Scenario: Non-secret config without key source
 - **WHEN** no valid credential encryption key source is available
 - **THEN** non-secret config APIs such as opaque profile, prompt, or schedule storage can still operate when they do not require credential encryption
-
-### Requirement: Core SHALL resolve provider credentials per prompt
-
-`iron-core` SHALL resolve the active provider credential from app-supplied provider/model context for each managed provider prompt execution.
-
-#### Scenario: Prompt specifies provider and model
-- **WHEN** a client submits a managed provider prompt with provider and model context
-- **THEN** `iron-core` SHALL resolve credentials for that provider before constructing the provider runtime configuration
-
-#### Scenario: Existing injected provider path remains available
-- **WHEN** a caller constructs and injects a provider directly
-- **THEN** `iron-core` SHALL allow that provider to run without requiring provider credential orchestration
-
-### Requirement: Core SHALL refresh OAuth credentials before provider invocation
-
-`iron-core` SHALL refresh OAuth credentials before constructing a provider when the access token is expired or within the configured refresh margin.
-
-#### Scenario: OAuth credential is near expiry
-- **WHEN** a managed provider prompt resolves an OAuth credential that expires within five minutes
-- **THEN** `iron-core` SHALL refresh the credential before provider construction
-- **AND** SHALL persist the refreshed OAuth credential through the credential store boundary
-
-#### Scenario: OAuth refresh fails
-- **WHEN** OAuth refresh fails before provider invocation
-- **THEN** `iron-core` SHALL NOT invoke the provider with the stale access token
-- **AND** SHALL return an actionable refresh failure status or error to the client
-
-### Requirement: Core SHALL pass only provider-safe OAuth credential material to iron-providers
-
-`iron-core` SHALL pass only the current OAuth access token, optional expiry, and optional ID token to `iron-providers` for OAuth-backed provider invocation.
-
-#### Scenario: OAuth bearer runtime config is constructed
-- **WHEN** OAuth credential resolution succeeds for a provider prompt
-- **THEN** `iron-core` SHALL construct `iron_providers::ProviderCredential::OAuthBearer` with the current access token, expiry, and optional ID token
-- **AND** SHALL NOT pass refresh tokens to `iron-providers`
-
-#### Scenario: Codex ID token is available
-- **WHEN** Codex OAuth credential material includes an ID token
-- **THEN** `iron-core` SHALL preserve and pass the ID token in the OAuth bearer credential supplied to `iron-providers`
-
-### Requirement: Core SHALL expose provider auth status to clients
-
-`iron-core` SHALL expose structured provider auth status so clients can render provider credential state without inspecting secret material.
-
-#### Scenario: Provider credential is not configured
-- **WHEN** no API-key or OAuth credential is available for a provider
-- **THEN** `iron-core` SHALL report `NotConfigured` for that provider
-
-#### Scenario: Provider uses API key
-- **WHEN** an API-key credential is available and selected for a provider
-- **THEN** `iron-core` SHALL report `ConfiguredApiKey` for that provider
-
-#### Scenario: Provider uses OAuth
-- **WHEN** an OAuth credential is available and valid for a provider
-- **THEN** `iron-core` SHALL report `ConnectedOAuth` with the credential expiry when known
-
-#### Scenario: Provider credential cannot be used
-- **WHEN** credential resolution or refresh cannot produce a usable provider credential
-- **THEN** `iron-core` SHALL report one of `Expired`, `RefreshFailed`, `Revoked`, or `UnsupportedCredential` with actionable context
-
-### Requirement: Core SHALL support OAuth disconnect without removing API keys
-
-`iron-core` SHALL provide a provider OAuth disconnect operation that removes OAuth credential material for the provider without removing API-key configuration that is currently stored or supplied outside the durable OAuth credential. Because the core durable credential store keeps at most one stored credential per provider, disconnect SHALL NOT restore a previously replaced stored API-key credential.
-
-#### Scenario: OAuth credential is disconnected
-- **WHEN** a client disconnects OAuth for a provider whose durable stored credential is OAuth
-- **THEN** `iron-core` SHALL remove OAuth credential material for that provider through the credential store boundary
-
-#### Scenario: Stored API-key credential is present during disconnect
-- **WHEN** a client disconnects OAuth for a provider whose durable stored credential is an API key
-- **THEN** `iron-core` SHALL NOT remove the stored API-key credential
-
-#### Scenario: Supplied API-key configuration exists during disconnect
-- **WHEN** a client disconnects OAuth for a provider
-- **AND** API-key configuration is supplied by prompt context, runtime context, environment, or another non-durable-store path
-- **THEN** `iron-core` SHALL NOT remove that API-key configuration
-
-### Requirement: Core SHALL support device-code OAuth metadata and exchange helpers for V1 OAuth providers
-
-`iron-core` SHALL provide V1 OAuth device-code metadata and token exchange helpers for `kimi-code` and `codex` while keeping presentation of the login flow client-owned.
-
-#### Scenario: Client starts Kimi Code OAuth interaction
-- **WHEN** a client asks to start OAuth for `kimi-code`
-- **THEN** `iron-core` SHALL provide device-code interaction data using Kimi Code OAuth metadata
-- **AND** the client SHALL remain responsible for rendering the interaction to the user
-
-#### Scenario: Client starts Codex OAuth interaction
-- **WHEN** a client asks to start OAuth for `codex`
-- **THEN** `iron-core` SHALL provide device-code interaction data using OpenAI OAuth metadata for Codex
-- **AND** the client SHALL remain responsible for rendering the interaction to the user
-
-### Requirement: Core SHALL retry safe OAuth provider auth failures once
-
-`iron-core` SHALL coordinate one forced-refresh retry after an OAuth-backed provider auth failure when retrying is safe.
-
-#### Scenario: OAuth provider auth failure before streamed output
-- **WHEN** an OAuth-backed provider invocation fails with an auth error before any stream output is emitted
-- **THEN** `iron-core` SHALL force-refresh the OAuth credential and retry the provider invocation at most once
-
-#### Scenario: OAuth provider auth failure after streamed output
-- **WHEN** an OAuth-backed provider invocation fails after stream output has been emitted
-- **THEN** `iron-core` SHALL NOT silently retry the provider invocation
-- **AND** SHALL surface the auth failure to the client
-
-#### Scenario: API-key provider auth failure
-- **WHEN** an API-key-backed provider invocation fails with an auth error
-- **THEN** `iron-core` SHALL NOT attempt OAuth refresh retry for that invocation

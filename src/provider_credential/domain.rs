@@ -4,12 +4,13 @@
 //! and actionable errors. They are separate from plugin auth types to avoid
 //! terminology confusion.
 
+use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
 /// Provider identifier (slug) used for credential lookup and profile resolution.
 ///
 /// Examples: `"kimi-code"`, `"codex"`, `"openai"`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProviderSlug(pub String);
 
 impl ProviderSlug {
@@ -37,7 +38,7 @@ impl From<&str> for ProviderSlug {
 }
 
 /// Which credential mode is stored for a provider.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CredentialMode {
     /// API key credential.
     ApiKey,
@@ -50,7 +51,7 @@ pub enum CredentialMode {
 /// This includes the refresh token, which is intentionally not passed to
 /// `iron-providers`. Only the access token (and optional ID token) are
 /// forwarded after resolution.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OAuthTokenSet {
     /// Current access token.
     pub access_token: String,
@@ -63,7 +64,7 @@ pub struct OAuthTokenSet {
 }
 
 /// A stored provider credential, including secret material.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StoredCredential {
     /// API key string.
     ApiKey(String),
@@ -127,6 +128,10 @@ pub enum ProviderAuthError {
     /// The OAuth credential was revoked.
     #[error("OAuth credential revoked for provider '{0}'")]
     Revoked(String),
+
+    /// A durable credential store operation failed.
+    #[error("Credential store error for provider '{provider}': {reason}")]
+    StoreError { provider: String, reason: String },
 }
 
 /// Result type for provider credential operations.

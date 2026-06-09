@@ -1,11 +1,56 @@
-//! Configuration types for `iron-core`.
+//! Configuration types and durable storage for `iron-core`.
 //!
-//! These types define the main runtime configuration surface for `IronAgent`
-//! and `IronRuntime`.
+//! This module provides two categories of types:
 //!
-//! Applications that keep their own config type can implement [`ConfigSource`]
-//! to project iron-core settings into a validated [`Config`] snapshot at
-//! construction time.
+//! 1. **Runtime configuration** ([`Config`], [`ConfigSource`]) — the main
+//!    runtime configuration surface for `IronAgent` and `IronRuntime`.
+//!    Applications that keep their own config type can implement [`ConfigSource`]
+//!    to project iron-core settings into a validated [`Config`] snapshot at
+//!    construction time.
+//!
+//! 2. **Durable configuration store** ([`ConfigStore`]) — a SQLite-backed
+//!    persistent store for profiles, prompts, schedule entries, and encrypted
+//!    provider credentials. The store is designed for desktop application use
+//!    and manages its own schema migrations.
+//!
+//! ## Platform-default paths
+//!
+//! `ConfigStore::open()` resolves the platform-default database path:
+//!
+//! - **Linux**: `$XDG_CONFIG_HOME/agentiron/config.db` when `XDG_CONFIG_HOME`
+//!   is set, otherwise `~/.config/agentiron/config.db`
+//! - **macOS**: `~/Library/Application Support/com.agentiron/iron-core/config.db`
+//! - **Windows**: `%APPDATA%\AgentIron\config.db`
+//!
+//! Parent directories are created automatically when opening the store.
+//!
+//! ## Encryption
+//!
+//! Provider credentials are encrypted at rest using XChaCha20-Poly1305 with
+//! random per-row nonces. The encryption key is resolved from (in order):
+//!
+//! 1. `AGENTIRON_CONFIG_ENCRYPTION_KEY` environment variable (base64-encoded
+//!    32-byte key, useful for headless/cron operation)
+//! 2. OS keyring (`agentiron` / `config-encryption`)
+//!
+//! If no key source is available, credential operations return
+//! [`ConfigError::KeyUnavailable`] while non-secret operations (profiles,
+//! prompts, schedules) continue to work normally.
+//!
+//! ## Frontend usage
+//!
+//! Frontends must use the `iron_core::config` APIs (`ConfigStore`,
+//! `ProfileInput`, `PromptInput`, etc.) and must not write the SQLite database
+//! directly. The database schema is an implementation detail; compiled-in
+//! migrations ensure forward compatibility without external migration files.
+//!
+//! ## Migration notes
+//!
+//! Schema migrations are compiled into the binary. No external migration files
+//! need to be packaged or deployed.
+//!
+//! See [AgentIron/AgentIron#56](https://github.com/AgentIron/AgentIron/issues/56)
+//! for the follow-up app config audit and migration task.
 //!
 //! Projection is a snapshot — later mutations to the caller's config do not
 //! affect already-constructed runtimes or agents.
@@ -513,3 +558,20 @@ impl SkillConfig {
         self
     }
 }
+
+// Durable config store submodules
+pub mod error;
+pub mod records;
+pub mod store;
+
+pub mod crypto;
+mod db;
+mod key_source;
+mod migrations;
+
+pub use error::ConfigError;
+pub use records::{
+    CredentialRecord, ProfileInput, ProfileRecord, PromptInput, PromptRecord, ScheduleInput,
+    ScheduleRecord,
+};
+pub use store::{default_config_path, ConfigStore, OpenOptions};
