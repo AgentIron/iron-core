@@ -46,7 +46,7 @@ impl KeySource for OsKeyringKeySource {
                 // Generate a new key
                 let key = super::crypto::XChaCha20Poly1305Cipher::generate_key();
                 let encoded =
-                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &key);
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, key);
                 entry.set_password(&encoded).map_err(|e| {
                     ConfigError::KeyUnavailable(format!("Failed to store key: {}", e))
                 })?;

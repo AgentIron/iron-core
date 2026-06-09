@@ -19,6 +19,7 @@ pub struct ConfigStore {
 }
 
 /// Options for opening a ConfigStore.
+#[derive(Default)]
 pub struct OpenOptions {
     /// Optional cipher to use instead of resolving one from key sources.
     pub cipher: Option<DynCredentialCipher>,
@@ -26,15 +27,6 @@ pub struct OpenOptions {
     ///
     /// When omitted the default is 5 seconds.
     pub busy_timeout: Option<Duration>,
-}
-
-impl Default for OpenOptions {
-    fn default() -> Self {
-        Self {
-            cipher: None,
-            busy_timeout: None,
-        }
-    }
 }
 
 impl ConfigStore {
