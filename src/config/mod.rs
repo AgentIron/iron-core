@@ -567,6 +567,8 @@ impl SkillConfig {
 }
 
 // Durable config store submodules
+pub mod builtin_models;
+pub mod effective_catalog;
 pub mod error;
 pub mod records;
 pub mod store;
@@ -576,6 +578,10 @@ mod db;
 mod key_source;
 mod migrations;
 
+pub use builtin_models::{builtin_model_catalog, BuiltinModelEntry};
+pub use effective_catalog::{
+    build_effective_catalog, CatalogError, EffectiveModelCatalog, EffectiveModelEntry,
+};
 pub use error::ConfigError;
 pub use records::{
     CredentialRecord, CustomModelInput, CustomModelRecord, DefaultModelInput, DefaultModelRecord,

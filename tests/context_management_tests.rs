@@ -1974,7 +1974,7 @@ fn model_switch_active_session_queues_switch() {
         // While prompt is active, try to switch model
         let request = ModelSwitchRequest::Managed {
             provider_slug: "anthropic".into(),
-            model: "claude-3-sonnet".into(),
+            model: "claude-3-7-sonnet-20250219".into(),
             api_key: None,
         };
 
@@ -2165,7 +2165,9 @@ fn model_switch_smaller_window_triggers_compaction() {
 
 #[test]
 fn model_switch_too_small_window_rejected() {
-    use iron_core::{Config, ContextManagementConfig, IronAgent, ModelSwitchRequest};
+    use iron_core::{
+        Config, ContextManagementConfig, IronAgent, ModelCapabilityMetadata, ModelSwitchRequest,
+    };
     use iron_providers::ProviderEvent;
 
     run_local(async {
@@ -2184,6 +2186,20 @@ fn model_switch_too_small_window_rejected() {
         let agent = IronAgent::new(config, provider);
         let conn = agent.connect();
         let session = conn.create_session().unwrap();
+
+        agent
+            .runtime()
+            .register_model_capability(ModelCapabilityMetadata {
+                model: "tiny-model".into(),
+                provider: "openai".into(),
+                context_window: 10,
+                supports_tools: true,
+                supports_streaming: true,
+                supports_reasoning_effort: false,
+                reasoning_effort_values: Vec::new(),
+                supported_modalities: vec!["text".into()],
+                unsupported_tools: Vec::new(),
+            });
 
         // Establish conversation with long messages
         let _ = session.prompt("This is a very long user message with substantial content that will generate many tokens when estimated using the length-based heuristic, ensuring the total exceeds the minimal tail threshold").await;
@@ -2204,6 +2220,32 @@ fn model_switch_too_small_window_rejected() {
         assert!(
             err.contains("Context too large") || err.contains("too large"),
             "Error should indicate context is too large: {}",
+            err
+        );
+    });
+}
+
+#[test]
+fn model_switch_unknown_target_model_rejected() {
+    use iron_core::{Config, IronAgent, ModelSwitchRequest};
+
+    run_local(async {
+        let agent = IronAgent::new(Config::new(), MockProvider::with_infer_responses(vec![]));
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        let request = ModelSwitchRequest::Managed {
+            provider_slug: "openai".into(),
+            model: "not-registered-model".into(),
+            api_key: None,
+        };
+
+        let result = session.switch_model(request);
+        assert!(result.is_err(), "Unknown target model should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Unknown target model") && err.contains("openai/not-registered-model"),
+            "Error should identify the unknown target model: {}",
             err
         );
     });

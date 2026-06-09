@@ -617,7 +617,8 @@ async fn test_durable_store_disconnect_oauth() {
 // ============================================================================
 
 use iron_core::config::{
-    CustomModelInput, DefaultModelInput, McpServerConfigInput, ProviderConfigInput,
+    build_effective_catalog, builtin_model_catalog, CatalogError, CustomModelInput,
+    CustomModelRecord, DefaultModelInput, McpServerConfigInput, ProviderConfigInput,
     SkillSettingsInput,
 };
 use iron_core::mcp::server::{HttpConfig, McpTransport};
@@ -679,6 +680,8 @@ async fn test_custom_model_crud() {
         supports_tool_calls: true,
         supports_reasoning: false,
         supports_vision: true,
+        supports_streaming: true,
+        reasoning_effort_values: vec![],
         cost_input_per_million: Some(5.0),
         cost_output_per_million: Some(15.0),
     };
@@ -892,6 +895,8 @@ async fn test_custom_model_numeric_validation() {
         supports_tool_calls: false,
         supports_reasoning: false,
         supports_vision: false,
+        supports_streaming: true,
+        reasoning_effort_values: vec![],
         cost_input_per_million: Some(-1.0),
         cost_output_per_million: Some(0.0),
     };
@@ -1011,9 +1016,9 @@ async fn test_migrations_v1_to_v2() {
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 
-    // Verify v2 tables exist by using the new APIs
+    // Verify v2/v3 tables exist by using the new APIs
     store
         .set_provider_config(&ProviderConfigInput {
             provider_slug: "test".to_string(),
@@ -1082,4 +1087,349 @@ mod linux_path_tests {
             None => std::env::remove_var("HOME"),
         }
     }
+}
+
+// ============================================================================
+// Custom Model Runtime Integration Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_provider_slug_validation() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    // Unknown provider slug should be rejected
+    let input = CustomModelInput {
+        provider_slug: "unknown-provider".to_string(),
+        model_id: "some-model".to_string(),
+        display_name: "Some Model".to_string(),
+        context_window: Some(100_000),
+        output_limit: Some(4_096),
+        supports_tool_calls: false,
+        supports_reasoning: false,
+        supports_vision: false,
+        supports_streaming: true,
+        reasoning_effort_values: vec![],
+        cost_input_per_million: None,
+        cost_output_per_million: None,
+    };
+    let err = store.set_custom_model(&input).await.unwrap_err();
+    assert!(
+        matches!(err, iron_core::config::ConfigError::Validation(ref msg) if msg.contains("unknown-provider")),
+        "Expected validation error for unknown provider slug, got {:?}",
+        err
+    );
+
+    // Built-in provider slug should be accepted
+    let builtin_input = CustomModelInput {
+        provider_slug: "openai".to_string(),
+        model_id: "custom-openai-model".to_string(),
+        display_name: "Custom OpenAI Model".to_string(),
+        context_window: Some(100_000),
+        output_limit: Some(4_096),
+        supports_tool_calls: true,
+        supports_reasoning: false,
+        supports_vision: true,
+        supports_streaming: true,
+        reasoning_effort_values: vec![],
+        cost_input_per_million: None,
+        cost_output_per_million: None,
+    };
+    store.set_custom_model(&builtin_input).await.unwrap();
+
+    // Persisted provider slug should also be accepted
+    store
+        .set_provider_config(&ProviderConfigInput {
+            provider_slug: "custom-persisted".to_string(),
+            display_name: "Custom Persisted Provider".to_string(),
+            enabled: true,
+            base_url: Some("https://example.com".to_string()),
+        })
+        .await
+        .unwrap();
+
+    let persisted_input = CustomModelInput {
+        provider_slug: "custom-persisted".to_string(),
+        model_id: "custom-persisted-model".to_string(),
+        display_name: "Custom Persisted Model".to_string(),
+        context_window: Some(100_000),
+        output_limit: Some(4_096),
+        supports_tool_calls: false,
+        supports_reasoning: false,
+        supports_vision: false,
+        supports_streaming: true,
+        reasoning_effort_values: vec![],
+        cost_input_per_million: None,
+        cost_output_per_million: None,
+    };
+    store.set_custom_model(&persisted_input).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_custom_model_streaming_and_reasoning_roundtrip() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let input = CustomModelInput {
+        provider_slug: "openai".to_string(),
+        model_id: "reasoning-model".to_string(),
+        display_name: "Reasoning Model".to_string(),
+        context_window: Some(200_000),
+        output_limit: Some(8_192),
+        supports_tool_calls: true,
+        supports_reasoning: true,
+        supports_vision: false,
+        supports_streaming: false,
+        reasoning_effort_values: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+        cost_input_per_million: Some(3.0),
+        cost_output_per_million: Some(12.0),
+    };
+
+    let record = store.set_custom_model(&input).await.unwrap();
+    assert!(!record.supports_streaming);
+    assert_eq!(
+        record.reasoning_effort_values,
+        vec!["low", "medium", "high"]
+    );
+
+    let retrieved = store
+        .get_custom_model("openai", "reasoning-model")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!retrieved.supports_streaming);
+    assert_eq!(
+        retrieved.reasoning_effort_values,
+        vec!["low", "medium", "high"]
+    );
+
+    let listed = store.list_custom_models(None).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(!listed[0].supports_streaming);
+    assert_eq!(
+        listed[0].reasoning_effort_values,
+        vec!["low", "medium", "high"]
+    );
+}
+
+#[tokio::test]
+async fn test_custom_model_backward_compatible_defaults() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    // Simulate a v2-era insert without the new columns by using raw SQL
+    let mut conn = store.acquire().await.unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO custom_models (provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, cost_input_per_million, cost_output_per_million, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind("openai")
+    .bind("legacy-model")
+    .bind("Legacy Model")
+    .bind(100_000_i64)
+    .bind(4_096_i64)
+    .bind(true)
+    .bind(false)
+    .bind(false)
+    .bind(None::<f64>)
+    .bind(None::<f64>)
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+
+    // Reading should default supports_streaming to true and reasoning_effort_values to empty
+    let retrieved = store
+        .get_custom_model("openai", "legacy-model")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retrieved.supports_streaming);
+    assert!(retrieved.reasoning_effort_values.is_empty());
+}
+
+#[tokio::test]
+async fn test_default_model_validation_against_effective_catalog() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    // Setting default to a non-existent model should fail validation
+    let result = store
+        .set_default_model(&DefaultModelInput {
+            provider_slug: "openai".to_string(),
+            model_id: "nonexistent-model".to_string(),
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "Expected validation error for unknown default model"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, iron_core::config::ConfigError::Validation(ref msg) if msg.contains("nonexistent-model")),
+        "Expected validation error mentioning model, got {:?}",
+        err
+    );
+
+    // Setting default to a built-in model should succeed
+    store
+        .set_default_model(&DefaultModelInput {
+            provider_slug: "openai".to_string(),
+            model_id: "gpt-4o".to_string(),
+        })
+        .await
+        .unwrap();
+
+    // Setting default to a custom model should succeed
+    store
+        .set_custom_model(&CustomModelInput {
+            provider_slug: "openai".to_string(),
+            model_id: "custom-openai-model".to_string(),
+            display_name: "Custom Model".to_string(),
+            context_window: Some(100_000),
+            output_limit: Some(4_096),
+            supports_tool_calls: true,
+            supports_reasoning: false,
+            supports_vision: false,
+            supports_streaming: true,
+            reasoning_effort_values: vec![],
+            cost_input_per_million: None,
+            cost_output_per_million: None,
+        })
+        .await
+        .unwrap();
+
+    store
+        .set_default_model(&DefaultModelInput {
+            provider_slug: "openai".to_string(),
+            model_id: "custom-openai-model".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let snapshot = store.load_runtime_settings().await.unwrap();
+    assert!(snapshot.default_model.is_some());
+    assert_eq!(
+        snapshot.default_model.unwrap().model_id,
+        "custom-openai-model"
+    );
+}
+
+#[tokio::test]
+async fn test_migrations_v2_to_v3_custom_models_columns() {
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test_v2_to_v3.db");
+
+    // Create a raw v2 database
+    let pool = SqlitePoolOptions::new()
+        .connect(&format!("sqlite://{}?mode=rwc", db_path.display()))
+        .await
+        .unwrap();
+
+    sqlx::raw_sql(
+        r#"
+        CREATE TABLE schema_version (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            version INTEGER NOT NULL
+        );
+
+        CREATE TABLE custom_models (
+            provider_slug TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            context_window INTEGER NULL,
+            output_limit INTEGER NULL,
+            supports_tool_calls INTEGER NOT NULL DEFAULT 0,
+            supports_reasoning INTEGER NOT NULL DEFAULT 0,
+            supports_vision INTEGER NOT NULL DEFAULT 0,
+            cost_input_per_million REAL NULL,
+            cost_output_per_million REAL NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider_slug, model_id)
+        );
+
+        INSERT INTO schema_version (id, version) VALUES (1, 2);
+        INSERT INTO custom_models (provider_slug, model_id, display_name, context_window, output_limit, supports_tool_calls, supports_reasoning, supports_vision, cost_input_per_million, cost_output_per_million, created_at, updated_at)
+        VALUES ('openai', 'legacy-model', 'Legacy Model', 100000, 4096, 1, 0, 0, NULL, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    drop(pool);
+
+    let store = open_test_store(&db_path).await;
+
+    let mut conn = store.acquire().await.unwrap();
+    let version: i64 = sqlx::query_scalar("SELECT version FROM schema_version WHERE id = 1")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(version, 3);
+
+    // Verify the new columns have correct defaults for existing rows
+    let retrieved = store
+        .get_custom_model("openai", "legacy-model")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retrieved.supports_streaming);
+    assert!(retrieved.reasoning_effort_values.is_empty());
+}
+
+#[tokio::test]
+async fn test_effective_model_catalog_rejects_duplicate_builtin() {
+    let custom = vec![CustomModelRecord {
+        provider_slug: "openai".to_string(),
+        model_id: "gpt-4o".to_string(),
+        display_name: "Duplicate GPT-4o".to_string(),
+        context_window: Some(100_000),
+        output_limit: Some(4_096),
+        supports_tool_calls: true,
+        supports_reasoning: false,
+        supports_vision: false,
+        supports_streaming: true,
+        reasoning_effort_values: vec![],
+        cost_input_per_million: None,
+        cost_output_per_million: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }];
+
+    let result = build_effective_catalog(&builtin_model_catalog(), &custom);
+    assert!(matches!(
+        result,
+        Err(CatalogError::DuplicateBuiltIn(ref p, ref m)) if p == "openai" && m == "gpt-4o"
+    ));
+}
+
+#[tokio::test]
+async fn test_custom_model_extends_builtin_catalog() {
+    let custom = vec![CustomModelRecord {
+        provider_slug: "openai".to_string(),
+        model_id: "custom-gpt-4o".to_string(),
+        display_name: "Custom GPT-4o".to_string(),
+        context_window: Some(256_000),
+        output_limit: Some(8_192),
+        supports_tool_calls: true,
+        supports_reasoning: true,
+        supports_vision: true,
+        supports_streaming: true,
+        reasoning_effort_values: vec!["low".to_string(), "high".to_string()],
+        cost_input_per_million: Some(5.0),
+        cost_output_per_million: Some(15.0),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }];
+
+    let catalog = build_effective_catalog(&builtin_model_catalog(), &custom).unwrap();
+    assert!(catalog.get("openai", "gpt-4o").is_some());
+    let custom_entry = catalog.get("openai", "custom-gpt-4o").unwrap();
+    assert_eq!(custom_entry.context_window, Some(256_000));
+    assert!(custom_entry.supports_reasoning);
+    assert_eq!(custom_entry.reasoning_effort_values, vec!["low", "high"]);
+    assert!(custom_entry.is_custom);
 }

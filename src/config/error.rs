@@ -58,6 +58,10 @@ pub enum ConfigError {
     /// Input validation failed.
     #[error("Validation error: {0}")]
     Validation(String),
+
+    /// Effective model catalog error.
+    #[error("Model catalog error: {0}")]
+    Catalog(String),
 }
 
 impl From<sqlx::Error> for ConfigError {
@@ -95,5 +99,11 @@ impl From<serde_json::Error> for ConfigError {
                 ConfigError::Deserialization(err.to_string())
             }
         }
+    }
+}
+
+impl From<super::effective_catalog::CatalogError> for ConfigError {
+    fn from(err: super::effective_catalog::CatalogError) -> Self {
+        ConfigError::Catalog(err.to_string())
     }
 }
