@@ -804,14 +804,8 @@ impl ConfigStore {
                 provider_slug: row.get("provider_slug"),
                 model_id: row.get("model_id"),
                 display_name: row.get("display_name"),
-                context_window: row.get::<Option<i64>, _>("context_window").and_then(|v| {
-                    if v < 0 {
-                        None
-                    } else {
-                        Some(v as u32)
-                    }
-                }),
-                output_limit: row.get::<Option<i64>, _>("output_limit").map(|v| v as u32),
+                context_window: normalize_optional_u32(row.get::<Option<i64>, _>("context_window")),
+                output_limit: normalize_optional_u32(row.get::<Option<i64>, _>("output_limit")),
                 supports_tool_calls: row.get::<i64, _>("supports_tool_calls") != 0,
                 supports_reasoning: row.get::<i64, _>("supports_reasoning") != 0,
                 supports_vision: row.get::<i64, _>("supports_vision") != 0,
@@ -856,14 +850,10 @@ impl ConfigStore {
                     provider_slug: row.get("provider_slug"),
                     model_id: row.get("model_id"),
                     display_name: row.get("display_name"),
-                    context_window: row.get::<Option<i64>, _>("context_window").and_then(|v| {
-                        if v < 0 {
-                            None
-                        } else {
-                            Some(v as u32)
-                        }
-                    }),
-                    output_limit: row.get::<Option<i64>, _>("output_limit").map(|v| v as u32),
+                    context_window: normalize_optional_u32(
+                        row.get::<Option<i64>, _>("context_window"),
+                    ),
+                    output_limit: normalize_optional_u32(row.get::<Option<i64>, _>("output_limit")),
                     supports_tool_calls: row.get::<i64, _>("supports_tool_calls") != 0,
                     supports_reasoning: row.get::<i64, _>("supports_reasoning") != 0,
                     supports_vision: row.get::<i64, _>("supports_vision") != 0,
@@ -1225,6 +1215,18 @@ impl ConfigStore {
         let mcp_servers = self.list_mcp_servers().await?;
         let skill_settings = self.get_skill_settings().await?;
 
+        // Validate all persisted custom models reference known provider slugs.
+        let known_provider_slugs = self.known_provider_slugs().await?;
+        if let Some(model) = custom_models
+            .iter()
+            .find(|model| !known_provider_slugs.contains(&model.provider_slug))
+        {
+            return Err(ConfigError::Validation(format!(
+                "Custom model ({} / {}) references an unknown provider slug",
+                model.provider_slug, model.model_id
+            )));
+        }
+
         // Validate cross-record consistency
         if let Some(ref default) = default_model {
             if default.provider_slug.trim().is_empty() {
@@ -1289,6 +1291,12 @@ fn parse_datetime(s: String) -> Result<DateTime<Utc>, ConfigError> {
     Ok(chrono::DateTime::parse_from_rfc3339(&s)
         .map_err(|e| ConfigError::Deserialization(e.to_string()))?
         .with_timezone(&Utc))
+}
+
+/// Normalize an optional i64 value from the database to Option<u32>,
+/// treating negative values as None to avoid wraparound.
+fn normalize_optional_u32(value: Option<i64>) -> Option<u32> {
+    value.and_then(|v| if v < 0 { None } else { Some(v as u32) })
 }
 
 /// Parse reasoning effort values JSON. NULL or empty string defaults to empty Vec.
