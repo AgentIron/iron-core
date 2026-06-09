@@ -471,6 +471,8 @@ async fn public_effective_tools_match_prompt_visible_tools() {
     agent.register_mcp_server(McpServerConfig {
         id: "stdio-server".to_string(),
         label: "Fake stdio server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -566,6 +568,8 @@ async fn http_sse_transport_handles_framing_and_response_correlation() {
     agent.register_mcp_server(McpServerConfig {
         id: "sse-server".to_string(),
         label: "Fake SSE server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::HttpSse {
             config: HttpConfig::new(fake_sse_server.url.clone()),
         },
@@ -593,6 +597,8 @@ async fn sse_tool_discovery_follows_pagination() {
     let config = McpServerConfig {
         id: "paged-sse".to_string(),
         label: "Paged SSE".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::HttpSse {
             config: HttpConfig::new(fake_sse_server.url.clone()),
         },
@@ -627,6 +633,8 @@ async fn mcp_name_resolution_is_unambiguous_for_server_ids_with_underscores() {
     agent.register_mcp_server(McpServerConfig {
         id: "stdio_server_id".to_string(),
         label: "Underscore stdio server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -679,6 +687,8 @@ async fn failed_stdio_spawn_surfaces_as_server_error_without_panic() {
     agent.register_mcp_server(McpServerConfig {
         id: "nonexistent-cmd".to_string(),
         label: "Bad command".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: "/no/such/binary/exists_abc123".to_string(),
             args: vec![],
@@ -730,10 +740,14 @@ async fn stdio_transport_applies_working_dir_and_uses_safe_environment() {
 
     let mut env = HashMap::new();
     env.insert("EXPLICIT_ALLOWED".to_string(), "present".to_string());
+    let inherited_key = "TEST_INHERITED_ALLOWED";
+    std::env::set_var(inherited_key, "allowed-value");
 
     let config = McpServerConfig {
         id: "review-stdio".to_string(),
         label: "Review stdio".to_string(),
+        description: None,
+        inherited_env_vars: vec![inherited_key.to_string()],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -770,23 +784,11 @@ async fn stdio_transport_applies_working_dir_and_uses_safe_environment() {
 
     std::env::remove_var(sensitive_key);
 
-    // Verify that a non-sensitive inherited env var IS present in the
-    // subprocess (the hybrid approach inherits all non-sensitive vars).
-    let inherited_key = std::env::vars()
-        .map(|(key, _)| key)
-        .find(|key| key.starts_with("CARGO_"))
-        .expect("expected at least one CARGO_* env var during tests");
-
     let inherited_env = client
         .call_tool("env_tool", json!({"key": inherited_key}))
         .await
         .unwrap();
-    assert_ne!(
-        inherited_env["result"],
-        json!("<missing>"),
-        "non-sensitive inherited var '{}' should be present in subprocess",
-        inherited_key
-    );
+    assert_eq!(inherited_env["result"], json!("allowed-value"));
 
     let explicit_env = client
         .call_tool("env_tool", json!({"key": "EXPLICIT_ALLOWED"}))
@@ -795,6 +797,7 @@ async fn stdio_transport_applies_working_dir_and_uses_safe_environment() {
     assert_eq!(explicit_env["result"], json!("present"));
 
     client.close().await;
+    std::env::remove_var(inherited_key);
 }
 
 #[tokio::test]
@@ -805,6 +808,8 @@ async fn stdio_call_tool_preserves_server_error_details_and_correlates_responses
     let config = McpServerConfig {
         id: "review-stdio".to_string(),
         label: "Review stdio".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -849,6 +854,8 @@ async fn sse_startup_failure_fails_fast() {
     let config = McpServerConfig {
         id: "broken-sse".to_string(),
         label: "Broken SSE".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::HttpSse {
             config: HttpConfig::new(format!("http://{}", addr)),
         },
@@ -1044,6 +1051,8 @@ async fn concurrent_sse_requests_are_correctly_correlated() {
     agent.register_mcp_server(McpServerConfig {
         id: "concurrent-sse".to_string(),
         label: "Concurrent SSE server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::HttpSse {
             config: HttpConfig::new(fake_sse_server.url.clone()),
         },
@@ -1202,6 +1211,8 @@ async fn stdio_initialize_accepts_absent_response_id() {
     agent.register_mcp_server(McpServerConfig {
         id: "null-id-stdio".to_string(),
         label: "Null ID stdio server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -1233,6 +1244,8 @@ async fn stdio_initialize_accepts_explicit_null_response_id() {
     agent.register_mcp_server(McpServerConfig {
         id: "explicit-null-stdio".to_string(),
         label: "Explicit null ID stdio server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],
@@ -1478,6 +1491,8 @@ async fn sse_initialize_accepts_absent_response_id() {
     agent.register_mcp_server(McpServerConfig {
         id: "null-id-sse".to_string(),
         label: "Null ID SSE server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::HttpSse {
             config: HttpConfig::new(fake_sse_server.url.clone()),
         },
@@ -1506,6 +1521,8 @@ async fn sse_initialize_accepts_explicit_null_response_id() {
     agent.register_mcp_server(McpServerConfig {
         id: "explicit-null-sse".to_string(),
         label: "Explicit null ID SSE server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::HttpSse {
             config: HttpConfig::new(fake_sse_server.url.clone()),
         },
@@ -1598,6 +1615,8 @@ async fn stdio_post_bootstrap_id_less_response_is_rejected() {
     agent.register_mcp_server(McpServerConfig {
         id: "null-id-tools-list".to_string(),
         label: "Null ID on tools/list".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Stdio {
             command: script_path.to_string_lossy().into_owned(),
             args: vec![],

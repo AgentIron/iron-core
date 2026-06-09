@@ -94,7 +94,7 @@ The runtime SHALL execute MCP-backed tool calls through the same validation, app
 - **THEN** the runtime does not request approval solely because the MCP-backed tool definition reports `requires_approval()`
 
 ### Requirement: Runtime supports concrete MCP transport clients
-The runtime SHALL provide concrete transport support for configured MCP servers using the declared transport type, including stdio, HTTP, and HTTP+SSE. For stdio transports, the runtime SHALL spawn the subprocess with the parent process environment minus environment variables whose names match sensitive credential patterns, rather than a hardcoded allowlist. The runtime SHALL strip vars matching case-insensitive suffix patterns associated with secrets (`_API_KEY`, `_SECRET`, `_SECRET_KEY`, `_TOKEN`, `_PASSWORD`, `_CREDENTIALS`, `_AUTH_TOKEN`, `_ACCESS_KEY`, `_ACCESS_TOKEN`) and well-known credential var names (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AZURE_CLIENT_SECRET`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`, `GITHUB_TOKEN`, `GH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`). The runtime SHALL log the names of stripped vars at debug level without logging their values. User-configured env vars from the MCP server config SHALL be merged after stripping and SHALL override any stripped or inherited values. For all MCP transports, the runtime SHALL encode outbound MCP protocol messages using the MCP camelCase wire format and SHALL decode inbound MCP protocol messages using the MCP camelCase wire format. This includes initialize, tool listing, tool calling, and related structured payloads whose wire field names differ from Rust snake_case naming. For MCP bootstrap, the runtime SHALL accept a successful `initialize` response whose JSON-RPC `id` is null or absent only when that response can be correlated unambiguously to the single in-flight bootstrap request. For MCP requests after bootstrap, the runtime SHALL continue to require valid request/response ID correlation and SHALL NOT accept ambiguous id-less responses as successful replies. HTTP and HTTP+SSE transports SHALL use a shared `HttpConfig` struct that carries the server URL and optional custom headers. The runtime SHALL send the `Accept: application/json, text/event-stream` header on all HTTP-based MCP requests and merge any configured custom headers.
+The runtime SHALL provide concrete transport support for configured MCP servers using the declared transport type, including stdio, HTTP, and HTTP+SSE. For stdio transports, the runtime SHALL spawn the subprocess with the parent process environment minus environment variables whose names match sensitive credential patterns, rather than a hardcoded allowlist. The runtime SHALL strip vars matching case-insensitive suffix patterns associated with secrets (`_API_KEY`, `_SECRET`, `_SECRET_KEY`, `_TOKEN`, `_PASSWORD`, `_CREDENTIALS`, `_AUTH_TOKEN`, `_ACCESS_KEY`, `_ACCESS_TOKEN`) and well-known credential var names (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AZURE_CLIENT_SECRET`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`, `GITHUB_TOKEN`, `GH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`). The runtime SHALL log the names of stripped vars at debug level without logging their values. Stdio MCP server config MAY include `inherited_env_vars`, a list of parent environment variable names to copy into the subprocess environment after sanitization without persisting the variable values. User-configured env vars from the MCP server config SHALL be merged after inherited env vars and SHALL override any stripped, inherited, or explicitly inherited values. For all MCP transports, the runtime SHALL encode outbound MCP protocol messages using the MCP camelCase wire format and SHALL decode inbound MCP protocol messages using the MCP camelCase wire format. This includes initialize, tool listing, tool calling, and related structured payloads whose wire field names differ from Rust snake_case naming. For MCP bootstrap, the runtime SHALL accept a successful `initialize` response whose JSON-RPC `id` is null or absent only when that response can be correlated unambiguously to the single in-flight bootstrap request. For MCP requests after bootstrap, the runtime SHALL continue to require valid request/response ID correlation and SHALL NOT accept ambiguous id-less responses as successful replies. HTTP and HTTP+SSE transports SHALL use a shared `HttpConfig` struct that carries the server URL and optional custom headers. The runtime SHALL send the `Accept: application/json, text/event-stream` header on all HTTP-based MCP requests and merge any configured custom headers.
 
 #### Scenario: Stdio subprocess inherits non-sensitive parent environment vars
 - **WHEN** a configured MCP server uses stdio transport and the parent process has environment variables that do not match sensitive patterns
@@ -103,12 +103,30 @@ The runtime SHALL provide concrete transport support for configured MCP servers 
 
 #### Scenario: Stdio subprocess strips vars matching sensitive suffix patterns
 - **WHEN** the parent process has environment variables whose names end in `_API_KEY`, `_SECRET`, `_TOKEN`, `_PASSWORD`, or similar sensitive suffixes
-- **THEN** those vars are not present in the spawned subprocess environment
+- **THEN** those vars are not present in the spawned subprocess environment after the sanitization layer
 - **THEN** the runtime logs the names of stripped vars at debug level
+- **AND** the runtime does not log their values
 
 #### Scenario: Stdio subprocess strips well-known credential vars
 - **WHEN** the parent process has environment variables like `AWS_ACCESS_KEY_ID`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, or other well-known credential names
-- **THEN** those vars are not present in the spawned subprocess environment
+- **THEN** those vars are not present in the spawned subprocess environment after the sanitization layer
+
+#### Scenario: Explicit inherited env vars reintroduce selected parent values
+- **WHEN** an MCP stdio server config lists an environment variable name in `inherited_env_vars`
+- **AND** the parent process contains that environment variable
+- **THEN** the subprocess environment includes the parent value for that named variable after sanitization
+- **AND** the config store persists only the variable name, not the variable value
+
+#### Scenario: Explicit inherited env var is absent from parent
+- **WHEN** an MCP stdio server config lists an environment variable name in `inherited_env_vars`
+- **AND** the parent process does not contain that environment variable
+- **THEN** the runtime does not synthesize a value for that variable
+- **AND** MCP startup proceeds unless the server fails because the variable is required by the external command
+
+#### Scenario: User-configured env overrides inherited vars
+- **WHEN** an MCP server config specifies an env var that is also listed in `inherited_env_vars`
+- **THEN** the user-configured value is present in the subprocess environment
+- **AND** the user-configured env map has final precedence
 
 #### Scenario: User-configured env overrides stripped vars
 - **WHEN** an MCP server config specifies an env var that would otherwise be stripped by the sensitive pattern matching
@@ -117,7 +135,7 @@ The runtime SHALL provide concrete transport support for configured MCP servers 
 
 #### Scenario: Sensitive pattern matching is case-insensitive
 - **WHEN** the parent process has an environment variable whose name matches a sensitive pattern with different casing (e.g., `My_Api_Key` matching `_API_KEY`)
-- **THEN** that var is still stripped
+- **THEN** that var is still stripped by the sanitization layer unless explicitly reintroduced through `inherited_env_vars` or configured env
 
 #### Scenario: Initialize request uses camelCase wire fields
 - **WHEN** the runtime sends an MCP `initialize` request

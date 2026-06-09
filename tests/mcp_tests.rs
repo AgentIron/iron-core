@@ -43,6 +43,8 @@ fn new_session_uses_runtime_default_enablement_enabled() {
     let server_config = McpServerConfig {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -80,6 +82,8 @@ fn new_session_uses_runtime_default_enablement_disabled() {
     let server_config = McpServerConfig {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -116,6 +120,8 @@ fn session_toggle_does_not_affect_another_session() {
     let server_config = McpServerConfig {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -176,6 +182,8 @@ fn mcp_state_not_included_in_handoff() {
     let server_config = McpServerConfig {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -242,6 +250,8 @@ async fn imported_session_adopts_destination_runtime_mcp_policy() {
     source_agent.register_mcp_server(McpServerConfig {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -272,6 +282,8 @@ async fn imported_session_adopts_destination_runtime_mcp_policy() {
     destination_agent.register_mcp_server(McpServerConfig {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
@@ -311,6 +323,8 @@ fn registering_new_server_materializes_runtime_default_for_existing_sessions() {
     runtime.register_mcp_server(McpServerConfig {
         id: "late-server".to_string(),
         label: "Late Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },

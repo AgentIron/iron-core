@@ -613,6 +613,422 @@ async fn test_durable_store_disconnect_oauth() {
 }
 
 // ============================================================================
+// Runtime Settings Tests (Issue #67)
+// ============================================================================
+
+use iron_core::config::{
+    CustomModelInput, DefaultModelInput, McpServerConfigInput, ProviderConfigInput,
+    SkillSettingsInput,
+};
+use iron_core::mcp::server::{HttpConfig, McpTransport};
+use std::collections::HashMap;
+
+#[tokio::test]
+async fn test_provider_config_crud() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let input = ProviderConfigInput {
+        provider_slug: "openai".to_string(),
+        display_name: "OpenAI".to_string(),
+        enabled: true,
+        base_url: Some("https://api.openai.com".to_string()),
+    };
+
+    let record = store.set_provider_config(&input).await.unwrap();
+    assert_eq!(record.provider_slug, "openai");
+    assert_eq!(record.display_name, "OpenAI");
+    assert!(record.enabled);
+
+    let retrieved = store.get_provider_config("openai").await.unwrap().unwrap();
+    assert_eq!(retrieved.display_name, "OpenAI");
+
+    let list = store.list_provider_configs().await.unwrap();
+    assert_eq!(list.len(), 1);
+
+    store.remove_provider_config("openai").await.unwrap();
+    assert!(store.get_provider_config("openai").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_provider_config_excludes_credentials() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    // Verify provider config API does not accept credential fields
+    let input = ProviderConfigInput {
+        provider_slug: "openai".to_string(),
+        display_name: "OpenAI".to_string(),
+        enabled: true,
+        base_url: None,
+    };
+
+    let record = store.set_provider_config(&input).await.unwrap();
+    // Provider config record should not have api_key or credential fields
+    assert_eq!(record.provider_slug, "openai");
+}
+
+#[tokio::test]
+async fn test_custom_model_crud() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let input = CustomModelInput {
+        provider_slug: "openai".to_string(),
+        model_id: "gpt-4o-custom".to_string(),
+        display_name: "Custom GPT-4o".to_string(),
+        context_window: Some(128000),
+        output_limit: Some(4096),
+        supports_tool_calls: true,
+        supports_reasoning: false,
+        supports_vision: true,
+        cost_input_per_million: Some(5.0),
+        cost_output_per_million: Some(15.0),
+    };
+
+    let record = store.set_custom_model(&input).await.unwrap();
+    assert_eq!(record.model_id, "gpt-4o-custom");
+
+    let retrieved = store
+        .get_custom_model("openai", "gpt-4o-custom")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retrieved.display_name, "Custom GPT-4o");
+    assert_eq!(retrieved.context_window, Some(128000));
+
+    let list = store.list_custom_models(None).await.unwrap();
+    assert_eq!(list.len(), 1);
+
+    let by_provider = store.list_custom_models(Some("openai")).await.unwrap();
+    assert_eq!(by_provider.len(), 1);
+
+    store
+        .remove_custom_model("openai", "gpt-4o-custom")
+        .await
+        .unwrap();
+    assert!(store
+        .get_custom_model("openai", "gpt-4o-custom")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_default_model_crud() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let input = DefaultModelInput {
+        provider_slug: "openai".to_string(),
+        model_id: "gpt-4o".to_string(),
+    };
+
+    let record = store.set_default_model(&input).await.unwrap();
+    assert_eq!(record.provider_slug, "openai");
+    assert_eq!(record.model_id, "gpt-4o");
+
+    let retrieved = store.get_default_model().await.unwrap().unwrap();
+    assert_eq!(retrieved.provider_slug, "openai");
+    assert_eq!(retrieved.model_id, "gpt-4o");
+
+    store.clear_default_model().await.unwrap();
+    assert!(store.get_default_model().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_mcp_server_stdio_crud() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let mut env = HashMap::new();
+    env.insert("KEY".to_string(), "value".to_string());
+
+    let input = McpServerConfigInput {
+        id: "filesystem".to_string(),
+        label: "Filesystem".to_string(),
+        description: Some("File system access".to_string()),
+        transport: McpTransport::Stdio {
+            command: "npx".to_string(),
+            args: vec!["-y", "@modelcontextprotocol/server-filesystem"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            env,
+        },
+        working_dir: Some(std::path::PathBuf::from("/tmp")),
+        enabled_by_default: true,
+        inherited_env_vars: vec!["HOME".to_string()],
+    };
+
+    let record = store.set_mcp_server(&input).await.unwrap();
+    assert_eq!(record.id, "filesystem");
+    assert_eq!(record.inherited_env_vars, vec!["HOME"]);
+
+    let retrieved = store.get_mcp_server("filesystem").await.unwrap().unwrap();
+    assert_eq!(retrieved.label, "Filesystem");
+    assert_eq!(retrieved.inherited_env_vars, vec!["HOME"]);
+
+    let list = store.list_mcp_servers().await.unwrap();
+    assert_eq!(list.len(), 1);
+
+    store.remove_mcp_server("filesystem").await.unwrap();
+    assert!(store.get_mcp_server("filesystem").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_mcp_server_http_crud() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let input = McpServerConfigInput {
+        id: "remote".to_string(),
+        label: "Remote".to_string(),
+        description: None,
+        transport: McpTransport::Http {
+            config: HttpConfig {
+                url: "https://example.com/mcp".to_string(),
+                headers: Some(
+                    [("Authorization".to_string(), "Bearer token".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+            },
+        },
+        working_dir: None,
+        enabled_by_default: false,
+        inherited_env_vars: vec![],
+    };
+
+    let record = store.set_mcp_server(&input).await.unwrap();
+    assert_eq!(record.id, "remote");
+
+    let retrieved = store.get_mcp_server("remote").await.unwrap().unwrap();
+    match retrieved.transport {
+        McpTransport::Http { config } => {
+            assert_eq!(config.url, "https://example.com/mcp");
+        }
+        _ => panic!("Expected HTTP transport"),
+    }
+}
+
+#[tokio::test]
+async fn test_skill_settings_defaults() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    // Defaults when not set
+    let settings = store.get_skill_settings().await.unwrap();
+    assert!(!settings.trust_project_skills);
+    assert!(settings.additional_skill_dirs.is_empty());
+
+    let input = SkillSettingsInput {
+        trust_project_skills: true,
+        additional_skill_dirs: vec![std::path::PathBuf::from("/custom/skills")],
+    };
+
+    let record = store.set_skill_settings(&input).await.unwrap();
+    assert!(record.trust_project_skills);
+    assert_eq!(record.additional_skill_dirs.len(), 1);
+
+    let retrieved = store.get_skill_settings().await.unwrap();
+    assert!(retrieved.trust_project_skills);
+}
+
+#[tokio::test]
+async fn test_runtime_settings_snapshot() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    // Set up some runtime settings
+    store
+        .set_provider_config(&ProviderConfigInput {
+            provider_slug: "openai".to_string(),
+            display_name: "OpenAI".to_string(),
+            enabled: true,
+            base_url: None,
+        })
+        .await
+        .unwrap();
+
+    store
+        .set_default_model(&DefaultModelInput {
+            provider_slug: "openai".to_string(),
+            model_id: "gpt-4o".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let snapshot = store.load_runtime_settings().await.unwrap();
+    assert_eq!(snapshot.provider_configs.len(), 1);
+    assert!(snapshot.default_model.is_some());
+    assert!(!snapshot.skill_settings.trust_project_skills);
+}
+
+#[tokio::test]
+async fn test_inherited_env_vars_validation() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let input = McpServerConfigInput {
+        id: "bad-env".to_string(),
+        label: "Bad Env".to_string(),
+        description: None,
+        transport: McpTransport::Stdio {
+            command: "echo".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+        },
+        working_dir: None,
+        enabled_by_default: true,
+        inherited_env_vars: vec!["KEY=VALUE".to_string()],
+    };
+
+    let result = store.set_mcp_server(&input).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_custom_model_numeric_validation() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let input = CustomModelInput {
+        provider_slug: "openai".to_string(),
+        model_id: "bad-cost".to_string(),
+        display_name: "Bad Cost".to_string(),
+        context_window: Some(0),
+        output_limit: Some(4096),
+        supports_tool_calls: false,
+        supports_reasoning: false,
+        supports_vision: false,
+        cost_input_per_million: Some(-1.0),
+        cost_output_per_million: Some(0.0),
+    };
+
+    let result = store.set_custom_model(&input).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_mcp_server_transport_validation() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let input = McpServerConfigInput {
+        id: "bad-stdio".to_string(),
+        label: "Bad Stdio".to_string(),
+        description: None,
+        transport: McpTransport::Stdio {
+            command: "".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+        },
+        working_dir: None,
+        enabled_by_default: true,
+        inherited_env_vars: vec![],
+    };
+
+    let result = store.set_mcp_server(&input).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_skill_settings_reject_empty_additional_dir() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let result = store
+        .set_skill_settings(&SkillSettingsInput {
+            trust_project_skills: false,
+            additional_skill_dirs: vec![std::path::PathBuf::new()],
+        })
+        .await;
+
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_migrations_v1_to_v2() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("v1-config.db");
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&db_path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+
+    sqlx::raw_sql(
+        r#"
+        CREATE TABLE schema_version (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            version INTEGER NOT NULL
+        );
+
+        CREATE TABLE profiles (
+            id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE prompts (
+            id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE schedule (
+            id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE credentials (
+            provider_slug TEXT PRIMARY KEY,
+            credential_mode TEXT NOT NULL,
+            encrypted_payload BLOB NOT NULL,
+            nonce BLOB NOT NULL,
+            encryption_metadata TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        INSERT INTO schema_version (id, version) VALUES (1, 1);
+        INSERT INTO profiles (id, schema_version, payload, created_at, updated_at)
+        VALUES ('legacy-profile', 1, '{"name":"Legacy"}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    drop(pool);
+
+    let store = open_test_store(&db_path).await;
+
+    let legacy_profile = store.get_profile("legacy-profile").await.unwrap().unwrap();
+    assert_eq!(legacy_profile.payload, json!({"name": "Legacy"}));
+
+    let mut conn = store.acquire().await.unwrap();
+    let version: i64 = sqlx::query_scalar("SELECT version FROM schema_version WHERE id = 1")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(version, 2);
+
+    // Verify v2 tables exist by using the new APIs
+    store
+        .set_provider_config(&ProviderConfigInput {
+            provider_slug: "test".to_string(),
+            display_name: "Test".to_string(),
+            enabled: true,
+            base_url: None,
+        })
+        .await
+        .unwrap();
+
+    let retrieved = store.get_provider_config("test").await.unwrap();
+    assert!(retrieved.is_some());
+}
+
+// ============================================================================
 // XDG Path Verification Tests (Task 8.6)
 // ============================================================================
 

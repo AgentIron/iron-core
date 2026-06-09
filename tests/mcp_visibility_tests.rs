@@ -14,6 +14,8 @@ fn create_test_registry() -> Arc<McpServerRegistry> {
     let server_config = McpServerConfig {
         id: "test-server".to_string(),
         label: "Test Server".to_string(),
+        description: None,
+        inherited_env_vars: vec![],
         transport: McpTransport::Http {
             config: HttpConfig::new("http://localhost:8080".to_string()),
         },
