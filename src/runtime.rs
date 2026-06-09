@@ -1613,6 +1613,7 @@ impl IronRuntime {
         let catalog = build_effective_catalog(&builtin_model_catalog(), &settings.custom_models)?;
 
         let mut registry = self.inner.model_capability_registry.write();
+        *registry = crate::context::model_switch::ModelCapabilityRegistry::new();
         for entry in catalog.all_entries() {
             let metadata = crate::context::model_switch::ModelCapabilityMetadata::from(entry);
             registry.register(metadata);

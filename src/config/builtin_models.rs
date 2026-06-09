@@ -76,10 +76,18 @@ impl BuiltinModelEntry {
         self
     }
 
-    /// Enable reasoning support with optional accepted values.
+    /// Enable reasoning support with accepted effort values.
+    ///
+    /// An empty vector is rejected because reasoning support requires
+    /// at least one valid effort level.
     pub fn with_reasoning(mut self, values: Vec<impl Into<String>>) -> Self {
-        self.supports_reasoning = !values.is_empty();
-        self.reasoning_effort_values = values.into_iter().map(Into::into).collect();
+        let effort_values: Vec<String> = values.into_iter().map(Into::into).collect();
+        assert!(
+            !effort_values.is_empty(),
+            "with_reasoning requires at least one effort value"
+        );
+        self.supports_reasoning = true;
+        self.reasoning_effort_values = effort_values;
         self
     }
 

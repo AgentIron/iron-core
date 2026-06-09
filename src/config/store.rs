@@ -715,6 +715,19 @@ impl ConfigStore {
             )));
         }
 
+        // Enforce extend-only semantics: custom models must not shadow built-ins.
+        let empty_custom_models: Vec<CustomModelRecord> = Vec::new();
+        let builtin_catalog = super::effective_catalog::build_effective_catalog(
+            &super::builtin_models::builtin_model_catalog(),
+            &empty_custom_models,
+        )?;
+        if builtin_catalog.contains(&input.provider_slug, &input.model_id) {
+            return Err(ConfigError::Validation(format!(
+                "Custom model ({} / {}) conflicts with a built-in model id",
+                input.provider_slug, input.model_id
+            )));
+        }
+
         let reasoning_json = serde_json::to_string(&input.reasoning_effort_values)?;
         let now = Utc::now().to_rfc3339();
         sqlx::query(
@@ -791,9 +804,13 @@ impl ConfigStore {
                 provider_slug: row.get("provider_slug"),
                 model_id: row.get("model_id"),
                 display_name: row.get("display_name"),
-                context_window: row
-                    .get::<Option<i64>, _>("context_window")
-                    .map(|v| v as u32),
+                context_window: row.get::<Option<i64>, _>("context_window").and_then(|v| {
+                    if v < 0 {
+                        None
+                    } else {
+                        Some(v as u32)
+                    }
+                }),
                 output_limit: row.get::<Option<i64>, _>("output_limit").map(|v| v as u32),
                 supports_tool_calls: row.get::<i64, _>("supports_tool_calls") != 0,
                 supports_reasoning: row.get::<i64, _>("supports_reasoning") != 0,
@@ -839,9 +856,13 @@ impl ConfigStore {
                     provider_slug: row.get("provider_slug"),
                     model_id: row.get("model_id"),
                     display_name: row.get("display_name"),
-                    context_window: row
-                        .get::<Option<i64>, _>("context_window")
-                        .map(|v| v as u32),
+                    context_window: row.get::<Option<i64>, _>("context_window").and_then(|v| {
+                        if v < 0 {
+                            None
+                        } else {
+                            Some(v as u32)
+                        }
+                    }),
                     output_limit: row.get::<Option<i64>, _>("output_limit").map(|v| v as u32),
                     supports_tool_calls: row.get::<i64, _>("supports_tool_calls") != 0,
                     supports_reasoning: row.get::<i64, _>("supports_reasoning") != 0,

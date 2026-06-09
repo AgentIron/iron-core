@@ -121,7 +121,7 @@ impl EffectiveModelCatalog {
     /// Register a custom entry into the catalog.
     fn register_custom(&mut self, entry: &CustomModelRecord) {
         let mut modalities = vec!["text".to_string()];
-        if entry.supports_vision && !modalities.contains(&"image".to_string()) {
+        if entry.supports_vision {
             modalities.push("image".to_string());
         }
 

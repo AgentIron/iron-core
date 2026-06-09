@@ -1407,6 +1407,32 @@ async fn test_effective_model_catalog_rejects_duplicate_builtin() {
 }
 
 #[tokio::test]
+async fn test_set_custom_model_rejects_duplicate_builtin() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_test_store(dir.path().join("test.db")).await;
+
+    let input = iron_core::config::CustomModelInput {
+        provider_slug: "openai".to_string(),
+        model_id: "gpt-4o".to_string(),
+        display_name: "Duplicate GPT-4o".to_string(),
+        context_window: Some(100_000),
+        output_limit: Some(4_096),
+        supports_tool_calls: true,
+        supports_reasoning: false,
+        supports_vision: false,
+        supports_streaming: true,
+        reasoning_effort_values: vec![],
+        cost_input_per_million: None,
+        cost_output_per_million: None,
+    };
+
+    let result = store.set_custom_model(&input).await;
+    assert!(
+        matches!(result, Err(iron_core::config::ConfigError::Validation(ref msg)) if msg.contains("conflicts with a built-in model"))
+    );
+}
+
+#[tokio::test]
 async fn test_custom_model_extends_builtin_catalog() {
     let custom = vec![CustomModelRecord {
         provider_slug: "openai".to_string(),

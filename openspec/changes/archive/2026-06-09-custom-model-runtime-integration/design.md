@@ -7,7 +7,7 @@ Issue #68 asks for ConfigStore-backed custom model registry APIs. The CRUD stora
 
 There is also no unified "effective model catalog" that merges built-in iron-providers model metadata with custom model records. The runtime resolves providers via `ProviderRegistry::default()` (runtime.rs:479, request_builder.rs:265), but this path has no awareness of custom models.
 
-```
+```text
 CURRENT STATE                          TARGET STATE
 ─────────────                          ────────────
 
