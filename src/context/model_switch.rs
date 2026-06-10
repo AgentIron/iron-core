@@ -106,6 +106,17 @@ pub struct ModelSwitchRecord {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+/// Metrics from an automatic compaction performed during a model switch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactionInfo {
+    /// Estimated tokens before compaction.
+    pub tokens_before: u32,
+    /// Estimated tokens after compaction.
+    pub tokens_after: u32,
+    /// Method used (e.g. "auto_compaction").
+    pub method: String,
+}
+
 /// Pending model switch queued for turn boundary
 #[derive(Debug, Clone)]
 pub struct PendingModelSwitch {

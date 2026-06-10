@@ -24,6 +24,20 @@ pub enum PromptLifecycleEvent {
         status: String,
         detail: Option<serde_json::Value>,
     },
+    CompactionStarted {
+        compaction_id: String,
+        method: String,
+    },
+    CompactionFinished {
+        compaction_id: String,
+        tokens_before: Option<u32>,
+        tokens_after: Option<u32>,
+        method: String,
+    },
+    CompactionFailed {
+        compaction_id: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +159,55 @@ impl PromptSink for AcpPromptSink {
                             &activity_type,
                             &status,
                             detail,
+                        )
+                        .await;
+                })
+            }
+            PromptLifecycleEvent::CompactionStarted {
+                compaction_id,
+                method,
+            } => {
+                let client = self.client.clone();
+                Box::pin(async move {
+                    let _ = client
+                        .emit_compaction_event("started", None, None, &method, None, &compaction_id)
+                        .await;
+                })
+            }
+            PromptLifecycleEvent::CompactionFinished {
+                compaction_id,
+                tokens_before,
+                tokens_after,
+                method,
+            } => {
+                let client = self.client.clone();
+                Box::pin(async move {
+                    let _ = client
+                        .emit_compaction_event(
+                            "finished",
+                            tokens_before,
+                            tokens_after,
+                            &method,
+                            None,
+                            &compaction_id,
+                        )
+                        .await;
+                })
+            }
+            PromptLifecycleEvent::CompactionFailed {
+                compaction_id,
+                reason,
+            } => {
+                let client = self.client.clone();
+                Box::pin(async move {
+                    let _ = client
+                        .emit_compaction_event(
+                            "failed",
+                            None,
+                            None,
+                            "",
+                            Some(&reason),
+                            &compaction_id,
                         )
                         .await;
                 })

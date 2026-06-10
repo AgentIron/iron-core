@@ -35,6 +35,18 @@ pub trait ClientChannel {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> {
         Box::pin(async {})
     }
+
+    fn emit_compaction_event(
+        &self,
+        _event_type: &str,
+        _tokens_before: Option<u32>,
+        _tokens_after: Option<u32>,
+        _method: &str,
+        _reason: Option<&str>,
+        _compaction_id: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> {
+        Box::pin(async {})
+    }
 }
 
 struct NopClientChannel;
@@ -283,8 +295,38 @@ impl IronConnection {
         self.runtime
             .check_and_apply_pending_workspace_roots(iron_session_id);
 
-        self.runtime
-            .check_and_apply_pending_model_switch(iron_session_id);
+        match self
+            .runtime
+            .check_and_apply_pending_model_switch(iron_session_id)
+        {
+            Ok(Some((_, Some(compaction)))) => {
+                let compaction_id = uuid::Uuid::new_v4().to_string();
+                let _ = client
+                    .emit_compaction_event(
+                        "started",
+                        Some(compaction.tokens_before),
+                        Some(compaction.tokens_after),
+                        &compaction.method,
+                        None,
+                        &compaction_id,
+                    )
+                    .await;
+                let _ = client
+                    .emit_compaction_event(
+                        "finished",
+                        Some(compaction.tokens_before),
+                        Some(compaction.tokens_after),
+                        &compaction.method,
+                        None,
+                        &compaction_id,
+                    )
+                    .await;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(error = %e, "Pending model switch failed");
+            }
+        }
 
         if config.context_management.enabled {
             if let Some(ref runner) = runner {
@@ -361,8 +403,38 @@ impl IronConnection {
                 self.runtime
                     .check_and_apply_pending_workspace_roots(iron_session_id);
                 // Check for pending model switches at turn boundary
-                self.runtime
-                    .check_and_apply_pending_model_switch(iron_session_id);
+                match self
+                    .runtime
+                    .check_and_apply_pending_model_switch(iron_session_id)
+                {
+                    Ok(Some((_, Some(compaction)))) => {
+                        let compaction_id = uuid::Uuid::new_v4().to_string();
+                        let _ = client
+                            .emit_compaction_event(
+                                "started",
+                                Some(compaction.tokens_before),
+                                Some(compaction.tokens_after),
+                                &compaction.method,
+                                None,
+                                &compaction_id,
+                            )
+                            .await;
+                        let _ = client
+                            .emit_compaction_event(
+                                "finished",
+                                Some(compaction.tokens_before),
+                                Some(compaction.tokens_after),
+                                &compaction.method,
+                                None,
+                                &compaction_id,
+                            )
+                            .await;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(error = %e, "Pending model switch failed");
+                    }
+                }
                 return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
             }
         };
@@ -380,8 +452,38 @@ impl IronConnection {
             .check_and_apply_pending_workspace_roots(iron_session_id);
 
         // Check for pending model switches at turn boundary
-        self.runtime
-            .check_and_apply_pending_model_switch(iron_session_id);
+        match self
+            .runtime
+            .check_and_apply_pending_model_switch(iron_session_id)
+        {
+            Ok(Some((_, Some(compaction)))) => {
+                let compaction_id = uuid::Uuid::new_v4().to_string();
+                let _ = client
+                    .emit_compaction_event(
+                        "started",
+                        Some(compaction.tokens_before),
+                        Some(compaction.tokens_after),
+                        &compaction.method,
+                        None,
+                        &compaction_id,
+                    )
+                    .await;
+                let _ = client
+                    .emit_compaction_event(
+                        "finished",
+                        Some(compaction.tokens_before),
+                        Some(compaction.tokens_after),
+                        &compaction.method,
+                        None,
+                        &compaction_id,
+                    )
+                    .await;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(error = %e, "Pending model switch failed");
+            }
+        }
 
         if config.context_management.enabled {
             runner

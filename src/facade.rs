@@ -207,6 +207,38 @@ pub enum PromptEvent {
         /// The provider slug for the target model (if managed).
         target_provider: Option<String>,
     },
+    /// Context compaction has started.
+    ///
+    /// Emitted when the runtime begins compressing context, whether
+    /// triggered by the compress tool or automatic adaptation.
+    CompactionStarted {
+        /// Correlation identifier for pairing with Finished/Failed events.
+        compaction_id: String,
+        /// Method when known at start time (e.g. "model_summary" or "auto_compaction").
+        method: String,
+    },
+    /// Context compaction has finished.
+    ///
+    /// Emitted when compression completes successfully.
+    CompactionFinished {
+        /// Correlation identifier matching the preceding CompactionStarted event.
+        compaction_id: String,
+        /// Estimated tokens before compaction.
+        tokens_before: Option<u32>,
+        /// Estimated tokens after compaction.
+        tokens_after: Option<u32>,
+        /// Method used (e.g. "model_summary" or "auto_compaction").
+        method: String,
+    },
+    /// Context compaction has failed.
+    ///
+    /// Emitted when compression could not be applied.
+    CompactionFailed {
+        /// Correlation identifier matching the preceding CompactionStarted event.
+        compaction_id: String,
+        /// Human-readable reason for the failure.
+        reason: String,
+    },
     /// The prompt has completed.
     Complete {
         /// The final outcome of the prompt.
@@ -1047,6 +1079,38 @@ impl ClientChannel for FacadeClientChannel {
             status: act_status,
             detail,
         });
+        Box::pin(async {})
+    }
+
+    fn emit_compaction_event(
+        &self,
+        event_type: &str,
+        tokens_before: Option<u32>,
+        tokens_after: Option<u32>,
+        method: &str,
+        reason: Option<&str>,
+        compaction_id: &str,
+    ) -> Pin<Box<dyn std::future::Future<Output = ()>>> {
+        let event = match event_type {
+            "started" => Some(PromptEvent::CompactionStarted {
+                compaction_id: compaction_id.to_string(),
+                method: method.to_string(),
+            }),
+            "finished" => Some(PromptEvent::CompactionFinished {
+                compaction_id: compaction_id.to_string(),
+                tokens_before,
+                tokens_after,
+                method: method.to_string(),
+            }),
+            "failed" => reason.map(|r| PromptEvent::CompactionFailed {
+                compaction_id: compaction_id.to_string(),
+                reason: r.to_string(),
+            }),
+            _ => None,
+        };
+        if let Some(evt) = event {
+            self.emit_stream_event(evt);
+        }
         Box::pin(async {})
     }
 
@@ -1991,7 +2055,7 @@ impl AgentSession {
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
 
-            let capability_diff = runtime
+            let (capability_diff, compaction_info) = runtime
                 .apply_model_switch(self.id, request.clone())
                 .map_err(|e| e.to_string())?;
 
@@ -2006,6 +2070,20 @@ impl AgentSession {
                     provider_name,
                 } => (model.clone(), Some(provider_name.clone())),
             };
+
+            if let Some(info) = compaction_info {
+                let compaction_id = uuid::Uuid::new_v4().to_string();
+                self.emit_model_switch_event(PromptEvent::CompactionStarted {
+                    compaction_id: compaction_id.clone(),
+                    method: info.method.clone(),
+                });
+                self.emit_model_switch_event(PromptEvent::CompactionFinished {
+                    compaction_id,
+                    tokens_before: Some(info.tokens_before),
+                    tokens_after: Some(info.tokens_after),
+                    method: info.method,
+                });
+            }
 
             self.emit_model_switch_event(PromptEvent::ModelSwitched {
                 from_model,

@@ -2250,3 +2250,310 @@ fn model_switch_unknown_target_model_rejected() {
         );
     });
 }
+
+// =========================================================================
+// Active context telemetry threshold tests
+// =========================================================================
+
+#[test]
+fn active_context_includes_compact_threshold_when_enabled() {
+    use iron_core::{Config, ContextManagementConfig, IronAgent};
+
+    let config = Config::new().with_context_management(
+        ContextManagementConfig::new()
+            .enabled()
+            .with_maintenance_threshold(50_000)
+            .with_context_window_hint(128_000),
+    );
+    let agent = IronAgent::new(config, MockProvider::default());
+    let conn = agent.connect();
+    let session = conn.create_session().unwrap();
+
+    session.set_instructions("Test instructions");
+    let registry = ToolRegistry::new();
+    let snapshot = session.active_context(&registry, None, Some(128_000));
+
+    assert_eq!(snapshot.compact_threshold_tokens, Some(50_000));
+    assert_eq!(snapshot.context_window_limit, Some(128_000));
+}
+
+#[test]
+fn active_context_omits_compact_threshold_when_disabled() {
+    use iron_core::{Config, IronAgent};
+
+    let config = Config::new(); // disabled by default
+    let agent = IronAgent::new(config, MockProvider::default());
+    let conn = agent.connect();
+    let session = conn.create_session().unwrap();
+
+    let registry = ToolRegistry::new();
+    let snapshot = session.active_context(&registry, None, Some(128_000));
+
+    assert_eq!(snapshot.compact_threshold_tokens, None);
+}
+
+// =========================================================================
+// Model-switch compaction lifecycle event tests
+// =========================================================================
+
+#[test]
+fn model_switch_active_stream_emits_compaction_lifecycle_events() {
+    use iron_core::facade::PromptEvent;
+    use iron_core::{Config, ContextManagementConfig, IronAgent, ModelSwitchRequest};
+    use iron_providers::ProviderEvent;
+
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::Output {
+                content: "This is a moderately long response from the agent that contains enough text to contribute meaningfully to the token count for compaction testing purposes.".into(),
+            },
+            ProviderEvent::Complete,
+        ]]);
+
+        let mut config = Config::new();
+        config.context_management = ContextManagementConfig::new()
+            .with_context_window_hint(300)
+            .enabled();
+
+        let agent = IronAgent::new(config, provider);
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        // Establish conversation with many turns to build up context beyond the window
+        for i in 0..10 {
+            let msg = format!("User message number {} with substantial content to ensure token accumulation exceeds the small target window we configured for this test", i);
+            let _ = session.prompt(msg.as_str()).await;
+        }
+
+        // Start a stream and queue a model switch while it's active
+        let (_handle, mut events) = session.prompt_stream("next");
+
+        let request = ModelSwitchRequest::Managed {
+            provider_slug: "openai".into(),
+            model: "gpt-4o-mini".into(),
+            api_key: None,
+        };
+        let result = session.switch_model(request);
+        assert!(result.is_ok(), "Switch should queue on active session");
+
+        // Collect all events from the stream
+        let mut collected = Vec::new();
+        while let Some(event) = events.next().await {
+            collected.push(event);
+            if matches!(collected.last(), Some(PromptEvent::Complete { .. })) {
+                break;
+            }
+        }
+
+        // Verify compaction lifecycle events were emitted at the turn boundary
+        let started_pos = collected
+            .iter()
+            .position(|e| matches!(e, PromptEvent::CompactionStarted { .. }));
+        let finished_pos = collected.iter().position(|e| {
+            matches!(e, PromptEvent::CompactionFinished { method, .. } if method == "auto_compaction")
+        });
+
+        assert!(
+            started_pos.is_some(),
+            "expected CompactionStarted in stream after model switch with compaction"
+        );
+        assert!(
+            finished_pos.is_some(),
+            "expected CompactionFinished in stream after model switch with compaction"
+        );
+
+        // Verify ordering: compaction events should come before Complete
+        let complete_pos = collected
+            .iter()
+            .position(|e| matches!(e, PromptEvent::Complete { .. }));
+        assert!(complete_pos.is_some(), "expected Complete event");
+        assert!(
+            started_pos.unwrap() < complete_pos.unwrap(),
+            "CompactionStarted should precede Complete"
+        );
+        assert!(
+            finished_pos.unwrap() < complete_pos.unwrap(),
+            "CompactionFinished should precede Complete"
+        );
+        assert!(
+            started_pos.unwrap() < finished_pos.unwrap(),
+            "CompactionStarted should precede CompactionFinished"
+        );
+
+        // Extract started compaction_id for correlation and verify method
+        let started_id = collected.iter().find_map(|e| {
+            if let PromptEvent::CompactionStarted {
+                compaction_id,
+                method,
+            } = e
+            {
+                assert_eq!(method, "auto_compaction");
+                Some(compaction_id.clone())
+            } else {
+                None
+            }
+        });
+        assert!(
+            started_id.is_some(),
+            "expected CompactionStarted with compaction_id"
+        );
+
+        // Verify CompactionFinished has auto_compaction metrics and matching compaction_id
+        if let Some(PromptEvent::CompactionFinished {
+            compaction_id,
+            tokens_before,
+            tokens_after,
+            method,
+        }) = collected
+            .iter()
+            .find(|e| matches!(e, PromptEvent::CompactionFinished { .. }))
+        {
+            assert_eq!(
+                compaction_id,
+                started_id.as_ref().unwrap(),
+                "compaction_id must match between Started and Finished"
+            );
+            assert!(
+                tokens_before.is_some(),
+                "expected tokens_before for auto_compaction"
+            );
+            assert!(
+                tokens_after.is_some(),
+                "expected tokens_after for auto_compaction"
+            );
+            assert_eq!(method, "auto_compaction");
+        } else {
+            panic!("CompactionFinished not found");
+        }
+    });
+}
+
+// =========================================================================
+// Debug sink helper for integration tests
+// =========================================================================
+
+use iron_core::{ContextDebugEvent, DebugEvent, DebugPayload, DebugSink};
+use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+struct RecordingDebugSink {
+    events: Mutex<Vec<DebugEvent>>,
+}
+
+impl RecordingDebugSink {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn take_events(&self) -> Vec<DebugEvent> {
+        std::mem::take(&mut *self.events.lock().unwrap())
+    }
+}
+
+impl DebugSink for RecordingDebugSink {
+    fn emit(&self, event: DebugEvent) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+// =========================================================================
+// Emitted context snapshot telemetry tests
+// =========================================================================
+
+#[test]
+fn emitted_context_snapshot_includes_compact_threshold_when_enabled() {
+    use iron_core::{Config, ContextManagementConfig, IronAgent};
+    use iron_providers::ProviderEvent;
+
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::Output {
+                content: "Hello!".into(),
+            },
+            ProviderEvent::Complete,
+        ]]);
+
+        let config = Config::new().with_context_management(
+            ContextManagementConfig::new()
+                .enabled()
+                .with_maintenance_threshold(42_000)
+                .with_context_window_hint(128_000),
+        );
+
+        let agent = IronAgent::new(config, provider);
+        let sink = Arc::new(RecordingDebugSink::new());
+        agent.set_debug_sink(Some(sink.clone()));
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        session.set_instructions("Test instructions");
+        let _ = session.prompt("hello").await;
+
+        let events = sink.take_events();
+        let snapshot_events: Vec<_> = events
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                DebugPayload::Context(ContextDebugEvent::SnapshotEstimated {
+                    compact_threshold_tokens,
+                    context_window_limit,
+                    ..
+                }) => Some((compact_threshold_tokens, context_window_limit)),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !snapshot_events.is_empty(),
+            "expected at least one SnapshotEstimated debug event"
+        );
+        for (threshold, limit) in &snapshot_events {
+            assert_eq!(*threshold, Some(42_000));
+            assert_eq!(*limit, Some(128_000));
+        }
+    });
+}
+
+#[test]
+fn emitted_context_snapshot_omits_compact_threshold_when_disabled() {
+    use iron_core::{Config, IronAgent};
+    use iron_providers::ProviderEvent;
+
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::Output {
+                content: "Hello!".into(),
+            },
+            ProviderEvent::Complete,
+        ]]);
+
+        let config = Config::new(); // context management disabled by default
+        let agent = IronAgent::new(config, provider);
+        let sink = Arc::new(RecordingDebugSink::new());
+        agent.set_debug_sink(Some(sink.clone()));
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        session.set_instructions("Test instructions");
+        let _ = session.prompt("hello").await;
+
+        let events = sink.take_events();
+        let snapshot_events: Vec<_> = events
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                DebugPayload::Context(ContextDebugEvent::SnapshotEstimated {
+                    compact_threshold_tokens,
+                    ..
+                }) => Some(compact_threshold_tokens),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !snapshot_events.is_empty(),
+            "expected at least one SnapshotEstimated debug event"
+        );
+        for threshold in &snapshot_events {
+            assert_eq!(*threshold, None);
+        }
+    });
+}
