@@ -118,11 +118,30 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
             INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 3);
             "#,
     ),
+    (
+        4,
+        r#"
+            CREATE TABLE IF NOT EXISTS saved_handoffs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                bundle_json TEXT NOT NULL,
+                bundle_version TEXT NOT NULL,
+                source_session_id TEXT NULL,
+                source_model TEXT NULL,
+                source_provider TEXT NULL,
+                size_estimate_tokens INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 4);
+            "#,
+    ),
 ];
 
 /// The current schema version.
 #[allow(dead_code)]
-pub const CURRENT_SCHEMA_VERSION: i64 = 3;
+pub const CURRENT_SCHEMA_VERSION: i64 = 4;
 
 /// Apply all pending migrations to the database.
 pub async fn apply_migrations(pool: &sqlx::SqlitePool) -> Result<(), super::error::ConfigError> {
@@ -154,7 +173,7 @@ pub async fn apply_migrations(pool: &sqlx::SqlitePool) -> Result<(), super::erro
                 .await
                 .map_err(|e| super::error::ConfigError::Migration(e.to_string()))?;
 
-            sqlx::raw_sql(sql).execute(&mut *tx).await.map_err(|e| {
+            sqlx::raw_sql(*sql).execute(&mut *tx).await.map_err(|e| {
                 super::error::ConfigError::Migration(format!("Migration {} failed: {}", version, e))
             })?;
 

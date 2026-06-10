@@ -190,3 +190,36 @@ pub struct RuntimeSettingsSnapshot {
     pub mcp_servers: Vec<McpServerConfigRecord>,
     pub skill_settings: SkillSettingsRecord,
 }
+
+// ============================================================================
+// Saved Handoff Records (Issue #69)
+// ============================================================================
+
+/// Metadata for a saved handoff bundle.
+#[derive(Debug, Clone)]
+pub struct SavedHandoffMetadata {
+    pub id: String,
+    pub name: String,
+    pub bundle_version: String,
+    pub source_session_id: Option<String>,
+    pub source_model: Option<String>,
+    pub source_provider: Option<String>,
+    pub size_estimate_tokens: usize,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A saved handoff record with the full bundle.
+#[derive(Debug, Clone)]
+pub struct SavedHandoffRecord {
+    pub metadata: SavedHandoffMetadata,
+    pub bundle: crate::context::handoff::HandoffBundle,
+}
+
+/// Input for saving a handoff bundle.
+#[derive(Debug, Clone)]
+pub struct SavedHandoffInput {
+    pub id: String,
+    pub name: String,
+    pub bundle: crate::context::handoff::HandoffBundle,
+}
