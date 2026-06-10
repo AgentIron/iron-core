@@ -1245,7 +1245,13 @@ impl IronRuntime {
         &self,
         session_id: SessionId,
         request: crate::context::model_switch::ModelSwitchRequest,
-    ) -> Result<crate::context::CapabilityDiff, RuntimeError> {
+    ) -> Result<
+        (
+            crate::context::CapabilityDiff,
+            Option<crate::context::model_switch::CompactionInfo>,
+        ),
+        RuntimeError,
+    > {
         if self.is_shutdown() {
             return Err(RuntimeError::Connection("Runtime is shut down".into()));
         }
@@ -1324,7 +1330,9 @@ impl IronRuntime {
         }
 
         // Trigger compaction if needed and enabled
-        let adapted = if plan.context_adaptation.needs_compaction
+        let compaction_info: Option<crate::context::model_switch::CompactionInfo> = if plan
+            .context_adaptation
+            .needs_compaction
             && config
                 .context_management
                 .model_switch
@@ -1413,32 +1421,39 @@ impl IronRuntime {
 
                     let block_id = format!("c{:04}", session.compressed_blocks.len() + 1);
                     let tokens_before: usize = content_parts.iter().map(|s| s.len() / 4).sum();
+                    let tokens_after: usize =
+                        content_parts.iter().map(|s| s.len()).sum::<usize>() / 4;
                     let block = crate::context::models::CompressedBlock {
-                        id: block_id,
-                        topic: format!("Auto-compressed during model switch to {}", to_model),
-                        source_range,
-                        summary: format!(
-                            "[Auto-compressed during model switch. Original messages preserved below.]\n\n{}",
-                            content_parts.join("\n\n")
-                        ),
-                        created_at: chrono::Utc::now(),
-                        token_estimate_before: Some(tokens_before as u32),
-                        token_estimate_after: Some((content_parts.iter().map(|s| s.len()).sum::<usize>() / 4) as u32),
-                    };
+                            id: block_id,
+                            topic: format!("Auto-compressed during model switch to {}", to_model),
+                            source_range,
+                            summary: format!(
+                                "[Auto-compressed during model switch. Original messages preserved below.]\n\n{}",
+                                content_parts.join("\n\n")
+                            ),
+                            created_at: chrono::Utc::now(),
+                            token_estimate_before: Some(tokens_before as u32),
+                            token_estimate_after: Some(tokens_after as u32),
+                        };
 
                     session.remove_timeline_positions(&positions_to_remove);
                     session.compressed_blocks.push(block);
                     session.uncompacted_tokens = plan.context_adaptation.retained_tokens;
-                    true
+                    Some(crate::context::model_switch::CompactionInfo {
+                        tokens_before: tokens_before as u32,
+                        tokens_after: tokens_after as u32,
+                        method: "auto_compaction".to_string(),
+                    })
                 } else {
-                    false
+                    None
                 }
             } else {
-                false
+                None
             }
         } else {
-            false
+            None
         };
+        let adapted = compaction_info.is_some();
 
         // Emit model switch plan created debug event
         self.emit_debug(crate::debug::DebugEvent {
@@ -1515,16 +1530,22 @@ impl IronRuntime {
         };
         session.model_switch_history.push(record);
 
-        Ok(capability_diff)
+        Ok((capability_diff, compaction_info))
     }
 
     /// Check and apply any pending model switch for a session.
     ///
     /// This should be called at turn boundaries after a prompt completes.
-    pub fn check_and_apply_pending_model_switch(&self, session_id: SessionId) {
+    pub fn check_and_apply_pending_model_switch(
+        &self,
+        session_id: SessionId,
+    ) -> Option<(
+        crate::context::CapabilityDiff,
+        Option<crate::context::model_switch::CompactionInfo>,
+    )> {
         let sessions = self.inner.sessions.read();
         let Some(rs) = sessions.get(&session_id) else {
-            return;
+            return None;
         };
 
         let pending = {
@@ -1533,36 +1554,42 @@ impl IronRuntime {
         };
 
         if let Some(pending) = pending {
-            if let Err(ref e) = self.apply_model_switch(session_id, pending.request.clone()) {
-                let (target_model, target_provider) = match &pending.request {
-                    crate::context::model_switch::ModelSwitchRequest::Managed {
-                        provider_slug,
-                        model,
-                        ..
-                    } => (model.clone(), provider_slug.clone()),
-                    crate::context::model_switch::ModelSwitchRequest::Unmanaged {
-                        model,
-                        provider_name,
-                    } => (model.clone(), provider_name.clone()),
-                };
-                self.emit_debug(crate::debug::DebugEvent {
-                    timestamp: chrono::Utc::now(),
-                    sequence: self.inner.debug_sequence.next(),
-                    severity: crate::debug::DebugSeverity::Error,
-                    scope: crate::debug::DebugScope {
-                        session_id: Some(session_id),
-                        ..crate::debug::DebugScope::default()
-                    },
-                    payload: crate::debug::DebugPayload::Provider(
-                        crate::debug::ProviderDebugEvent::ModelSwitchFailed {
-                            target_model,
-                            target_provider,
-                            reason: e.to_string(),
+            match self.apply_model_switch(session_id, pending.request.clone()) {
+                Ok(outcome) => {
+                    return Some(outcome);
+                }
+                Err(ref e) => {
+                    let (target_model, target_provider) = match &pending.request {
+                        crate::context::model_switch::ModelSwitchRequest::Managed {
+                            provider_slug,
+                            model,
+                            ..
+                        } => (model.clone(), provider_slug.clone()),
+                        crate::context::model_switch::ModelSwitchRequest::Unmanaged {
+                            model,
+                            provider_name,
+                        } => (model.clone(), provider_name.clone()),
+                    };
+                    self.emit_debug(crate::debug::DebugEvent {
+                        timestamp: chrono::Utc::now(),
+                        sequence: self.inner.debug_sequence.next(),
+                        severity: crate::debug::DebugSeverity::Error,
+                        scope: crate::debug::DebugScope {
+                            session_id: Some(session_id),
+                            ..crate::debug::DebugScope::default()
                         },
-                    ),
-                });
+                        payload: crate::debug::DebugPayload::Provider(
+                            crate::debug::ProviderDebugEvent::ModelSwitchFailed {
+                                target_model,
+                                target_provider,
+                                reason: e.to_string(),
+                            },
+                        ),
+                    });
+                }
             }
         }
+        None
     }
 
     /// Register capability metadata for a model in the capability registry.

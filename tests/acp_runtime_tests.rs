@@ -19,10 +19,10 @@ use iron_core::{
     skill::{LoadedSkill, SkillMetadata, SkillOrigin},
     tool::{FunctionTool, ToolDefinition},
     AuthInteractionResponse, AuthInteractionResult, AuthState, Config, ConnectionId, ContentBlock,
-    DurableSession, EphemeralTurn, IronAgent, IronRuntime, OAuthRequirements, PluginHealth,
-    PluginIdentity, PluginManifest, PluginPublisher, PluginSource, PluginSourceConfig,
-    PresentationMetadata, Provider, ProviderEvent, SessionId, ToolAuthRequirements,
-    ToolRecordStatus, ToolTerminalOutcome, TurnPhase,
+    ContextManagementConfig, DurableSession, EphemeralTurn, IronAgent, IronRuntime,
+    OAuthRequirements, PluginHealth, PluginIdentity, PluginManifest, PluginPublisher, PluginSource,
+    PluginSourceConfig, PresentationMetadata, Provider, ProviderEvent, SessionId,
+    ToolAuthRequirements, ToolRecordStatus, ToolTerminalOutcome, TurnPhase,
 };
 use iron_providers::{InferenceRequest, ToolCall};
 use serde_json::json;
@@ -3713,5 +3713,259 @@ fn stream_blocks_empty_slice_completes_normally() {
         });
         assert!(has_complete, "empty blocks should still complete normally");
         assert!(handle.status() == PromptStatus::Completed);
+    });
+}
+
+// ===================================================================
+// 13. Compaction lifecycle event tests
+// ===================================================================
+
+#[test]
+fn compress_tool_emits_compaction_started_and_finished() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::Output {
+                    content: "Hello!".into(),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new(
+                        "c1",
+                        "compress",
+                        json!({
+                            "topic": "Summarize old context",
+                            "content": [
+                                {
+                                    "start_message_id": "m0001",
+                                    "end_message_id": "m0002",
+                                    "summary": "User greeted the agent and agent responded."
+                                }
+                            ]
+                        }),
+                    ),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![ProviderEvent::Complete],
+        ]);
+
+        let config = Config::new().with_context_management(
+            ContextManagementConfig::new()
+                .enabled()
+                .with_maintenance_threshold(999_999),
+        );
+        let agent = IronAgent::new(config, provider);
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        // Establish conversation history so compress has something to work with
+        let _ = session.prompt("hello").await;
+
+        let (_handle, mut events) = session.prompt_stream("compress now");
+
+        let mut collected = Vec::new();
+        while let Some(event) = events.next().await {
+            collected.push(event);
+            if matches!(collected.last(), Some(PromptEvent::Complete { .. })) {
+                break;
+            }
+        }
+
+        // Verify compaction lifecycle events are present and ordered correctly
+        let started_pos = collected
+            .iter()
+            .position(|e| matches!(e, PromptEvent::CompactionStarted { .. }));
+        let finished_pos = collected.iter().position(|e| {
+            matches!(e, PromptEvent::CompactionFinished { method, .. } if method == "model_summary")
+        });
+        let tool_call_pos = collected
+            .iter()
+            .position(|e| matches!(e, PromptEvent::ToolCall { call_id, .. } if call_id == "c1"));
+        let tool_result_pos = collected.iter().position(|e| {
+            matches!(e, PromptEvent::ToolResult { call_id, status: ToolResultStatus::Completed, .. } if call_id == "c1")
+        });
+
+        assert!(tool_call_pos.is_some(), "expected ToolCall for compress");
+        assert!(started_pos.is_some(), "expected CompactionStarted");
+        assert!(finished_pos.is_some(), "expected CompactionFinished");
+        assert!(
+            tool_result_pos.is_some(),
+            "expected ToolResult(Completed) for compress"
+        );
+
+        // CompactionStarted should come after ToolCall and before CompactionFinished
+        assert!(
+            tool_call_pos.unwrap() < started_pos.unwrap(),
+            "ToolCall should precede CompactionStarted"
+        );
+        assert!(
+            started_pos.unwrap() < finished_pos.unwrap(),
+            "CompactionStarted should precede CompactionFinished"
+        );
+        assert!(
+            finished_pos.unwrap() < tool_result_pos.unwrap(),
+            "CompactionFinished should precede ToolResult"
+        );
+
+        // Verify CompactionStarted has a method and extract compaction_id
+        let started_id = collected.iter().find_map(|e| {
+            if let PromptEvent::CompactionStarted {
+                compaction_id,
+                method,
+            } = e
+            {
+                assert_eq!(method, "model_summary");
+                Some(compaction_id.clone())
+            } else {
+                None
+            }
+        });
+        assert!(
+            started_id.is_some(),
+            "expected CompactionStarted with compaction_id"
+        );
+
+        // Verify CompactionFinished has expected metrics and matching compaction_id
+        if let Some(PromptEvent::CompactionFinished {
+            compaction_id,
+            tokens_before,
+            tokens_after,
+            method,
+        }) = collected
+            .iter()
+            .find(|e| matches!(e, PromptEvent::CompactionFinished { .. }))
+        {
+            assert_eq!(
+                compaction_id,
+                started_id.as_ref().unwrap(),
+                "compaction_id must match between Started and Finished"
+            );
+            assert!(tokens_before.is_some(), "expected tokens_before");
+            assert!(tokens_after.is_some(), "expected tokens_after");
+            assert_eq!(method, "model_summary");
+        } else {
+            panic!("CompactionFinished not found");
+        }
+    });
+}
+
+#[test]
+fn compress_tool_failed_emits_compaction_failed() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::Output {
+                    content: "Hello!".into(),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new(
+                        "c2",
+                        "compress",
+                        json!({
+                            "topic": "Bad compression",
+                            "content": [
+                                {
+                                    "start_message_id": "m9999",
+                                    "end_message_id": "m0001",
+                                    "summary": "This range is invalid."
+                                }
+                            ]
+                        }),
+                    ),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![ProviderEvent::Complete],
+        ]);
+
+        let config = Config::new().with_context_management(
+            ContextManagementConfig::new()
+                .enabled()
+                .with_maintenance_threshold(999_999),
+        );
+        let agent = IronAgent::new(config, provider);
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        // Establish conversation history
+        let _ = session.prompt("hello").await;
+
+        let (_handle, mut events) = session.prompt_stream("compress now");
+
+        let mut collected = Vec::new();
+        while let Some(event) = events.next().await {
+            collected.push(event);
+            if matches!(collected.last(), Some(PromptEvent::Complete { .. })) {
+                break;
+            }
+        }
+
+        // Verify compaction lifecycle events for failure
+        let started_pos = collected
+            .iter()
+            .position(|e| matches!(e, PromptEvent::CompactionStarted { .. }));
+        let failed_pos = collected
+            .iter()
+            .position(|e| matches!(e, PromptEvent::CompactionFailed { .. }));
+        let tool_result_pos = collected.iter().position(|e| {
+            matches!(e, PromptEvent::ToolResult { call_id, status: ToolResultStatus::Failed, .. } if call_id == "c2")
+        });
+
+        assert!(
+            started_pos.is_some(),
+            "expected CompactionStarted even on failure"
+        );
+        assert!(failed_pos.is_some(), "expected CompactionFailed");
+        assert!(
+            tool_result_pos.is_some(),
+            "expected ToolResult(Failed) for compress"
+        );
+
+        // Started must come before Failed
+        assert!(
+            started_pos.unwrap() < failed_pos.unwrap(),
+            "CompactionStarted should precede CompactionFailed"
+        );
+        assert!(
+            failed_pos.unwrap() < tool_result_pos.unwrap(),
+            "CompactionFailed should precede ToolResult"
+        );
+
+        // Extract started compaction_id for correlation
+        let started_id = collected.iter().find_map(|e| {
+            if let PromptEvent::CompactionStarted { compaction_id, .. } = e {
+                Some(compaction_id.clone())
+            } else {
+                None
+            }
+        });
+        assert!(
+            started_id.is_some(),
+            "expected CompactionStarted with compaction_id"
+        );
+
+        // Verify CompactionFailed has a reason and matching compaction_id
+        if let Some(PromptEvent::CompactionFailed {
+            compaction_id,
+            reason,
+        }) = collected
+            .iter()
+            .find(|e| matches!(e, PromptEvent::CompactionFailed { .. }))
+        {
+            assert_eq!(
+                compaction_id,
+                started_id.as_ref().unwrap(),
+                "compaction_id must match between Started and Failed"
+            );
+            assert!(!reason.is_empty(), "expected non-empty failure reason");
+        } else {
+            panic!("CompactionFailed not found");
+        }
     });
 }

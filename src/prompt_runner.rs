@@ -1070,6 +1070,14 @@ impl PromptRunner {
             ),
         });
 
+        let compaction_id = uuid::Uuid::new_v4().to_string();
+
+        sink.emit(PromptLifecycleEvent::CompactionStarted {
+            compaction_id: compaction_id.clone(),
+            method: "model_summary".to_string(),
+        })
+        .await;
+
         let result = {
             let mut session = durable.lock();
             match crate::context::CompressTool::parse_arguments(&call.arguments).and_then(
@@ -1146,6 +1154,14 @@ impl PromptRunner {
                     ),
                 });
 
+                sink.emit(PromptLifecycleEvent::CompactionFinished {
+                    compaction_id: compaction_id.clone(),
+                    tokens_before: result.tokens_before.map(|v| v as u32),
+                    tokens_after: result.tokens_after.map(|v| v as u32),
+                    method: result.method.clone(),
+                })
+                .await;
+
                 sink.emit(PromptLifecycleEvent::ToolCallUpdate {
                     call_id,
                     tool_name,
@@ -1167,9 +1183,17 @@ impl PromptRunner {
                         ..crate::debug::DebugScope::default()
                     },
                     payload: crate::debug::DebugPayload::Compaction(
-                        crate::debug::CompactionDebugEvent::Rejected { reason: error },
+                        crate::debug::CompactionDebugEvent::Rejected {
+                            reason: error.clone(),
+                        },
                     ),
                 });
+
+                sink.emit(PromptLifecycleEvent::CompactionFailed {
+                    compaction_id: compaction_id.clone(),
+                    reason: error,
+                })
+                .await;
 
                 sink.emit(PromptLifecycleEvent::ToolCallUpdate {
                     call_id,
