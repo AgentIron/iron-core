@@ -1421,20 +1421,32 @@ impl IronRuntime {
 
                     let block_id = format!("c{:04}", session.compressed_blocks.len() + 1);
                     let tokens_before: usize = content_parts.iter().map(|s| s.len() / 4).sum();
-                    let tokens_after: usize =
-                        content_parts.iter().map(|s| s.len()).sum::<usize>() / 4;
+
+                    const MAX_AUTO_SUMMARY_LEN: usize = 1500;
+                    let joined = content_parts.join("\n\n");
+                    let truncated_summary = {
+                        let truncated: String = joined.chars().take(MAX_AUTO_SUMMARY_LEN).collect();
+                        if truncated.len() < joined.len() {
+                            format!("{}…", truncated)
+                        } else {
+                            truncated
+                        }
+                    };
+                    let summary_text = format!(
+                        "[Auto-compressed during model switch to {}.]\n\n{}",
+                        to_model, truncated_summary
+                    );
+                    let tokens_after = summary_text.len() / 4;
+
                     let block = crate::context::models::CompressedBlock {
-                            id: block_id,
-                            topic: format!("Auto-compressed during model switch to {}", to_model),
-                            source_range,
-                            summary: format!(
-                                "[Auto-compressed during model switch. Original messages preserved below.]\n\n{}",
-                                content_parts.join("\n\n")
-                            ),
-                            created_at: chrono::Utc::now(),
-                            token_estimate_before: Some(tokens_before as u32),
-                            token_estimate_after: Some(tokens_after as u32),
-                        };
+                        id: block_id,
+                        topic: format!("Auto-compressed during model switch to {}", to_model),
+                        source_range,
+                        summary: summary_text,
+                        created_at: chrono::Utc::now(),
+                        token_estimate_before: Some(tokens_before as u32),
+                        token_estimate_after: Some(tokens_after as u32),
+                    };
 
                     session.remove_timeline_positions(&positions_to_remove);
                     session.compressed_blocks.push(block);
@@ -1536,30 +1548,38 @@ impl IronRuntime {
     /// Check and apply any pending model switch for a session.
     ///
     /// This should be called at turn boundaries after a prompt completes.
+    /// Returns `Ok(Some(...))` when a pending switch was applied successfully,
+    /// `Ok(None)` when no switch was pending, and `Err(...)` when a pending
+    /// switch could not be applied so callers can surface the failure.
     pub fn check_and_apply_pending_model_switch(
         &self,
         session_id: SessionId,
-    ) -> Option<(
-        crate::context::CapabilityDiff,
-        Option<crate::context::model_switch::CompactionInfo>,
-    )> {
+    ) -> Result<
+        Option<(
+            crate::context::CapabilityDiff,
+            Option<crate::context::model_switch::CompactionInfo>,
+        )>,
+        RuntimeError,
+    > {
         let sessions = self.inner.sessions.read();
         let Some(rs) = sessions.get(&session_id) else {
-            return None;
+            return Err(RuntimeError::SessionNotFound(session_id.to_string()));
         };
 
-        let pending = {
-            let mut pending = rs.pending_model_switch.lock();
-            pending.take()
+        let pending_request = {
+            let pending = rs.pending_model_switch.lock();
+            pending.as_ref().map(|p| p.request.clone())
         };
 
-        if let Some(pending) = pending {
-            match self.apply_model_switch(session_id, pending.request.clone()) {
+        if let Some(request) = pending_request {
+            match self.apply_model_switch(session_id, request.clone()) {
                 Ok(outcome) => {
-                    return Some(outcome);
+                    let mut pending = rs.pending_model_switch.lock();
+                    pending.take();
+                    Ok(Some(outcome))
                 }
-                Err(ref e) => {
-                    let (target_model, target_provider) = match &pending.request {
+                Err(e) => {
+                    let (target_model, target_provider) = match &request {
                         crate::context::model_switch::ModelSwitchRequest::Managed {
                             provider_slug,
                             model,
@@ -1586,10 +1606,12 @@ impl IronRuntime {
                             },
                         ),
                     });
+                    Err(e)
                 }
             }
+        } else {
+            Ok(None)
         }
-        None
     }
 
     /// Register capability metadata for a model in the capability registry.

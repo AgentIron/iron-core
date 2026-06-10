@@ -2427,3 +2427,133 @@ fn model_switch_active_stream_emits_compaction_lifecycle_events() {
         }
     });
 }
+
+// =========================================================================
+// Debug sink helper for integration tests
+// =========================================================================
+
+use iron_core::{ContextDebugEvent, DebugEvent, DebugPayload, DebugSink};
+use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+struct RecordingDebugSink {
+    events: Mutex<Vec<DebugEvent>>,
+}
+
+impl RecordingDebugSink {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn take_events(&self) -> Vec<DebugEvent> {
+        std::mem::take(&mut *self.events.lock().unwrap())
+    }
+}
+
+impl DebugSink for RecordingDebugSink {
+    fn emit(&self, event: DebugEvent) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+// =========================================================================
+// Emitted context snapshot telemetry tests
+// =========================================================================
+
+#[test]
+fn emitted_context_snapshot_includes_compact_threshold_when_enabled() {
+    use iron_core::{Config, ContextManagementConfig, IronAgent};
+    use iron_providers::ProviderEvent;
+
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::Output {
+                content: "Hello!".into(),
+            },
+            ProviderEvent::Complete,
+        ]]);
+
+        let config = Config::new().with_context_management(
+            ContextManagementConfig::new()
+                .enabled()
+                .with_maintenance_threshold(42_000)
+                .with_context_window_hint(128_000),
+        );
+
+        let agent = IronAgent::new(config, provider);
+        let sink = Arc::new(RecordingDebugSink::new());
+        agent.set_debug_sink(Some(sink.clone()));
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        session.set_instructions("Test instructions");
+        let _ = session.prompt("hello").await;
+
+        let events = sink.take_events();
+        let snapshot_events: Vec<_> = events
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                DebugPayload::Context(ContextDebugEvent::SnapshotEstimated {
+                    compact_threshold_tokens,
+                    context_window_limit,
+                    ..
+                }) => Some((compact_threshold_tokens, context_window_limit)),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !snapshot_events.is_empty(),
+            "expected at least one SnapshotEstimated debug event"
+        );
+        for (threshold, limit) in &snapshot_events {
+            assert_eq!(*threshold, Some(42_000));
+            assert_eq!(*limit, Some(128_000));
+        }
+    });
+}
+
+#[test]
+fn emitted_context_snapshot_omits_compact_threshold_when_disabled() {
+    use iron_core::{Config, IronAgent};
+    use iron_providers::ProviderEvent;
+
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![vec![
+            ProviderEvent::Output {
+                content: "Hello!".into(),
+            },
+            ProviderEvent::Complete,
+        ]]);
+
+        let config = Config::new(); // context management disabled by default
+        let agent = IronAgent::new(config, provider);
+        let sink = Arc::new(RecordingDebugSink::new());
+        agent.set_debug_sink(Some(sink.clone()));
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        session.set_instructions("Test instructions");
+        let _ = session.prompt("hello").await;
+
+        let events = sink.take_events();
+        let snapshot_events: Vec<_> = events
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                DebugPayload::Context(ContextDebugEvent::SnapshotEstimated {
+                    compact_threshold_tokens,
+                    ..
+                }) => Some(compact_threshold_tokens),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !snapshot_events.is_empty(),
+            "expected at least one SnapshotEstimated debug event"
+        );
+        for threshold in &snapshot_events {
+            assert_eq!(*threshold, None);
+        }
+    });
+}

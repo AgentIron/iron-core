@@ -107,7 +107,7 @@ pub struct ModelSwitchRecord {
 }
 
 /// Metrics from an automatic compaction performed during a model switch.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactionInfo {
     /// Estimated tokens before compaction.
     pub tokens_before: u32,
