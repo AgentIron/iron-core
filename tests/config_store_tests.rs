@@ -1709,6 +1709,47 @@ async fn test_saved_handoff_unsupported_version_rejected_on_load() {
 }
 
 #[tokio::test]
+async fn test_saved_handoff_unsupported_metadata_version_rejected() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    // Test save rejection
+    let mut bundle = create_test_handoff_bundle("test1");
+    bundle.metadata.version = "99".to_string();
+    let input = iron_core::config::SavedHandoffInput {
+        id: "handoff-bad-meta".to_string(),
+        name: "Bad Metadata".to_string(),
+        bundle: bundle.clone(),
+    };
+    let err = store.save_handoff(&input).await.unwrap_err();
+    assert!(
+        matches!(err, iron_core::config::ConfigError::Validation(ref msg) if msg.contains("Unsupported handoff metadata version"))
+    );
+
+    // Test load rejection via direct DB insert
+    sqlx::query(
+        "INSERT INTO saved_handoffs (id, name, bundle_json, bundle_version, source_session_id, source_model, source_provider, size_estimate_tokens, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind("old-handoff-meta")
+    .bind("Old Handoff Meta")
+    .bind(r#"{"version":"1","instructions":null,"handoff_note":"","compressed_blocks":[],"recent_tail":[],"skill_state":{"active":[]},"metadata":{"version":"99","source_model":"","source_provider":null,"source_session_id":"","size_estimate_tokens":0},"model_switch_history":[],"current_model":null,"current_provider_slug":null,"current_provider_api_key":null,"hidden_tools":[]}"#)
+    .bind("1")
+    .bind::<Option<String>>(None)
+    .bind::<Option<String>>(None)
+    .bind::<Option<String>>(None)
+    .bind(0i64)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let err = store.load_handoff("old-handoff-meta").await.unwrap_err();
+    assert!(
+        matches!(err, iron_core::config::ConfigError::Validation(ref msg) if msg.contains("Unsupported stored handoff metadata version"))
+    );
+}
+
+#[tokio::test]
 async fn test_saved_handoff_migration_preserves_existing_data() {
     let store = ConfigStore::open_in_memory().await.unwrap();
 

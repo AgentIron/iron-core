@@ -1493,11 +1493,28 @@ fn deserialize_mcp_transport(
 // Saved Handoff APIs (Issue #69)
 // ============================================================================
 
+/// Convert a usize token count to an i64 for database storage.
+fn to_db_token_count(value: usize) -> Result<i64, ConfigError> {
+    i64::try_from(value).map_err(|_| {
+        ConfigError::Validation("size_estimate_tokens exceeds SQLite INTEGER range".to_string())
+    })
+}
+
+/// Convert an i64 token count from database storage to usize.
+fn from_db_token_count(value: i64) -> Result<usize, ConfigError> {
+    usize::try_from(value).map_err(|_| {
+        ConfigError::Deserialization(format!(
+            "Invalid persisted size_estimate_tokens value: {}",
+            value
+        ))
+    })
+}
+
 impl ConfigStore {
     /// Save or replace a handoff bundle.
     ///
     /// Returns `ConfigError::Validation` if the ID or name is empty, or if the
-    /// bundle version is not supported.
+    /// bundle version or metadata version is not supported.
     pub async fn save_handoff(&self, input: &SavedHandoffInput) -> Result<(), ConfigError> {
         // Validate ID
         if input.id.is_empty() {
@@ -1518,6 +1535,15 @@ impl ConfigStore {
             return Err(ConfigError::Validation(format!(
                 "Unsupported handoff bundle version: {} (expected {})",
                 input.bundle.version,
+                crate::context::handoff::HANDOFF_BUNDLE_VERSION
+            )));
+        }
+
+        // Validate metadata version
+        if input.bundle.metadata.version != crate::context::handoff::HANDOFF_BUNDLE_VERSION {
+            return Err(ConfigError::Validation(format!(
+                "Unsupported handoff metadata version: {} (expected {})",
+                input.bundle.metadata.version,
                 crate::context::handoff::HANDOFF_BUNDLE_VERSION
             )));
         }
@@ -1550,7 +1576,7 @@ impl ConfigStore {
         .bind(&input.bundle.metadata.source_session_id)
         .bind(&input.bundle.metadata.source_model)
         .bind(&input.bundle.metadata.source_provider)
-        .bind(input.bundle.metadata.size_estimate_tokens as i64)
+        .bind(to_db_token_count(input.bundle.metadata.size_estimate_tokens)?)
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -1596,6 +1622,15 @@ impl ConfigStore {
                     )));
                 }
 
+                // Validate loaded metadata version
+                if bundle.metadata.version != crate::context::handoff::HANDOFF_BUNDLE_VERSION {
+                    return Err(ConfigError::Validation(format!(
+                        "Unsupported stored handoff metadata version: {} (expected {})",
+                        bundle.metadata.version,
+                        crate::context::handoff::HANDOFF_BUNDLE_VERSION
+                    )));
+                }
+
                 Ok(Some(SavedHandoffRecord {
                     metadata: SavedHandoffMetadata {
                         id: row.get("id"),
@@ -1604,17 +1639,11 @@ impl ConfigStore {
                         source_session_id: row.get("source_session_id"),
                         source_model: row.get("source_model"),
                         source_provider: row.get("source_provider"),
-                        size_estimate_tokens: row.get::<i64, _>("size_estimate_tokens") as usize,
-                        created_at: chrono::DateTime::parse_from_rfc3339(
-                            &row.get::<String, _>("created_at"),
-                        )
-                        .map_err(|e| ConfigError::Deserialization(e.to_string()))?
-                        .with_timezone(&Utc),
-                        updated_at: chrono::DateTime::parse_from_rfc3339(
-                            &row.get::<String, _>("updated_at"),
-                        )
-                        .map_err(|e| ConfigError::Deserialization(e.to_string()))?
-                        .with_timezone(&Utc),
+                        size_estimate_tokens: from_db_token_count(
+                            row.get::<i64, _>("size_estimate_tokens"),
+                        )?,
+                        created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                        updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
                     },
                     bundle,
                 }))
@@ -1640,30 +1669,23 @@ impl ConfigStore {
         .await
         .map_err(ConfigError::from)?;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| SavedHandoffMetadata {
-                id: row.get("id"),
-                name: row.get("name"),
-                bundle_version: row.get("bundle_version"),
-                source_session_id: row.get("source_session_id"),
-                source_model: row.get("source_model"),
-                source_provider: row.get("source_provider"),
-                size_estimate_tokens: row.get::<i64, _>("size_estimate_tokens") as usize,
-                created_at: chrono::DateTime::parse_from_rfc3339(
-                    &row.get::<String, _>("created_at"),
-                )
-                .map_err(|e| ConfigError::Deserialization(e.to_string()))
-                .unwrap_or_else(|_| Utc::now().into())
-                .with_timezone(&Utc),
-                updated_at: chrono::DateTime::parse_from_rfc3339(
-                    &row.get::<String, _>("updated_at"),
-                )
-                .map_err(|e| ConfigError::Deserialization(e.to_string()))
-                .unwrap_or_else(|_| Utc::now().into())
-                .with_timezone(&Utc),
+        rows.into_iter()
+            .map(|row| {
+                Ok(SavedHandoffMetadata {
+                    id: row.get("id"),
+                    name: row.get("name"),
+                    bundle_version: row.get("bundle_version"),
+                    source_session_id: row.get("source_session_id"),
+                    source_model: row.get("source_model"),
+                    source_provider: row.get("source_provider"),
+                    size_estimate_tokens: from_db_token_count(
+                        row.get::<i64, _>("size_estimate_tokens"),
+                    )?,
+                    created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                    updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// Delete a saved handoff by ID.
