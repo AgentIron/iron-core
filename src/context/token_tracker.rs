@@ -46,22 +46,29 @@ impl SessionTokenTracker {
         if let Some(input) = usage.input_tokens {
             self.baseline_input_tokens = Some(input as usize);
             self.delta_tokens_after_baseline = 0;
-            self.accumulated_input_tokens += input;
+            self.accumulated_input_tokens = self.accumulated_input_tokens.saturating_add(input);
         }
         if let Some(output) = usage.output_tokens {
-            self.accumulated_output_tokens += output;
+            self.accumulated_output_tokens = self.accumulated_output_tokens.saturating_add(output);
         }
         if let Some(cached) = usage.cached_input_tokens {
-            self.accumulated_cached_input_tokens += cached;
+            self.accumulated_cached_input_tokens =
+                self.accumulated_cached_input_tokens.saturating_add(cached);
         }
         if let Some(creation) = usage.cache_creation_input_tokens {
-            self.accumulated_cache_creation_input_tokens += creation;
+            self.accumulated_cache_creation_input_tokens = self
+                .accumulated_cache_creation_input_tokens
+                .saturating_add(creation);
         }
         if let Some(read) = usage.cache_read_input_tokens {
-            self.accumulated_cache_read_input_tokens += read;
+            self.accumulated_cache_read_input_tokens = self
+                .accumulated_cache_read_input_tokens
+                .saturating_add(read);
         }
         if let Some(reasoning) = usage.reasoning_output_tokens {
-            self.accumulated_reasoning_output_tokens += reasoning;
+            self.accumulated_reasoning_output_tokens = self
+                .accumulated_reasoning_output_tokens
+                .saturating_add(reasoning);
         }
     }
 
@@ -70,7 +77,7 @@ impl SessionTokenTracker {
     /// Called when the session appends provider-visible content (user
     /// messages, assistant text, tool calls, tool results).
     pub fn add_delta(&mut self, tokens: usize) {
-        self.delta_tokens_after_baseline += tokens;
+        self.delta_tokens_after_baseline = self.delta_tokens_after_baseline.saturating_add(tokens);
     }
 
     /// Clear the provider-reported baseline and local delta.

@@ -568,6 +568,19 @@ impl PromptRunner {
         }
     }
 
+    fn flush_tool_call_deltas(
+        durable: &Arc<Mutex<DurableSession>>,
+        tool_calls: &[iron_providers::ToolCall],
+    ) {
+        for call in tool_calls {
+            let mut session = durable.lock();
+            let tool_tokens =
+                crate::durable::estimate_tool_call_tokens(&call.tool_name, &call.arguments);
+            session.token_tracker.add_delta(tool_tokens);
+            session.uncompacted_tokens += tool_tokens;
+        }
+    }
+
     async fn process_provider_stream(
         &self,
         durable: &Arc<Mutex<DurableSession>>,
@@ -585,6 +598,7 @@ impl PromptRunner {
             let event = match result {
                 Ok(e) => e,
                 Err(error) => {
+                    Self::flush_tool_call_deltas(durable, &tool_calls);
                     return Self::handle_provider_stream_error(
                         durable,
                         &mut assistant_output,
@@ -635,10 +649,12 @@ impl PromptRunner {
                         let mut session = durable.lock();
                         session.add_agent_text(&assistant_output);
                     }
+                    Self::flush_tool_call_deltas(durable, &tool_calls);
                     return ProviderStreamOutcome::Stop(acp::StopReason::EndTurn);
                 }
                 ProviderEvent::Complete => {}
                 ProviderEvent::Error { source } => {
+                    Self::flush_tool_call_deltas(durable, &tool_calls);
                     return Self::handle_provider_stream_error(
                         durable,
                         &mut assistant_output,
@@ -651,13 +667,7 @@ impl PromptRunner {
 
         // Add tool-call deltas after the stream so that any ProviderEvent::Usage
         // that arrived mid-stream does not wipe them.
-        for call in &tool_calls {
-            let mut session = durable.lock();
-            let tool_tokens =
-                crate::durable::estimate_tool_call_tokens(&call.tool_name, &call.arguments);
-            session.token_tracker.add_delta(tool_tokens);
-            session.uncompacted_tokens += tool_tokens;
-        }
+        Self::flush_tool_call_deltas(durable, &tool_calls);
 
         if !assistant_output.is_empty() {
             let mut session = durable.lock();

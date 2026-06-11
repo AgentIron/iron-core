@@ -938,7 +938,12 @@ fn prompt_stream_usage_preserves_tool_call_delta_for_next_request() {
         let conn = agent.connect();
         let session = conn.create_session().unwrap();
 
-        let _ = session.prompt("please call the tool").await;
+        let (_handle, mut events) = session.prompt_stream("please call the tool");
+        while let Some(event) = events.next().await {
+            if matches!(event, iron_core::PromptEvent::Complete { .. }) {
+                break;
+            }
+        }
         let snapshot = session.active_context(&ToolRegistry::new(), None, None);
 
         assert!(

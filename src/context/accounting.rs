@@ -224,7 +224,16 @@ impl ActiveContextAccountant {
         // the total while keeping the heuristic category breakdown.
         let (total, overall_quality) = if let Some(tracker) = tracker {
             if let Some(tracker_estimate) = tracker.estimate_current_context() {
-                (tracker_estimate, tracker.quality())
+                // Add current_prompt tokens to the tracker estimate; the prompt
+                // is not yet provider-visible so it is not covered by the baseline.
+                let current_prompt_tokens = current_prompt.map(estimate_tokens).unwrap_or(0);
+                let adjusted_estimate = tracker_estimate.saturating_add(current_prompt_tokens);
+                let quality = if current_prompt_tokens > 0 {
+                    ContextQuality::Estimated
+                } else {
+                    tracker.quality()
+                };
+                (adjusted_estimate, quality)
             } else {
                 (total, overall_quality)
             }

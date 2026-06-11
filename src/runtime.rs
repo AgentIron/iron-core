@@ -1761,11 +1761,11 @@ impl IronRuntime {
 
         let mut guard = rs.session.lock();
         let pending = guard.apply_pending_workspace_roots();
-        let roots = if pending {
-            guard.workspace_roots.clone()
-        } else {
+        if !pending {
             return;
-        };
+        }
+        guard.token_tracker.invalidate_baseline();
+        let roots = guard.workspace_roots.clone();
         drop(guard);
         drop(sessions);
 

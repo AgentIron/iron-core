@@ -974,6 +974,7 @@ impl DurableSession {
         self.messages = messages;
         self.tool_records = tool_records;
         self.timeline = timeline;
+        self.token_tracker.invalidate_baseline();
     }
 
     pub fn reset_uncompacted_tokens(&mut self) {
