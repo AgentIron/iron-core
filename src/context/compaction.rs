@@ -130,20 +130,26 @@ impl CompressTool {
                 .retain(|block| !block_ids_to_remove.contains(&block.id));
         }
 
+        // Capture tracker estimate before invalidating baseline.
+        let tracker_before = session.token_tracker.estimate_current_context();
+
         for (range, resolved_range) in ranges.into_iter().zip(resolved.iter()) {
             let block = Self::create_block(session, &range, resolved_range, &topic);
             session.compressed_blocks.push(block.clone());
             blocks_created.push(block);
         }
         session.uncompacted_tokens = 0;
+        session.token_tracker.invalidate_baseline();
 
-        let tokens_before = blocks_created
-            .iter()
-            .filter_map(|block| block.token_estimate_before)
-            .map(usize::try_from)
-            .collect::<Result<Vec<_>, _>>()
-            .ok()
-            .map(|tokens| tokens.into_iter().sum());
+        let tokens_before = tracker_before.or_else(|| {
+            blocks_created
+                .iter()
+                .filter_map(|block| block.token_estimate_before)
+                .map(usize::try_from)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+                .map(|tokens| tokens.into_iter().sum())
+        });
         let tokens_after = blocks_created
             .iter()
             .filter_map(|block| block.token_estimate_after)
@@ -335,6 +341,7 @@ impl CompressTool {
                 current_model: session.current_model.as_deref(),
                 model_switch_count: session.model_switch_history.len(),
             },
+            Some(&session.token_tracker),
         );
         let pressure = snapshot.pressure_with_thresholds(
             soft_threshold,

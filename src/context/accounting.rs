@@ -92,6 +92,8 @@ pub struct ActiveContextSnapshot {
     pub current_model: Option<String>,
     /// Number of model switches that have occurred
     pub model_switch_count: usize,
+    /// Accumulated provider-reported usage totals, if a tracker is present.
+    pub accumulated_usage: Option<crate::context::TokenUsageTotals>,
 }
 
 impl ActiveContextSnapshot {
@@ -128,6 +130,7 @@ pub struct SessionModelInfo<'a> {
 pub struct ActiveContextAccountant;
 
 impl ActiveContextAccountant {
+    #[allow(clippy::too_many_arguments)]
     pub fn estimate_snapshot(
         instructions: Option<&str>,
         compressed_blocks: &[CompressedBlock],
@@ -136,6 +139,7 @@ impl ActiveContextAccountant {
         current_prompt: Option<&str>,
         context_window_hint: Option<usize>,
         model_info: SessionModelInfo<'_>,
+        tracker: Option<&crate::context::SessionTokenTracker>,
     ) -> ActiveContextSnapshot {
         let mut categories = Vec::new();
         let mut total = 0usize;
@@ -216,6 +220,29 @@ impl ActiveContextAccountant {
             });
         }
 
+        // If a tracker with a valid baseline is available, use its estimate for
+        // the total while keeping the heuristic category breakdown.
+        let (total, overall_quality) = if let Some(tracker) = tracker {
+            if let Some(tracker_estimate) = tracker.estimate_current_context() {
+                // Add current_prompt tokens to the tracker estimate; the prompt
+                // is not yet provider-visible so it is not covered by the baseline.
+                let current_prompt_tokens = current_prompt.map(estimate_tokens).unwrap_or(0);
+                let adjusted_estimate = tracker_estimate.saturating_add(current_prompt_tokens);
+                let quality = if current_prompt_tokens > 0 {
+                    ContextQuality::Estimated
+                } else {
+                    tracker.quality()
+                };
+                (adjusted_estimate, quality)
+            } else {
+                (total, overall_quality)
+            }
+        } else {
+            (total, overall_quality)
+        };
+
+        let accumulated_usage = tracker.map(|t| t.accumulated_totals());
+
         ActiveContextSnapshot {
             total_tokens: total,
             context_window_limit: context_window_hint,
@@ -224,6 +251,7 @@ impl ActiveContextAccountant {
             categories,
             current_model: model_info.current_model.map(|m| m.to_string()),
             model_switch_count: model_info.model_switch_count,
+            accumulated_usage,
         }
     }
 
@@ -251,6 +279,7 @@ impl ActiveContextAccountant {
 pub struct ContextTelemetry;
 
 impl ContextTelemetry {
+    #[allow(clippy::too_many_arguments)]
     pub fn for_session(
         instructions: Option<&str>,
         compressed_blocks: &[CompressedBlock],
@@ -259,6 +288,7 @@ impl ContextTelemetry {
         current_prompt: Option<&str>,
         context_window_hint: Option<usize>,
         model_info: SessionModelInfo<'_>,
+        tracker: Option<&crate::context::SessionTokenTracker>,
     ) -> ActiveContextSnapshot {
         ActiveContextAccountant::estimate_snapshot(
             instructions,
@@ -268,6 +298,7 @@ impl ContextTelemetry {
             current_prompt,
             context_window_hint,
             model_info,
+            tracker,
         )
     }
 }

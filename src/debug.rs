@@ -182,6 +182,7 @@ pub enum ContextDebugEvent {
         quality: crate::ContextQuality,
         pressure: String,
         categories: Vec<(String, usize, crate::ContextQuality)>,
+        accumulated_usage: Option<crate::context::TokenUsageTotals>,
     },
     /// Context pressure classification changed.
     PressureChanged {

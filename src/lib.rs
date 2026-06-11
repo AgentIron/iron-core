@@ -200,7 +200,7 @@ pub use context::{
     ContextPressure, ContextQuality, ContextTelemetry, HandoffBundle, HandoffBundleMetadata,
     HandoffExportConfig, HandoffExporter, HandoffImporter, ModelCapabilityMetadata,
     ModelCapabilityRegistry, ModelSwitchPlan, ModelSwitchRecord, ModelSwitchRequest,
-    PendingModelSwitch, SessionModelInfo, TailRetentionPolicy, TailRetentionRule,
+    PendingModelSwitch, SessionModelInfo, TailRetentionPolicy, TailRetentionRule, TokenUsageTotals,
     HANDOFF_DEFAULT_TARGET_TOKENS,
 };
 pub use durable::{

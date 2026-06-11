@@ -122,7 +122,7 @@ fn estimate_text_tokens(text: &str) -> usize {
     (text.len() as f64 * 0.25).ceil() as usize
 }
 
-fn estimate_tool_call_tokens(tool_name: &str, arguments: &Value) -> usize {
+pub fn estimate_tool_call_tokens(tool_name: &str, arguments: &Value) -> usize {
     estimate_text_tokens(&format!("{}: {}", tool_name, arguments))
 }
 
@@ -410,6 +410,8 @@ pub struct DurableSession {
     /// Pending workspace roots to be applied at the next turn boundary.
     #[serde(default)]
     pub pending_workspace_roots: Option<Vec<std::path::PathBuf>>,
+    #[serde(skip, default)]
+    pub token_tracker: crate::context::SessionTokenTracker,
 }
 
 impl DurableSession {
@@ -437,6 +439,7 @@ impl DurableSession {
             hidden_tools: Vec::new(),
             workspace_roots: Vec::new(),
             pending_workspace_roots: None,
+            token_tracker: crate::context::SessionTokenTracker::default(),
         }
     }
 
@@ -462,6 +465,7 @@ impl DurableSession {
             model: self.current_model.clone(),
         });
         self.uncompacted_tokens += tokens;
+        self.token_tracker.add_delta(tokens);
     }
 
     pub fn add_user_message(&mut self, content: Vec<ContentBlock>) {
@@ -478,6 +482,7 @@ impl DurableSession {
             model: self.current_model.clone(),
         });
         self.uncompacted_tokens += tokens;
+        self.token_tracker.add_delta(tokens);
     }
 
     pub fn add_agent_text(&mut self, text: impl Into<String>) {
@@ -496,6 +501,7 @@ impl DurableSession {
             model: self.current_model.clone(),
         });
         self.uncompacted_tokens += tokens;
+        self.token_tracker.add_delta(tokens);
     }
 
     pub fn add_agent_message(&mut self, content: Vec<ContentBlock>) {
@@ -512,9 +518,15 @@ impl DurableSession {
             model: self.current_model.clone(),
         });
         self.uncompacted_tokens += tokens;
+        self.token_tracker.add_delta(tokens);
     }
 
-    pub fn propose_tool_call(
+    /// Create the durable record for a tool call without updating token
+    /// tracking.  Callers that need the delta recorded immediately should use
+    /// [`propose_tool_call`]; stream processing defers delta until after the
+    /// usage event to avoid losing it when `ProviderEvent::Usage` resets the
+    /// baseline.
+    pub fn propose_tool_call_without_delta(
         &mut self,
         call_id: impl Into<String>,
         tool_name: impl Into<String>,
@@ -545,11 +557,22 @@ impl DurableSession {
             visible_id: Some(visible_id),
         });
 
-        self.uncompacted_tokens += estimate_tool_call_tokens(
+        record_index
+    }
+
+    pub fn propose_tool_call(
+        &mut self,
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        arguments: Value,
+    ) -> usize {
+        let record_index = self.propose_tool_call_without_delta(call_id, tool_name, arguments);
+        let tool_tokens = estimate_tool_call_tokens(
             &self.tool_records[record_index].tool_name,
             &self.tool_records[record_index].arguments,
         );
-
+        self.uncompacted_tokens += tool_tokens;
+        self.token_tracker.add_delta(tool_tokens);
         record_index
     }
 
@@ -592,10 +615,12 @@ impl DurableSession {
             visible_id: Some(visible_id),
         });
 
-        self.uncompacted_tokens += estimate_tool_call_tokens(
+        let tool_tokens = estimate_tool_call_tokens(
             &self.tool_records[record_index].tool_name,
             &self.tool_records[record_index].arguments,
         );
+        self.uncompacted_tokens += tool_tokens;
+        self.token_tracker.add_delta(tool_tokens);
 
         record_index
     }
@@ -626,7 +651,9 @@ impl DurableSession {
                 visible_id: Some(visible_id),
             });
 
-            self.uncompacted_tokens += estimate_tool_result_tokens(&tool_name, &result_ref);
+            let result_tokens = estimate_tool_result_tokens(&tool_name, &result_ref);
+            self.uncompacted_tokens += result_tokens;
+            self.token_tracker.add_delta(result_tokens);
         }
     }
 
@@ -656,7 +683,9 @@ impl DurableSession {
                 visible_id: Some(visible_id),
             });
 
-            self.uncompacted_tokens += estimate_tool_result_tokens(&tool_name, &result_ref);
+            let result_tokens = estimate_tool_result_tokens(&tool_name, &result_ref);
+            self.uncompacted_tokens += result_tokens;
+            self.token_tracker.add_delta(result_tokens);
         }
     }
 
@@ -686,7 +715,9 @@ impl DurableSession {
                 visible_id: Some(visible_id),
             });
 
-            self.uncompacted_tokens += estimate_tool_result_tokens(&tool_name, &result_ref);
+            let result_tokens = estimate_tool_result_tokens(&tool_name, &result_ref);
+            self.uncompacted_tokens += result_tokens;
+            self.token_tracker.add_delta(result_tokens);
         }
     }
 
@@ -766,12 +797,15 @@ impl DurableSession {
             visible_id: Some(visible_id),
         });
 
-        self.uncompacted_tokens += estimate_tool_result_tokens(&tool_name, &result_ref);
+        let result_tokens = estimate_tool_result_tokens(&tool_name, &result_ref);
+        self.uncompacted_tokens += result_tokens;
+        self.token_tracker.add_delta(result_tokens);
     }
 
     pub fn apply_compression(&mut self, block: crate::context::models::CompressedBlock) {
         self.compressed_blocks.push(block);
         self.uncompacted_tokens = 0;
+        self.token_tracker.invalidate_baseline();
     }
 
     pub fn remove_timeline_positions(&mut self, positions: &BTreeSet<usize>) {
@@ -940,6 +974,7 @@ impl DurableSession {
         self.messages = messages;
         self.tool_records = tool_records;
         self.timeline = timeline;
+        self.token_tracker.invalidate_baseline();
     }
 
     pub fn reset_uncompacted_tokens(&mut self) {
@@ -969,10 +1004,12 @@ impl DurableSession {
             resources,
         };
         self.skill_state.activate(record);
+        self.token_tracker.invalidate_baseline();
     }
 
     pub fn deactivate_skill(&mut self, name: &str) {
         self.skill_state.deactivate(name);
+        self.token_tracker.invalidate_baseline();
     }
 
     pub fn list_active_skills(&self) -> Vec<&str> {
@@ -1019,6 +1056,7 @@ impl DurableSession {
     pub fn apply_pending_workspace_roots(&mut self) -> bool {
         if let Some(roots) = self.pending_workspace_roots.take() {
             self.workspace_roots = roots;
+            self.token_tracker.invalidate_baseline();
             true
         } else {
             false
@@ -1112,6 +1150,7 @@ impl DurableSession {
 
     pub fn set_instructions(&mut self, instructions: impl Into<String>) {
         self.instructions = Some(instructions.into());
+        self.token_tracker.invalidate_baseline();
     }
 
     pub fn record_script_start(
@@ -1195,6 +1234,7 @@ impl DurableSession {
     /// Enable or disable an MCP server for this session.
     pub fn set_mcp_server_enabled(&mut self, server_id: impl Into<String>, enabled: bool) {
         self.mcp_server_enablement.insert(server_id.into(), enabled);
+        self.token_tracker.invalidate_baseline();
     }
 
     /// Check if an MCP server is enabled for this session.
@@ -1215,6 +1255,7 @@ impl DurableSession {
     /// Enable or disable a plugin for this session.
     pub fn set_plugin_enabled(&mut self, plugin_id: impl Into<String>, enabled: bool) {
         self.plugin_enablement.set_enabled(plugin_id, enabled);
+        self.token_tracker.invalidate_baseline();
     }
 
     /// Check if a plugin is enabled for this session.

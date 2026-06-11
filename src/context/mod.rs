@@ -13,6 +13,7 @@ pub mod handoff;
 pub mod model_switch;
 pub mod models;
 pub mod telemetry;
+pub mod token_tracker;
 
 pub use accounting::{
     ActiveContextAccountant, ActiveContextSnapshot, ContextCategory, ContextCategoryUsage,
@@ -29,3 +30,4 @@ pub use model_switch::{
 };
 pub use models::{CompressedBlock, HANDOFF_DEFAULT_TARGET_TOKENS};
 pub use telemetry::ContextTelemetry;
+pub use token_tracker::{SessionTokenTracker, TokenUsageTotals};
