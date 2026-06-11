@@ -6,7 +6,7 @@ use iron_core::{
     HandoffBundle, HandoffExportConfig, HandoffExporter, HandoffImporter, SessionId,
     SessionModelInfo, TailRetentionPolicy, TailRetentionRule, ToolRegistry,
 };
-use iron_providers::Message;
+use iron_providers::{Message, ProviderEvent, TokenUsage, ToolCall};
 
 fn make_session_with_messages(n: usize) -> DurableSession {
     let mut session = DurableSession::new(SessionId::new());
@@ -53,6 +53,7 @@ fn telemetry_empty_session_reports_unknown_quality() {
             current_model: None,
             model_switch_count: 0,
         },
+        None,
     );
     assert_eq!(snapshot.total_tokens, 0);
     assert_eq!(snapshot.quality, ContextQuality::Unknown);
@@ -74,6 +75,7 @@ fn telemetry_with_instructions_counts_category() {
             current_model: None,
             model_switch_count: 0,
         },
+        None,
     );
     assert!(snapshot.total_tokens > 0);
     assert_eq!(snapshot.quality, ContextQuality::Estimated);
@@ -106,12 +108,99 @@ fn telemetry_with_messages_counts_tail_category() {
             current_model: None,
             model_switch_count: 0,
         },
+        None,
     );
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
         .categories
         .iter()
         .any(|c| c.category == ContextCategory::RecentTail));
+}
+
+#[test]
+fn mcp_server_enablement_invalidates_token_baseline() {
+    let mut session = DurableSession::new(SessionId::new());
+    session.token_tracker.record_provider_usage(&TokenUsage {
+        input_tokens: Some(100),
+        ..TokenUsage::default()
+    });
+    assert_eq!(session.token_tracker.estimate_current_context(), Some(100));
+
+    session.set_mcp_server_enabled("test-server", true);
+
+    assert_eq!(session.token_tracker.estimate_current_context(), None);
+}
+
+#[test]
+fn plugin_enablement_invalidates_token_baseline() {
+    let mut session = DurableSession::new(SessionId::new());
+    session.token_tracker.record_provider_usage(&TokenUsage {
+        input_tokens: Some(100),
+        ..TokenUsage::default()
+    });
+    assert_eq!(session.token_tracker.estimate_current_context(), Some(100));
+
+    session.set_plugin_enabled("test-plugin", true);
+
+    assert_eq!(session.token_tracker.estimate_current_context(), None);
+}
+
+#[test]
+fn telemetry_uses_tracker_baseline_delta_and_resync() {
+    let mut session = DurableSession::new(SessionId::new());
+    session.token_tracker.record_provider_usage(&TokenUsage {
+        input_tokens: Some(100),
+        output_tokens: Some(10),
+        ..TokenUsage::default()
+    });
+    session.add_user_text("new request after baseline");
+
+    let snapshot = ContextTelemetry::for_session(
+        session.instructions.as_deref(),
+        &session.compressed_blocks,
+        &session.to_transcript().messages,
+        &ToolRegistry::new(),
+        None,
+        None,
+        SessionModelInfo {
+            current_model: None,
+            model_switch_count: 0,
+        },
+        Some(&session.token_tracker),
+    );
+
+    assert!(snapshot.total_tokens > 100);
+    assert_eq!(snapshot.quality, ContextQuality::Estimated);
+    assert_eq!(
+        snapshot.accumulated_usage.as_ref().unwrap().input_tokens,
+        100
+    );
+    assert_eq!(
+        snapshot.accumulated_usage.as_ref().unwrap().output_tokens,
+        10
+    );
+
+    session.token_tracker.record_provider_usage(&TokenUsage {
+        input_tokens: Some(175),
+        ..TokenUsage::default()
+    });
+
+    let resynced = ContextTelemetry::for_session(
+        session.instructions.as_deref(),
+        &session.compressed_blocks,
+        &session.to_transcript().messages,
+        &ToolRegistry::new(),
+        None,
+        None,
+        SessionModelInfo {
+            current_model: None,
+            model_switch_count: 0,
+        },
+        Some(&session.token_tracker),
+    );
+
+    assert_eq!(resynced.total_tokens, 175);
+    assert_eq!(resynced.quality, ContextQuality::Exact);
 }
 
 #[test]
@@ -137,6 +226,7 @@ fn telemetry_with_tools_counts_tool_definitions_category() {
             current_model: None,
             model_switch_count: 0,
         },
+        None,
     );
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
@@ -159,6 +249,7 @@ fn telemetry_with_current_prompt_counts_prompt_category() {
             current_model: None,
             model_switch_count: 0,
         },
+        None,
     );
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
@@ -188,6 +279,7 @@ fn telemetry_with_compressed_blocks_counts_category() {
             current_model: None,
             model_switch_count: 0,
         },
+        None,
     );
     assert!(snapshot.total_tokens > 0);
     assert!(snapshot
@@ -223,6 +315,7 @@ fn telemetry_totals_match_category_sum() {
             current_model: None,
             model_switch_count: 0,
         },
+        None,
     );
 
     let category_sum: usize = snapshot.categories.iter().map(|c| c.tokens).sum();
@@ -250,6 +343,7 @@ fn telemetry_without_context_window_has_no_fullness() {
         categories: vec![],
         current_model: None,
         model_switch_count: 0,
+        accumulated_usage: None,
     };
     assert!(snapshot.fullness().is_none());
 }
@@ -417,6 +511,36 @@ fn compress_tool_removes_selected_completed_turns_and_adds_block() {
     assert_eq!(session.timeline.len(), 1);
     assert_eq!(session.timeline[0].visible_id(), Some("m0003"));
     assert_eq!(session.uncompacted_tokens, 0);
+}
+
+#[test]
+fn compress_tool_invalidates_tracker_baseline() {
+    let mut session = DurableSession::new(SessionId::new());
+    session.add_user_text("old question");
+    session.add_agent_text("old answer");
+    session.add_user_text("latest question");
+    session.token_tracker.record_provider_usage(&TokenUsage {
+        input_tokens: Some(200),
+        ..TokenUsage::default()
+    });
+    assert_eq!(session.token_tracker.estimate_current_context(), Some(200));
+
+    CompressTool::execute(
+        &mut session,
+        "Old topic".to_string(),
+        vec![CompressRange {
+            start_id: "m0001".to_string(),
+            end_id: "m0002".to_string(),
+            summary: "The old question was answered.".to_string(),
+        }],
+        0.50,
+        0.70,
+        0.85,
+        0.95,
+    )
+    .expect("compress should succeed");
+
+    assert_eq!(session.token_tracker.estimate_current_context(), None);
 }
 
 #[test]
@@ -775,6 +899,55 @@ where
         .expect("failed to build current_thread runtime");
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt, future)
+}
+
+#[test]
+fn prompt_stream_usage_preserves_tool_call_delta_for_next_request() {
+    run_local(async {
+        use iron_core::{Config, IronAgent};
+
+        let large_argument = "x".repeat(800);
+        let tool_call_tokens = iron_core::durable::estimate_tool_call_tokens(
+            "delta_tool",
+            &serde_json::json!({ "payload": large_argument }),
+        );
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new(
+                        "delta-1",
+                        "delta_tool",
+                        serde_json::json!({ "payload": "x".repeat(800) }),
+                    ),
+                },
+                ProviderEvent::Usage {
+                    usage: TokenUsage {
+                        input_tokens: Some(100),
+                        ..TokenUsage::default()
+                    },
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![ProviderEvent::Complete],
+        ]);
+
+        let agent = IronAgent::new(Config::default(), provider);
+        agent.register_tool(FunctionTool::simple("delta_tool", "delta_tool", |_args| {
+            Ok(serde_json::json!({}))
+        }));
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+
+        let _ = session.prompt("please call the tool").await;
+        let snapshot = session.active_context(&ToolRegistry::new(), None, None);
+
+        assert!(
+            snapshot.total_tokens >= 100 + tool_call_tokens,
+            "tool-call delta should survive usage reset; total={}, tool_call_delta={}",
+            snapshot.total_tokens,
+            tool_call_tokens
+        );
+    });
 }
 
 /// Helper to extract display text from an iron_providers::Message.

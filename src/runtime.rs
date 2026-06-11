@@ -1284,11 +1284,15 @@ impl IronRuntime {
 
         // Create adaptation plan
         let config = self.config();
-        let current_tokens =
-            crate::context::model_switch::ModelSwitchPlanner::estimate_session_tokens(
-                session.uncompacted_tokens,
-                &session.compressed_blocks,
-            );
+        let current_tokens = session
+            .token_tracker
+            .estimate_current_context()
+            .unwrap_or_else(|| {
+                crate::context::model_switch::ModelSwitchPlanner::estimate_session_tokens(
+                    session.uncompacted_tokens,
+                    &session.compressed_blocks,
+                )
+            });
         let target_window = config.context_management.context_window_hint;
         let cap_registry = self.inner.model_capability_registry.read();
         let source_model_id = from_model.as_deref().unwrap_or("unknown");
@@ -1420,7 +1424,10 @@ impl IronRuntime {
                     };
 
                     let block_id = format!("c{:04}", session.compressed_blocks.len() + 1);
-                    let tokens_before: usize = content_parts.iter().map(|s| s.len() / 4).sum();
+                    let tokens_before: usize = session
+                        .token_tracker
+                        .estimate_current_context()
+                        .unwrap_or_else(|| content_parts.iter().map(|s| s.len() / 4).sum());
 
                     const MAX_AUTO_SUMMARY_LEN: usize = 1500;
                     let joined = content_parts.join("\n\n");
@@ -1451,6 +1458,7 @@ impl IronRuntime {
                     session.remove_timeline_positions(&positions_to_remove);
                     session.compressed_blocks.push(block);
                     session.uncompacted_tokens = plan.context_adaptation.retained_tokens;
+                    session.token_tracker.invalidate_baseline();
                     Some(crate::context::model_switch::CompactionInfo {
                         tokens_before: tokens_before as u32,
                         tokens_after: tokens_after as u32,
@@ -1730,6 +1738,7 @@ impl IronRuntime {
             // to prevent a prompt from starting between the check and the mutation.
             let mut guard = rs.session.lock();
             guard.workspace_roots = roots.clone();
+            guard.token_tracker.invalidate_baseline();
             guard.clear_pending_workspace_roots();
             drop(guard);
             drop(sessions);

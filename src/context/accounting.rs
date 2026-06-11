@@ -92,6 +92,8 @@ pub struct ActiveContextSnapshot {
     pub current_model: Option<String>,
     /// Number of model switches that have occurred
     pub model_switch_count: usize,
+    /// Accumulated provider-reported usage totals, if a tracker is present.
+    pub accumulated_usage: Option<crate::context::TokenUsageTotals>,
 }
 
 impl ActiveContextSnapshot {
@@ -136,6 +138,7 @@ impl ActiveContextAccountant {
         current_prompt: Option<&str>,
         context_window_hint: Option<usize>,
         model_info: SessionModelInfo<'_>,
+        tracker: Option<&crate::context::SessionTokenTracker>,
     ) -> ActiveContextSnapshot {
         let mut categories = Vec::new();
         let mut total = 0usize;
@@ -216,6 +219,20 @@ impl ActiveContextAccountant {
             });
         }
 
+        // If a tracker with a valid baseline is available, use its estimate for
+        // the total while keeping the heuristic category breakdown.
+        let (total, overall_quality) = if let Some(tracker) = tracker {
+            if let Some(tracker_estimate) = tracker.estimate_current_context() {
+                (tracker_estimate, tracker.quality())
+            } else {
+                (total, overall_quality)
+            }
+        } else {
+            (total, overall_quality)
+        };
+
+        let accumulated_usage = tracker.map(|t| t.accumulated_totals());
+
         ActiveContextSnapshot {
             total_tokens: total,
             context_window_limit: context_window_hint,
@@ -224,6 +241,7 @@ impl ActiveContextAccountant {
             categories,
             current_model: model_info.current_model.map(|m| m.to_string()),
             model_switch_count: model_info.model_switch_count,
+            accumulated_usage,
         }
     }
 
@@ -259,6 +277,7 @@ impl ContextTelemetry {
         current_prompt: Option<&str>,
         context_window_hint: Option<usize>,
         model_info: SessionModelInfo<'_>,
+        tracker: Option<&crate::context::SessionTokenTracker>,
     ) -> ActiveContextSnapshot {
         ActiveContextAccountant::estimate_snapshot(
             instructions,
@@ -268,6 +287,7 @@ impl ContextTelemetry {
             current_prompt,
             context_window_hint,
             model_info,
+            tracker,
         )
     }
 }

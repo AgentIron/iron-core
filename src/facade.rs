@@ -1909,6 +1909,7 @@ impl AgentSession {
                 current_model: session.current_model.as_deref(),
                 model_switch_count: session.model_switch_history.len(),
             },
+            Some(&session.token_tracker),
         );
         let context_config = &self.connection.runtime().config().context_management;
         if context_config.enabled {

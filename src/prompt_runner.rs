@@ -174,18 +174,22 @@ impl PromptRunner {
                 drop(session);
 
                 let tool_registry = self.runtime.tool_registry();
-                let mut snapshot = crate::context::ActiveContextAccountant::estimate_snapshot(
-                    instructions.as_deref(),
-                    &compressed_blocks,
-                    &messages,
-                    &tool_registry,
-                    None,
-                    config.context_management.context_window_hint,
-                    crate::context::SessionModelInfo {
-                        current_model: None,
-                        model_switch_count: 0,
-                    },
-                );
+                let mut snapshot = {
+                    let session = durable.lock();
+                    crate::context::ActiveContextAccountant::estimate_snapshot(
+                        instructions.as_deref(),
+                        &compressed_blocks,
+                        &messages,
+                        &tool_registry,
+                        None,
+                        config.context_management.context_window_hint,
+                        crate::context::SessionModelInfo {
+                            current_model: None,
+                            model_switch_count: 0,
+                        },
+                        Some(&session.token_tracker),
+                    )
+                };
                 if config.context_management.enabled {
                     snapshot.compact_threshold_tokens =
                         Some(config.context_management.maintenance_threshold);
@@ -220,6 +224,7 @@ impl PromptRunner {
                                     (format!("{:?}", usage.category), usage.tokens, usage.quality)
                                 })
                                 .collect(),
+                            accumulated_usage: snapshot.accumulated_usage.clone(),
                         },
                     ),
                 });
@@ -600,7 +605,7 @@ impl PromptRunner {
                     emitted_output = true;
                     {
                         let mut session = durable.lock();
-                        session.propose_tool_call(
+                        session.propose_tool_call_without_delta(
                             &call.call_id,
                             &call.tool_name,
                             call.arguments.clone(),
@@ -616,6 +621,13 @@ impl PromptRunner {
                 }
                 ProviderEvent::Status { message } => {
                     trace!(%message, "Provider status");
+                }
+                ProviderEvent::Usage { usage } => {
+                    trace!(?usage, "Provider token usage");
+                    {
+                        let mut session = durable.lock();
+                        session.token_tracker.record_provider_usage(&usage);
+                    }
                 }
                 ProviderEvent::ChoiceRequest { request } => {
                     trace!(prompt = %request.prompt, "Choice requests are not supported by prompt runner");
@@ -635,6 +647,16 @@ impl PromptRunner {
                     );
                 }
             }
+        }
+
+        // Add tool-call deltas after the stream so that any ProviderEvent::Usage
+        // that arrived mid-stream does not wipe them.
+        for call in &tool_calls {
+            let mut session = durable.lock();
+            let tool_tokens =
+                crate::durable::estimate_tool_call_tokens(&call.tool_name, &call.arguments);
+            session.token_tracker.add_delta(tool_tokens);
+            session.uncompacted_tokens += tool_tokens;
         }
 
         if !assistant_output.is_empty() {
@@ -2119,6 +2141,7 @@ impl PromptRunner {
                     current_model: session.current_model.as_deref(),
                     model_switch_count: session.model_switch_history.len(),
                 },
+                Some(&session.token_tracker),
             );
             snapshot.pressure_with_thresholds(
                 config.context_management.soft_threshold,
