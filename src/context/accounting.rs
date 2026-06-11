@@ -130,6 +130,7 @@ pub struct SessionModelInfo<'a> {
 pub struct ActiveContextAccountant;
 
 impl ActiveContextAccountant {
+    #[allow(clippy::too_many_arguments)]
     pub fn estimate_snapshot(
         instructions: Option<&str>,
         compressed_blocks: &[CompressedBlock],
@@ -269,6 +270,7 @@ impl ActiveContextAccountant {
 pub struct ContextTelemetry;
 
 impl ContextTelemetry {
+    #[allow(clippy::too_many_arguments)]
     pub fn for_session(
         instructions: Option<&str>,
         compressed_blocks: &[CompressedBlock],
