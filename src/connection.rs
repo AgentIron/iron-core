@@ -1,11 +1,18 @@
 use crate::durable::{DurableSession, SessionId};
+use crate::profile::{
+    default_identity_prompt, managed_profile_prompt_context, AgentApproval, AgentProfile,
+    AgentProfileId, AgentProfileProvider, ResolvedProfileProvider, SkillFilter, ToolFilter,
+};
 use crate::prompt_lifecycle::AcpPromptSink;
 use crate::prompt_runner::PromptRunner;
 use crate::provider_credential::domain::ProviderPromptContext;
 use crate::runtime::{ConnectionId, IronRuntime};
 use agent_client_protocol::schema as acp;
+use parking_lot::RwLock;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 pub trait ClientChannel {
@@ -83,22 +90,50 @@ impl ClientChannel for NopClientChannel {
 
 pub(crate) type SharedClientChannel = Rc<dyn ClientChannel>;
 
+pub(crate) type ProfileRegistry = HashMap<AgentProfileId, AgentProfile>;
+
+fn default_connection_profile_registry() -> ProfileRegistry {
+    let mut registry = HashMap::new();
+    let default = AgentProfile {
+        name: "default".to_string(),
+        provider: AgentProfileProvider::RuntimeDefault,
+        tools: ToolFilter::Inherit,
+        skills: SkillFilter::Inherit,
+        approval: AgentApproval::PerTool,
+        identity_prompt: Some(default_identity_prompt().to_string()),
+    };
+    registry.insert(AgentProfileId::from("default"), default);
+    registry
+}
+
 pub struct IronConnection {
     id: ConnectionId,
     runtime: IronRuntime,
     client: RefCell<Option<SharedClientChannel>>,
+    profile_registry: Arc<RwLock<ProfileRegistry>>,
 }
 
 static CONNECTION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl IronConnection {
     pub fn new(runtime: IronRuntime) -> Self {
+        Self::new_with_profile_registry(
+            runtime,
+            Arc::new(RwLock::new(default_connection_profile_registry())),
+        )
+    }
+
+    pub fn new_with_profile_registry(
+        runtime: IronRuntime,
+        profile_registry: Arc<RwLock<ProfileRegistry>>,
+    ) -> Self {
         let id = ConnectionId(CONNECTION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
         runtime.register_connection(id);
         Self {
             id,
             runtime,
             client: RefCell::new(None),
+            profile_registry,
         }
     }
 
@@ -112,6 +147,25 @@ impl IronConnection {
 
     pub fn set_client(&self, client: SharedClientChannel) {
         *self.client.borrow_mut() = Some(client);
+    }
+
+    fn selected_profile(&self, session_profile_id: Option<&AgentProfileId>) -> AgentProfile {
+        let registry = self.profile_registry.read();
+        session_profile_id
+            .and_then(|id| registry.get(id).cloned())
+            .unwrap_or_else(|| {
+                registry
+                    .get(&AgentProfileId::from("default"))
+                    .cloned()
+                    .unwrap_or_else(|| AgentProfile {
+                        name: "default".to_string(),
+                        provider: AgentProfileProvider::RuntimeDefault,
+                        tools: ToolFilter::Inherit,
+                        skills: SkillFilter::Inherit,
+                        approval: AgentApproval::PerTool,
+                        identity_prompt: Some(default_identity_prompt().to_string()),
+                    })
+            })
     }
 
     fn client_channel(&self) -> SharedClientChannel {
@@ -208,6 +262,7 @@ impl IronConnection {
     pub async fn handle_prompt(
         &self,
         args: acp::PromptRequest,
+        session_profile_id: Option<&AgentProfileId>,
     ) -> agent_client_protocol::Result<acp::PromptResponse> {
         debug!(session_id = %args.session_id, "ACP prompt received");
 
@@ -250,6 +305,17 @@ impl IronConnection {
 
         let sink = AcpPromptSink::new(acp_session_id.clone(), client.clone());
 
+        // All agent execution is profile-backed. Use the session profile or fall
+        // back to the default profile unless a managed provider context was stored
+        // by a prior model switch.
+        let selected_profile = self.selected_profile(session_profile_id);
+        {
+            let mut session = durable.lock();
+            if session.instructions.is_none() {
+                session.set_instructions(selected_profile.effective_identity_prompt());
+            }
+        }
+
         // Check if the session has a stored managed provider from a prior model switch
         let stored_context = {
             let session = durable.lock();
@@ -283,11 +349,36 @@ impl IronConnection {
                 }
             }
         } else {
-            let runner = PromptRunner::new(self.runtime.clone());
-            let stop_reason = runner
-                .run(&durable, &ephemeral, &sink, &config, max_iterations)
-                .await;
-            (Some(runner), stop_reason)
+            match self
+                .runtime
+                .resolve_profile_provider(&selected_profile)
+                .await
+            {
+                Ok(ResolvedProfileProvider::RuntimeDefault(_)) => {
+                    let runner = PromptRunner::new(self.runtime.clone());
+                    let stop_reason = runner
+                        .run(&durable, &ephemeral, &sink, &config, max_iterations)
+                        .await;
+                    (Some(runner), stop_reason)
+                }
+                Ok(ResolvedProfileProvider::Managed(provider)) => {
+                    let context = managed_profile_prompt_context(&selected_profile.provider)
+                        .expect("managed profile always yields a prompt context");
+                    let runner = PromptRunner::new_managed(self.runtime.clone(), provider, context);
+                    let stop_reason = runner
+                        .run(&durable, &ephemeral, &sink, &config, max_iterations)
+                        .await;
+                    (Some(runner), stop_reason)
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to resolve selected profile provider");
+                    {
+                        let mut session = durable.lock();
+                        session.add_agent_text(format!("[Provider error: {}]", e));
+                    }
+                    (None, acp::StopReason::EndTurn)
+                }
+            }
         };
 
         self.runtime.finish_prompt(iron_session_id);
@@ -343,6 +434,7 @@ impl IronConnection {
         &self,
         args: acp::PromptRequest,
         provider_context: ProviderPromptContext,
+        session_profile_id: Option<&AgentProfileId>,
     ) -> agent_client_protocol::Result<acp::PromptResponse> {
         debug!(session_id = %args.session_id, provider = %provider_context.provider_slug.as_str(), "Managed prompt received");
 
@@ -384,6 +476,16 @@ impl IronConnection {
         let max_iterations = config.max_iterations;
 
         let sink = AcpPromptSink::new(acp_session_id.clone(), client.clone());
+
+        // Apply the selected profile identity layer unless the session already
+        // has explicit instructions.
+        let selected_profile = self.selected_profile(session_profile_id);
+        {
+            let mut session = durable.lock();
+            if session.instructions.is_none() {
+                session.set_instructions(selected_profile.effective_identity_prompt());
+            }
+        }
 
         // Resolve the managed provider for this prompt
         let provider = match self

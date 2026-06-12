@@ -174,6 +174,7 @@ pub mod error;
 pub mod facade;
 pub mod mcp;
 pub mod plugin;
+pub mod profile;
 pub mod prompt;
 pub mod prompt_lifecycle;
 pub mod prompt_runner;
@@ -212,6 +213,12 @@ pub use error::{RuntimeError, RuntimeResult};
 pub use facade::{
     AgentConnection, AgentSession, IronAgent, PermissionRequest, PermissionVerdict, PromptEvent,
     PromptEvents, PromptHandle, PromptOutcome, PromptStatus, ToolResultStatus,
+};
+pub use profile::{
+    default_identity_prompt, managed_profile_prompt_context, normalize_profile_name, AgentApproval,
+    AgentProfile, AgentProfileEntry, AgentProfileId, AgentProfileProvider, ProfileLoadDiagnostic,
+    ProfileLoadIssue, ProfileLoadReport, ResolvedProfileProvider, SkillFilter, ToolFilter,
+    PROFILE_SCHEMA_VERSION,
 };
 pub use prompt_turn::PromptTurn;
 pub use runtime::{ConnectionId, IronRuntime};

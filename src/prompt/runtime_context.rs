@@ -66,6 +66,7 @@ fn approval_strategy_label(strategy: ApprovalStrategy) -> &'static str {
         ApprovalStrategy::Always => "always",
         ApprovalStrategy::Never => "never",
         ApprovalStrategy::PerTool => "per-tool",
+        ApprovalStrategy::AutoApprove => "auto-approve",
     }
 }
 

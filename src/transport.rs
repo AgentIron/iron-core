@@ -182,7 +182,7 @@ impl InProcessClient {
         &self,
         request: acp_schema::PromptRequest,
     ) -> agent_client_protocol::Result<acp_schema::PromptResponse> {
-        self.with_client_channel(|| self.connection.handle_prompt(request))
+        self.with_client_channel(|| self.connection.handle_prompt(request, None))
             .await
     }
 

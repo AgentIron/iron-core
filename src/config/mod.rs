@@ -279,6 +279,12 @@ pub enum ApprovalStrategy {
     /// Defer to the tool's `requires_approval` setting.
     #[default]
     PerTool,
+    /// Auto-approve tool calls.
+    ///
+    /// This variant is representational plumbing for profile policy; it does
+    /// not change existing tool-approval behavior until delegate-task/runtime
+    /// enforcement is implemented.
+    AutoApprove,
 }
 
 impl ApprovalStrategy {
@@ -288,6 +294,7 @@ impl ApprovalStrategy {
             ApprovalStrategy::Always => true,
             ApprovalStrategy::Never => false,
             ApprovalStrategy::PerTool => tool_requires_approval,
+            ApprovalStrategy::AutoApprove => false,
         }
     }
 }
