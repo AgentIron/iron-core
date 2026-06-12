@@ -15,6 +15,9 @@ use crate::{
     plugin::registry::{PluginAvailabilitySummary, PluginRegistry},
     plugin::status::{PluginInfo, PluginStatus},
     plugin::wasm_host::WasmHost,
+    profile::{
+        managed_profile_prompt_context, AgentProfile, AgentProfileProvider, ResolvedProfileProvider,
+    },
     provider_credential::domain::{
         ProviderAuthError, ProviderAuthResult, ProviderAuthStatus, ProviderPromptContext,
         ProviderSlug,
@@ -487,6 +490,29 @@ impl IronRuntime {
             })?;
 
         Ok(provider)
+    }
+
+    /// Resolve a provider for the given agent profile.
+    ///
+    /// `RuntimeDefault` profiles use the runtime's injected/default provider.
+    /// `Managed` profiles derive a managed provider context from the profile's
+    /// provider slug and model, resolving credentials from `iron-core`'s
+    /// credential state without a profile-supplied API key.
+    pub async fn resolve_profile_provider(
+        &self,
+        profile: &AgentProfile,
+    ) -> ProviderAuthResult<ResolvedProfileProvider> {
+        match &profile.provider {
+            AgentProfileProvider::RuntimeDefault => Ok(ResolvedProfileProvider::RuntimeDefault(
+                self.inner.provider.clone(),
+            )),
+            AgentProfileProvider::Managed { .. } => {
+                let context = managed_profile_prompt_context(&profile.provider)
+                    .expect("managed profile always yields a prompt context");
+                let provider = self.resolve_managed_provider(&context).await?;
+                Ok(ResolvedProfileProvider::Managed(provider))
+            }
+        }
     }
 
     /// Get the client-visible auth status for a provider.

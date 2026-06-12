@@ -1,7 +1,7 @@
 use crate::plugin::rich_output::{transcript_text as plugin_transcript_text, view as plugin_view};
 use crate::{
     capability::{CapabilityBackend, CapabilityDescriptor, CapabilityId},
-    config::Config,
+    config::{Config, ConfigStore},
     connection::{ClientChannel, IronConnection},
     context::handoff::{HandoffExporter, HandoffImporter},
     durable::{
@@ -9,6 +9,11 @@ use crate::{
         TimelineEntry,
     },
     error::RuntimeError,
+    profile::{
+        default_identity_prompt, normalize_profile_name, AgentApproval, AgentProfile,
+        AgentProfileEntry, AgentProfileId, AgentProfileProvider, ProfileLoadDiagnostic,
+        ProfileLoadIssue, ProfileLoadReport, SkillFilter, ToolFilter, PROFILE_SCHEMA_VERSION,
+    },
     provider_credential::domain::{ProviderAuthStatus, ProviderPromptContext, ProviderSlug},
     provider_credential::store::DynCredentialStore,
     runtime::{ConnectionId, IronRuntime},
@@ -17,7 +22,7 @@ use crate::{
 use agent_client_protocol::schema as acp;
 use futures::Stream;
 use iron_providers::Provider;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -470,6 +475,29 @@ struct StreamPromptState {
 }
 
 // ---------------------------------------------------------------------------
+// Profile registry helpers
+// ---------------------------------------------------------------------------
+
+type ProfileRegistry = HashMap<AgentProfileId, AgentProfile>;
+
+fn default_profile_registry() -> ProfileRegistry {
+    let mut registry = HashMap::new();
+    let default = AgentProfileEntry {
+        id: AgentProfileId::from("default"),
+        profile: AgentProfile {
+            name: "default".to_string(),
+            provider: AgentProfileProvider::RuntimeDefault,
+            tools: ToolFilter::Inherit,
+            skills: SkillFilter::Inherit,
+            approval: AgentApproval::PerTool,
+            identity_prompt: Some(default_identity_prompt().to_string()),
+        },
+    };
+    registry.insert(default.id, default.profile);
+    registry
+}
+
+// ---------------------------------------------------------------------------
 // IronAgent
 // ---------------------------------------------------------------------------
 
@@ -502,6 +530,7 @@ struct StreamPromptState {
 /// ```
 pub struct IronAgent {
     runtime: IronRuntime,
+    profile_registry: Arc<RwLock<ProfileRegistry>>,
 }
 
 impl IronAgent {
@@ -512,6 +541,7 @@ impl IronAgent {
     pub fn new<P: Provider + 'static>(config: Config, provider: P) -> Self {
         Self {
             runtime: IronRuntime::new(config, provider),
+            profile_registry: Arc::new(RwLock::new(default_profile_registry())),
         }
     }
 
@@ -526,6 +556,7 @@ impl IronAgent {
     ) -> Self {
         Self {
             runtime: IronRuntime::from_handle(config, provider, handle),
+            profile_registry: Arc::new(RwLock::new(default_profile_registry())),
         }
     }
 
@@ -537,6 +568,7 @@ impl IronAgent {
     ) -> Self {
         Self {
             runtime: IronRuntime::new_with_credential_store(config, provider, credential_store),
+            profile_registry: Arc::new(RwLock::new(default_profile_registry())),
         }
     }
 
@@ -731,12 +763,236 @@ impl IronAgent {
         self.runtime.get_session_tool_diagnostics(session_id)
     }
 
+    /// Return the built-in default profile entry.
+    ///
+    /// The default profile uses the runtime default provider, inherits tools
+    /// and skills, requires per-tool approval, and provides a generic identity
+    /// prompt.
+    pub fn default_profile(&self) -> AgentProfileEntry {
+        AgentProfileEntry {
+            id: AgentProfileId::from("default"),
+            profile: AgentProfile {
+                name: "default".to_string(),
+                provider: AgentProfileProvider::RuntimeDefault,
+                tools: ToolFilter::Inherit,
+                skills: SkillFilter::Inherit,
+                approval: AgentApproval::PerTool,
+                identity_prompt: Some(default_identity_prompt().to_string()),
+            },
+        }
+    }
+
+    /// Register or replace an agent profile by stable ID.
+    ///
+    /// Validates the profile name and rejects reserved `default` IDs/names.
+    /// If the ID is already registered, the previous profile is replaced only
+    /// when the replacement is valid and does not duplicate a name owned by
+    /// another profile ID.
+    pub fn register_profile(
+        &self,
+        id: AgentProfileId,
+        profile: AgentProfile,
+    ) -> Result<(), String> {
+        if id.as_str().eq_ignore_ascii_case("default") {
+            return Err("profile ID 'default' is reserved".to_string());
+        }
+        if !crate::profile::is_valid_profile_id(id.as_str()) {
+            return Err(format!("invalid profile ID: '{}'", id.as_str()));
+        }
+        let name = normalize_profile_name(&profile.name)
+            .ok_or_else(|| format!("invalid profile name: '{}'", profile.name))?;
+        if name.eq_ignore_ascii_case("default") {
+            return Err("profile name 'default' is reserved".to_string());
+        }
+
+        let mut registry = self.profile_registry.write();
+
+        // If replacing, the new name must not duplicate a name owned by a
+        // different profile ID.
+        let name_conflict = registry.iter().any(|(existing_id, existing_profile)| {
+            existing_id.as_str() != id.as_str() && existing_profile.name == name
+        });
+        if name_conflict {
+            return Err(format!(
+                "profile name '{}' is already used by another profile",
+                name
+            ));
+        }
+
+        let mut profile = profile;
+        profile.name = name;
+        registry.insert(id, profile);
+        Ok(())
+    }
+
+    /// Unregister a profile by stable ID.
+    ///
+    /// Returns `true` if a profile was removed. The built-in `default` profile
+    /// cannot be unregistered.
+    pub fn unregister_profile(&self, id: &AgentProfileId) -> bool {
+        if id.as_str().eq_ignore_ascii_case("default") {
+            return false;
+        }
+        self.profile_registry.write().remove(id).is_some()
+    }
+
+    /// List all registered profiles with deterministic ordering.
+    ///
+    /// Profiles are ordered by stable profile ID ascending. The built-in
+    /// `default` profile is always included.
+    pub fn list_profiles(&self) -> Vec<AgentProfileEntry> {
+        let registry = self.profile_registry.read();
+        let mut ids: Vec<&AgentProfileId> = registry.keys().collect();
+        ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        ids.into_iter()
+            .map(|id| AgentProfileEntry {
+                id: id.clone(),
+                profile: registry[id].clone(),
+            })
+            .collect()
+    }
+
+    /// Load typed profiles from a `ConfigStore` and merge them into the registry.
+    ///
+    /// This is a best-effort operation: valid profiles are registered by their
+    /// record ID, while invalid, reserved, or duplicate records are reported as
+    /// per-profile diagnostics. Fatal store failures are returned as `Err`.
+    /// Profiles not present in the store remain registered.
+    pub async fn load_profiles(
+        &self,
+        store: &ConfigStore,
+    ) -> Result<ProfileLoadReport, crate::config::ConfigError> {
+        let record_ids = store.list_profile_ids().await?;
+
+        // Sort IDs ascending for deterministic duplicate-name handling.
+        let mut record_ids = record_ids;
+        record_ids.sort();
+
+        let mut report = ProfileLoadReport::empty();
+
+        for record_id in record_ids {
+            let record = match store.get_profile(&record_id).await? {
+                Some(record) => record,
+                None => {
+                    report.diagnostics.push(ProfileLoadDiagnostic {
+                        profile_id: AgentProfileId::from(record_id),
+                        name: None,
+                        issue: ProfileLoadIssue::MissingRecord,
+                    });
+                    continue;
+                }
+            };
+
+            if record.schema_version != PROFILE_SCHEMA_VERSION {
+                report.diagnostics.push(ProfileLoadDiagnostic {
+                    profile_id: AgentProfileId::from(record.id.clone()),
+                    name: None,
+                    issue: ProfileLoadIssue::UnsupportedSchemaVersion {
+                        version: record.schema_version,
+                    },
+                });
+                continue;
+            }
+
+            let profile: AgentProfile = match serde_json::from_value(record.payload.clone()) {
+                Ok(profile) => profile,
+                Err(_) => {
+                    report.diagnostics.push(ProfileLoadDiagnostic {
+                        profile_id: AgentProfileId::from(record.id.clone()),
+                        name: None,
+                        issue: ProfileLoadIssue::InvalidPayload,
+                    });
+                    continue;
+                }
+            };
+
+            let profile_id = AgentProfileId::from(record.id.clone());
+
+            // Reject reserved default ID/name.
+            if profile_id.as_str().eq_ignore_ascii_case("default")
+                || profile.name.trim().eq_ignore_ascii_case("default")
+            {
+                report.diagnostics.push(ProfileLoadDiagnostic {
+                    profile_id: profile_id.clone(),
+                    name: Some(profile.name.clone()),
+                    issue: ProfileLoadIssue::ReservedDefault,
+                });
+                continue;
+            }
+
+            // Reject invalid IDs before mutating.
+            if !crate::profile::is_valid_profile_id(profile_id.as_str()) {
+                report.diagnostics.push(ProfileLoadDiagnostic {
+                    profile_id: profile_id.clone(),
+                    name: Some(profile.name.clone()),
+                    issue: ProfileLoadIssue::InvalidProfileId,
+                });
+                continue;
+            }
+
+            // Validate name. We intentionally do not normalize here because
+            // `register_profile` normalizes; however, an invalid name must be
+            // reported before any mutation.
+            if normalize_profile_name(&profile.name).is_none() {
+                report.diagnostics.push(ProfileLoadDiagnostic {
+                    profile_id: profile_id.clone(),
+                    name: Some(profile.name.clone()),
+                    issue: ProfileLoadIssue::InvalidName,
+                });
+                continue;
+            }
+
+            // Existing registry entries win duplicate-name conflicts. Hold the
+            // write lock for the entire check-and-insert so the conflict check
+            // and insertion are atomic with respect to concurrent registrations.
+            let mut registry = self.profile_registry.write();
+            let normalized_name =
+                normalize_profile_name(&profile.name).unwrap_or_else(|| profile.name.clone());
+            let conflict = registry.iter().any(|(existing_id, existing_profile)| {
+                existing_id.as_str() != profile_id.as_str()
+                    && existing_profile.name == normalized_name
+            });
+            if conflict {
+                report.diagnostics.push(ProfileLoadDiagnostic {
+                    profile_id: profile_id.clone(),
+                    name: Some(profile.name.clone()),
+                    issue: ProfileLoadIssue::DuplicateName,
+                });
+                continue;
+            }
+
+            let mut profile = profile;
+            profile.name = normalized_name;
+            registry.insert(profile_id.clone(), profile.clone());
+            report.loaded.push(AgentProfileEntry {
+                id: profile_id,
+                profile,
+            });
+        }
+
+        Ok(report)
+    }
+
+    /// Look up a registered profile by stable ID.
+    ///
+    /// Returns `None` if the profile is not registered. The built-in `default`
+    /// profile is always available.
+    pub fn get_profile(&self, id: &AgentProfileId) -> Option<AgentProfileEntry> {
+        self.profile_registry
+            .read()
+            .get(id)
+            .map(|profile| AgentProfileEntry {
+                id: id.clone(),
+                profile: profile.clone(),
+            })
+    }
+
     /// Establish a new connection to the agent.
     ///
     /// Returns an [`AgentConnection`] which can be used to create sessions
     /// and interact with the agent. Multiple connections can exist simultaneously.
     pub fn connect(&self) -> AgentConnection {
-        AgentConnection::new(self.runtime.clone())
+        AgentConnection::new(self.runtime.clone(), self.profile_registry.clone())
     }
 
     /// Shut down the agent runtime.
@@ -752,6 +1008,7 @@ impl Clone for IronAgent {
     fn clone(&self) -> Self {
         Self {
             runtime: self.runtime.clone(),
+            profile_registry: self.profile_registry.clone(),
         }
     }
 }
@@ -816,8 +1073,11 @@ impl AgentConnection {
         }
     }
 
-    fn new(runtime: IronRuntime) -> Self {
-        let inner = Rc::new(IronConnection::new(runtime));
+    fn new(runtime: IronRuntime, profile_registry: Arc<RwLock<ProfileRegistry>>) -> Self {
+        let inner = Rc::new(IronConnection::new_with_profile_registry(
+            runtime,
+            profile_registry,
+        ));
         let permission_handler = Rc::new(RefCell::new(None));
         let async_permission_handler = Rc::new(RefCell::new(None));
         let active_streams = Rc::new(RefCell::new(HashMap::new()));
@@ -879,6 +1139,32 @@ impl AgentConnection {
             durable,
             connection: self.inner.clone(),
             active_streams: self.active_streams.clone(),
+            profile_id: None,
+        })
+    }
+
+    /// Create a new session with an explicit profile.
+    ///
+    /// The selected profile ID is resolved against the agent's profile registry
+    /// at prompt time. If the profile is not found or is removed before a prompt
+    /// runs, the prompt returns an error instead of falling back to the built-in
+    /// default profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the runtime has been shut down.
+    pub fn create_session_with_profile(
+        &self,
+        profile_id: AgentProfileId,
+    ) -> Result<AgentSession, RuntimeError> {
+        let connection_id = self.inner.id();
+        let (session_id, durable) = self.inner.runtime().create_session(connection_id)?;
+        Ok(AgentSession {
+            id: session_id,
+            durable,
+            connection: self.inner.clone(),
+            active_streams: self.active_streams.clone(),
+            profile_id: Some(profile_id),
         })
     }
 
@@ -1005,6 +1291,7 @@ impl AgentConnection {
             durable,
             connection: self.inner.clone(),
             active_streams: self.active_streams.clone(),
+            profile_id: None,
         })
     }
 }
@@ -1344,6 +1631,7 @@ pub struct AgentSession {
     durable: Arc<Mutex<DurableSession>>,
     connection: Rc<IronConnection>,
     active_streams: Rc<RefCell<HashMap<String, StreamPromptState>>>,
+    profile_id: Option<AgentProfileId>,
 }
 
 impl AgentSession {
@@ -1387,7 +1675,11 @@ impl AgentSession {
             acp_session_id,
             vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
         );
-        match self.connection.handle_prompt(request).await {
+        match self
+            .connection
+            .handle_prompt(request, self.profile_id.as_ref())
+            .await
+        {
             Ok(response) => response.stop_reason.into(),
             Err(_) => PromptOutcome::EndTurn,
         }
@@ -1398,7 +1690,11 @@ impl AgentSession {
         let acp_session_id = acp::SessionId::new(self.id.to_string());
         let acp_blocks: Vec<_> = blocks.iter().map(to_acp_content_block).collect();
         let request = acp::PromptRequest::new(acp_session_id, acp_blocks);
-        match self.connection.handle_prompt(request).await {
+        match self
+            .connection
+            .handle_prompt(request, self.profile_id.as_ref())
+            .await
+        {
             Ok(response) => response.stop_reason.into(),
             Err(_) => PromptOutcome::EndTurn,
         }
@@ -1436,7 +1732,7 @@ impl AgentSession {
         );
         match self
             .connection
-            .handle_prompt_managed(request, provider_context)
+            .handle_prompt_managed(request, provider_context, self.profile_id.as_ref())
             .await
         {
             Ok(response) => response.stop_reason.into(),
@@ -1474,7 +1770,7 @@ impl AgentSession {
         let request = acp::PromptRequest::new(acp_session_id, acp_blocks);
         match self
             .connection
-            .handle_prompt_managed(request, provider_context)
+            .handle_prompt_managed(request, provider_context, self.profile_id.as_ref())
             .await
         {
             Ok(response) => response.stop_reason.into(),
@@ -1596,9 +1892,10 @@ impl AgentSession {
         let connection = self.connection.clone();
         let active_streams = self.active_streams.clone();
         let status_cell = status.clone();
+        let profile_id = self.profile_id.clone();
 
         tokio::task::spawn_local(async move {
-            let outcome = match connection.handle_prompt(request).await {
+            let outcome = match connection.handle_prompt(request, profile_id.as_ref()).await {
                 Ok(response) => response.stop_reason.into(),
                 Err(_) => PromptOutcome::EndTurn,
             };
@@ -1714,10 +2011,11 @@ impl AgentSession {
         let connection = self.connection.clone();
         let active_streams = self.active_streams.clone();
         let status_cell = status.clone();
+        let profile_id = self.profile_id.clone();
 
         tokio::task::spawn_local(async move {
             let outcome = match connection
-                .handle_prompt_managed(request, provider_context)
+                .handle_prompt_managed(request, provider_context, profile_id.as_ref())
                 .await
             {
                 Ok(response) => response.stop_reason.into(),
@@ -2250,6 +2548,7 @@ impl Clone for AgentSession {
             durable: self.durable.clone(),
             connection: self.connection.clone(),
             active_streams: self.active_streams.clone(),
+            profile_id: self.profile_id.clone(),
         }
     }
 }
