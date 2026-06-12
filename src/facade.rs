@@ -801,6 +801,9 @@ impl IronAgent {
         }
         let name = normalize_profile_name(&profile.name)
             .ok_or_else(|| format!("invalid profile name: '{}'", profile.name))?;
+        if name.eq_ignore_ascii_case("default") {
+            return Err("profile name 'default' is reserved".to_string());
+        }
 
         let mut registry = self.profile_registry.write();
 
@@ -939,31 +942,25 @@ impl IronAgent {
                 continue;
             }
 
-            // Existing registry entries win duplicate-name conflicts. We hold
-            // the registry read lock while checking.
-            {
-                let registry = self.profile_registry.read();
-                let name = profile.name.trim();
-                let conflict = registry.iter().any(|(existing_id, existing_profile)| {
-                    existing_id.as_str() != profile_id.as_str()
-                        && existing_profile.name.trim() == name
-                });
-                if conflict {
-                    report.diagnostics.push(ProfileLoadDiagnostic {
-                        profile_id: profile_id.clone(),
-                        name: Some(profile.name.clone()),
-                        issue: ProfileLoadIssue::DuplicateName,
-                    });
-                    continue;
-                }
-            }
-
-            // Register the loaded profile, replacing any existing entry for the
-            // same non-reserved ID. Use the additive semantics of `register_profile`
-            // by writing directly to preserve atomic validation.
+            // Existing registry entries win duplicate-name conflicts. Hold the
+            // write lock for the entire check-and-insert so the conflict check
+            // and insertion are atomic with respect to concurrent registrations.
             let mut registry = self.profile_registry.write();
             let normalized_name =
                 normalize_profile_name(&profile.name).unwrap_or_else(|| profile.name.clone());
+            let conflict = registry.iter().any(|(existing_id, existing_profile)| {
+                existing_id.as_str() != profile_id.as_str()
+                    && existing_profile.name == normalized_name
+            });
+            if conflict {
+                report.diagnostics.push(ProfileLoadDiagnostic {
+                    profile_id: profile_id.clone(),
+                    name: Some(profile.name.clone()),
+                    issue: ProfileLoadIssue::DuplicateName,
+                });
+                continue;
+            }
+
             let mut profile = profile;
             profile.name = normalized_name;
             registry.insert(profile_id.clone(), profile.clone());
@@ -1150,7 +1147,8 @@ impl AgentConnection {
     ///
     /// The selected profile ID is resolved against the agent's profile registry
     /// at prompt time. If the profile is not found or is removed before a prompt
-    /// runs, execution falls back to the built-in default profile.
+    /// runs, the prompt returns an error instead of falling back to the built-in
+    /// default profile.
     ///
     /// # Errors
     ///

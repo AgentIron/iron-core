@@ -14,7 +14,8 @@ use iron_core::{
         store::{InMemoryCredentialStore, ProviderCredentialStore},
         DurableCredentialStore,
     },
-    Config, IronAgent, IronRuntime, PROFILE_SCHEMA_VERSION as EXPORTED_SCHEMA_VERSION,
+    Config, IronAgent, IronRuntime, PromptOutcome,
+    PROFILE_SCHEMA_VERSION as EXPORTED_SCHEMA_VERSION,
 };
 use iron_providers::{InferenceRequest, Provider, ProviderEvent};
 use serde_json::json;
@@ -881,22 +882,20 @@ async fn prompt_with_profile_uses_custom_identity_prompt() {
 }
 
 #[tokio::test]
-async fn prompt_with_profile_unknown_falls_back_to_default_identity() {
+async fn prompt_with_profile_unknown_returns_error_without_mutating_session() {
     let agent = test_agent();
     let conn = agent.connect();
     let session = conn
         .create_session_with_profile(AgentProfileId::from("unknown"))
         .unwrap();
-    let _ = session.prompt("hello").await;
+    let outcome = session.prompt("hello").await;
 
+    assert_eq!(outcome, PromptOutcome::EndTurn);
     let durable = agent
         .runtime()
         .get_session(session.id())
         .expect("session exists");
-    assert_eq!(
-        durable.lock().instructions,
-        Some(default_identity_prompt().to_string())
-    );
+    assert_eq!(durable.lock().instructions, None);
 }
 
 #[tokio::test]

@@ -149,23 +149,30 @@ impl IronConnection {
         *self.client.borrow_mut() = Some(client);
     }
 
-    fn selected_profile(&self, session_profile_id: Option<&AgentProfileId>) -> AgentProfile {
+    fn selected_profile(
+        &self,
+        session_profile_id: Option<&AgentProfileId>,
+    ) -> Result<AgentProfile, agent_client_protocol::Error> {
         let registry = self.profile_registry.read();
-        session_profile_id
-            .and_then(|id| registry.get(id).cloned())
-            .unwrap_or_else(|| {
-                registry
-                    .get(&AgentProfileId::from("default"))
-                    .cloned()
-                    .unwrap_or_else(|| AgentProfile {
-                        name: "default".to_string(),
-                        provider: AgentProfileProvider::RuntimeDefault,
-                        tools: ToolFilter::Inherit,
-                        skills: SkillFilter::Inherit,
-                        approval: AgentApproval::PerTool,
-                        identity_prompt: Some(default_identity_prompt().to_string()),
-                    })
-            })
+        match session_profile_id {
+            Some(id) => registry.get(id).cloned().ok_or_else(|| {
+                agent_client_protocol::Error::invalid_params().data(serde_json::json!({
+                    "profile_id": id.as_str(),
+                    "error": "profile not found"
+                }))
+            }),
+            None => Ok(registry
+                .get(&AgentProfileId::from("default"))
+                .cloned()
+                .unwrap_or_else(|| AgentProfile {
+                    name: "default".to_string(),
+                    provider: AgentProfileProvider::RuntimeDefault,
+                    tools: ToolFilter::Inherit,
+                    skills: SkillFilter::Inherit,
+                    approval: AgentApproval::PerTool,
+                    identity_prompt: Some(default_identity_prompt().to_string()),
+                })),
+        }
     }
 
     fn client_channel(&self) -> SharedClientChannel {
@@ -308,7 +315,7 @@ impl IronConnection {
         // All agent execution is profile-backed. Use the session profile or fall
         // back to the default profile unless a managed provider context was stored
         // by a prior model switch.
-        let selected_profile = self.selected_profile(session_profile_id);
+        let selected_profile = self.selected_profile(session_profile_id)?;
         {
             let mut session = durable.lock();
             if session.instructions.is_none() {
@@ -479,7 +486,7 @@ impl IronConnection {
 
         // Apply the selected profile identity layer unless the session already
         // has explicit instructions.
-        let selected_profile = self.selected_profile(session_profile_id);
+        let selected_profile = self.selected_profile(session_profile_id)?;
         {
             let mut session = durable.lock();
             if session.instructions.is_none() {

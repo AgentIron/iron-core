@@ -81,11 +81,11 @@ pub enum ToolFilter {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SkillFilter {
     /// No skills are available.
-    #[default]
     None,
     /// Only allow skills with these names.
     Allow(Vec<String>),
     /// Inherit the runtime's available skill catalog.
+    #[default]
     Inherit,
 }
 

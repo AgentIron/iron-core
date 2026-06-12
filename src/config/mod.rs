@@ -294,7 +294,7 @@ impl ApprovalStrategy {
             ApprovalStrategy::Always => true,
             ApprovalStrategy::Never => false,
             ApprovalStrategy::PerTool => tool_requires_approval,
-            ApprovalStrategy::AutoApprove => false,
+            ApprovalStrategy::AutoApprove => tool_requires_approval,
         }
     }
 }
