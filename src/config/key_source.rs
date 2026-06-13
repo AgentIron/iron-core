@@ -23,7 +23,11 @@ impl OsKeyringKeySource {
 
 impl KeySource for OsKeyringKeySource {
     async fn get_key(&self) -> Result<[u8; 32], ConfigError> {
-        let entry = keyring::Entry::new(&self.service, &self.account)
+        keyring::use_native_store(false).map_err(|e| {
+            ConfigError::KeyUnavailable(format!("Failed to initialize keyring: {}", e))
+        })?;
+
+        let entry = keyring_core::Entry::new(&self.service, &self.account)
             .map_err(|e| ConfigError::KeyUnavailable(format!("Failed to access keyring: {}", e)))?;
 
         match entry.get_password() {
@@ -40,7 +44,7 @@ impl KeySource for OsKeyringKeySource {
                 key.copy_from_slice(&decoded);
                 Ok(key)
             }
-            Err(keyring::Error::NoEntry) => {
+            Err(keyring_core::Error::NoEntry) => {
                 // Generate a new key
                 let key = super::crypto::XChaCha20Poly1305Cipher::generate_key();
                 let encoded =

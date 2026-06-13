@@ -221,7 +221,7 @@ pub use profile::{
     PROFILE_SCHEMA_VERSION,
 };
 pub use prompt_turn::PromptTurn;
-pub use runtime::{ConnectionId, IronRuntime};
+pub use runtime::{ConnectionId, CreateSessionOptions, IronRuntime};
 pub use tool::{FunctionTool, Tool, ToolDefinition, ToolRegistry};
 
 pub use builtin::{

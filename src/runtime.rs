@@ -31,13 +31,20 @@ use crate::{
 };
 use iron_providers::Provider;
 use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+
+/// Options for creating a new runtime session.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CreateSessionOptions {
+    /// Whether the session should be hidden from normal session listings.
+    pub hidden: bool,
+}
 
 struct RuntimeInner {
     config: Config,
@@ -51,6 +58,10 @@ struct RuntimeInner {
     skill_catalog: RwLock<SkillCatalog>,
     sessions: RwLock<HashMap<SessionId, Arc<RuntimeSession>>>,
     connections: RwLock<HashMap<ConnectionId, Arc<RuntimeConnection>>>,
+    /// Parent -> children relationship index for recursive cancellation/closure.
+    children_by_parent: RwLock<HashMap<SessionId, BTreeSet<SessionId>>>,
+    /// Child -> parent relationship index for validation and cleanup.
+    parent_by_child: RwLock<HashMap<SessionId, SessionId>>,
     tokio_handle: tokio::runtime::Handle,
     _owned_runtime: Option<tokio::runtime::Runtime>,
     is_shutdown: AtomicBool,
@@ -70,6 +81,7 @@ struct ActivePrompt {
 struct RuntimeSession {
     session: Arc<Mutex<DurableSession>>,
     connection_id: ConnectionId,
+    hidden: bool,
     active_prompt: Mutex<Option<ActivePrompt>>,
     tool_catalog_cache: Mutex<Option<CachedSessionToolCatalog>>,
     pending_model_switch: Mutex<Option<PendingModelSwitch>>,
@@ -88,10 +100,11 @@ struct CachedSessionToolCatalog {
 }
 
 impl RuntimeSession {
-    fn new(session: Arc<Mutex<DurableSession>>, connection_id: ConnectionId) -> Self {
+    fn new(session: Arc<Mutex<DurableSession>>, connection_id: ConnectionId, hidden: bool) -> Self {
         Self {
             session,
             connection_id,
+            hidden,
             active_prompt: Mutex::new(None),
             tool_catalog_cache: Mutex::new(None),
             pending_model_switch: Mutex::new(None),
@@ -211,6 +224,8 @@ impl IronRuntime {
             skill_catalog,
             sessions: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
+            children_by_parent: RwLock::new(HashMap::new()),
+            parent_by_child: RwLock::new(HashMap::new()),
             tokio_handle: handle,
             _owned_runtime: Some(runtime),
             is_shutdown: AtomicBool::new(false),
@@ -322,6 +337,8 @@ impl IronRuntime {
             skill_catalog,
             sessions: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
+            children_by_parent: RwLock::new(HashMap::new()),
+            parent_by_child: RwLock::new(HashMap::new()),
             tokio_handle: handle,
             _owned_runtime: None,
             is_shutdown: AtomicBool::new(false),
@@ -1005,6 +1022,14 @@ impl IronRuntime {
         &self,
         connection_id: ConnectionId,
     ) -> Result<(SessionId, Arc<Mutex<DurableSession>>), RuntimeError> {
+        self.create_session_with_options(connection_id, CreateSessionOptions::default())
+    }
+
+    pub fn create_session_with_options(
+        &self,
+        connection_id: ConnectionId,
+        options: CreateSessionOptions,
+    ) -> Result<(SessionId, Arc<Mutex<DurableSession>>), RuntimeError> {
         if self.is_shutdown() {
             return Err(RuntimeError::Connection("Runtime is shut down".into()));
         }
@@ -1088,7 +1113,7 @@ impl IronRuntime {
 
         let session = Arc::new(Mutex::new(durable));
 
-        let runtime_session = RuntimeSession::new(session.clone(), connection_id);
+        let runtime_session = RuntimeSession::new(session.clone(), connection_id, options.hidden);
 
         self.inner
             .sessions
@@ -1096,6 +1121,16 @@ impl IronRuntime {
             .insert(session_id, Arc::new(runtime_session));
 
         Ok((session_id, session))
+    }
+
+    /// Check whether a session is marked hidden.
+    pub fn is_session_hidden(&self, session_id: SessionId) -> bool {
+        self.inner
+            .sessions
+            .read()
+            .get(&session_id)
+            .map(|rs| rs.hidden)
+            .unwrap_or(false)
     }
 
     pub fn insert_session(
@@ -1123,7 +1158,7 @@ impl IronRuntime {
         let roots = durable.workspace_roots.clone();
 
         let session = Arc::new(Mutex::new(durable));
-        let runtime_session = RuntimeSession::new(session, connection_id);
+        let runtime_session = RuntimeSession::new(session, connection_id, false);
         self.inner
             .sessions
             .write()
@@ -1153,20 +1188,175 @@ impl IronRuntime {
     }
 
     pub fn close_session(&self, id: SessionId) {
-        self.inner.sessions.write().remove(&id);
+        self.cancel_and_remove_session_subtree(id);
     }
 
     pub fn close_sessions_for_connection(&self, connection_id: ConnectionId) {
-        let mut sessions = self.inner.sessions.write();
-        let to_remove: Vec<SessionId> = sessions
-            .iter()
-            .filter(|(_, rs)| rs.connection_id == connection_id)
-            .map(|(id, _)| *id)
-            .collect();
+        let to_remove: Vec<SessionId> = {
+            let sessions = self.inner.sessions.read();
+            sessions
+                .iter()
+                .filter(|(_, rs)| rs.connection_id == connection_id)
+                .map(|(id, _)| *id)
+                .collect()
+        };
 
         for id in to_remove {
-            sessions.remove(&id);
+            self.cancel_and_remove_session_subtree(id);
         }
+    }
+
+    /// Cancel active prompts and remove a session plus all its descendants.
+    fn cancel_and_remove_session_subtree(&self, root: SessionId) {
+        let descendants = self.collect_descendants_depth_first(root);
+
+        // Remove all descendants first, canceling any active prompts.
+        for session_id in &descendants {
+            self.cancel_active_prompt(*session_id);
+            self.remove_session_and_edges(*session_id);
+        }
+
+        // Finally remove the root itself.
+        self.cancel_active_prompt(root);
+        self.remove_session_and_edges(root);
+    }
+
+    /// Collect all descendants of a session in depth-first order.
+    fn collect_descendants_depth_first(&self, parent: SessionId) -> Vec<SessionId> {
+        let children_by_parent = self.inner.children_by_parent.read();
+        let mut collected = Vec::new();
+        let mut stack: Vec<SessionId> = children_by_parent
+            .get(&parent)
+            .map(|children| children.iter().rev().copied().collect())
+            .unwrap_or_default();
+
+        while let Some(session_id) = stack.pop() {
+            collected.push(session_id);
+            if let Some(children) = children_by_parent.get(&session_id) {
+                for child in children.iter().rev() {
+                    stack.push(*child);
+                }
+            }
+        }
+
+        collected
+    }
+
+    /// Remove a session from storage and clean all relationship indexes involving it.
+    fn remove_session_and_edges(&self, session_id: SessionId) {
+        let mut sessions = self.inner.sessions.write();
+        sessions.remove(&session_id);
+        drop(sessions);
+
+        let mut children_by_parent = self.inner.children_by_parent.write();
+        let mut parent_by_child = self.inner.parent_by_child.write();
+
+        // If this session had children, remove those child->parent edges.
+        if let Some(children) = children_by_parent.remove(&session_id) {
+            for child in children {
+                parent_by_child.remove(&child);
+            }
+        }
+
+        // If this session had a parent, remove it from the parent's children set.
+        if let Some(parent) = parent_by_child.remove(&session_id) {
+            if let Some(children) = children_by_parent.get_mut(&parent) {
+                children.remove(&session_id);
+                if children.is_empty() {
+                    children_by_parent.remove(&parent);
+                }
+            }
+        }
+    }
+
+    /// Register a child session under a parent session.
+    ///
+    /// Both sessions must exist, must belong to the same connection, must be distinct,
+    /// and the child must not already have a parent. The edge must not create a cycle.
+    pub fn register_child(
+        &self,
+        parent_session_id: SessionId,
+        child_session_id: SessionId,
+    ) -> Result<(), RuntimeError> {
+        if parent_session_id == child_session_id {
+            return Err(RuntimeError::Session {
+                message: "parent and child session must be distinct".into(),
+            });
+        }
+
+        let sessions = self.inner.sessions.read();
+        let parent = sessions
+            .get(&parent_session_id)
+            .ok_or_else(|| RuntimeError::SessionNotFound(parent_session_id.to_string()))?;
+        let child = sessions
+            .get(&child_session_id)
+            .ok_or_else(|| RuntimeError::SessionNotFound(child_session_id.to_string()))?;
+
+        if parent.connection_id != child.connection_id {
+            return Err(RuntimeError::Session {
+                message: "parent and child session must belong to the same connection".into(),
+            });
+        }
+        drop(sessions);
+
+        {
+            let parent_by_child = self.inner.parent_by_child.read();
+            if parent_by_child.contains_key(&child_session_id) {
+                return Err(RuntimeError::Session {
+                    message: "child session already has a parent".into(),
+                });
+            }
+            drop(parent_by_child);
+        }
+
+        if self.is_ancestor_of(child_session_id, parent_session_id) {
+            return Err(RuntimeError::Session {
+                message: "registering child would create a cycle".into(),
+            });
+        }
+
+        let mut children_by_parent = self.inner.children_by_parent.write();
+        let mut parent_by_child = self.inner.parent_by_child.write();
+        children_by_parent
+            .entry(parent_session_id)
+            .or_default()
+            .insert(child_session_id);
+        parent_by_child.insert(child_session_id, parent_session_id);
+
+        Ok(())
+    }
+
+    /// Unregister a child relationship without closing either session.
+    pub fn unregister_child(&self, parent_session_id: SessionId, child_session_id: SessionId) {
+        let mut children_by_parent = self.inner.children_by_parent.write();
+        let mut parent_by_child = self.inner.parent_by_child.write();
+
+        if let Some(children) = children_by_parent.get_mut(&parent_session_id) {
+            children.remove(&child_session_id);
+            if children.is_empty() {
+                children_by_parent.remove(&parent_session_id);
+            }
+        }
+        if parent_by_child
+            .get(&child_session_id)
+            .map(|p| *p == parent_session_id)
+            .unwrap_or(false)
+        {
+            parent_by_child.remove(&child_session_id);
+        }
+    }
+
+    /// Return true if `ancestor` is an ancestor of `session_id` in the child graph.
+    fn is_ancestor_of(&self, ancestor: SessionId, session_id: SessionId) -> bool {
+        let parent_by_child = self.inner.parent_by_child.read();
+        let mut current = session_id;
+        while let Some(parent) = parent_by_child.get(&current) {
+            if *parent == ancestor {
+                return true;
+            }
+            current = *parent;
+        }
+        false
     }
 
     pub fn try_start_prompt(
@@ -1816,12 +2006,16 @@ impl IronRuntime {
         self.inner.sessions.read().len()
     }
 
-    pub fn sessions_for_connection(&self, connection_id: ConnectionId) -> Vec<SessionId> {
+    pub fn sessions_for_connection(
+        &self,
+        connection_id: ConnectionId,
+        include_hidden: bool,
+    ) -> Vec<SessionId> {
         self.inner
             .sessions
             .read()
             .iter()
-            .filter(|(_, rs)| rs.connection_id == connection_id)
+            .filter(|(_, rs)| rs.connection_id == connection_id && (include_hidden || !rs.hidden))
             .map(|(id, _)| *id)
             .collect()
     }

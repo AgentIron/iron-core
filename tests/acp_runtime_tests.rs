@@ -19,10 +19,10 @@ use iron_core::{
     skill::{LoadedSkill, SkillMetadata, SkillOrigin},
     tool::{FunctionTool, ToolDefinition},
     AuthInteractionResponse, AuthInteractionResult, AuthState, Config, ConnectionId, ContentBlock,
-    ContextManagementConfig, DurableSession, EphemeralTurn, IronAgent, IronRuntime,
-    OAuthRequirements, PluginHealth, PluginIdentity, PluginManifest, PluginPublisher, PluginSource,
-    PluginSourceConfig, PresentationMetadata, Provider, ProviderEvent, SessionId,
-    ToolAuthRequirements, ToolRecordStatus, ToolTerminalOutcome, TurnPhase,
+    ContextManagementConfig, CreateSessionOptions, DurableSession, EphemeralTurn, IronAgent,
+    IronRuntime, OAuthRequirements, PluginHealth, PluginIdentity, PluginManifest, PluginPublisher,
+    PluginSource, PluginSourceConfig, PresentationMetadata, Provider, ProviderEvent, RuntimeError,
+    SessionId, ToolAuthRequirements, ToolRecordStatus, ToolTerminalOutcome, TurnPhase,
 };
 use iron_providers::{InferenceRequest, ToolCall};
 use serde_json::json;
@@ -518,8 +518,8 @@ fn session_is_bound_to_its_connection() {
 
     assert_eq!(rt.get_session_connection(sid_a), Some(conn_a));
     assert_eq!(rt.get_session_connection(sid_b), Some(conn_b));
-    assert_eq!(rt.sessions_for_connection(conn_a), vec![sid_a]);
-    assert_eq!(rt.sessions_for_connection(conn_b), vec![sid_b]);
+    assert_eq!(rt.sessions_for_connection(conn_a, false), vec![sid_a]);
+    assert_eq!(rt.sessions_for_connection(conn_b, false), vec![sid_b]);
 }
 
 #[test]
@@ -570,6 +570,243 @@ fn create_session_on_shutdown_errors() {
 
     let result = rt.create_session(conn);
     assert!(result.is_err());
+}
+
+#[test]
+fn register_child_records_parent_child_relationship() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = ConnectionId(1);
+    rt.register_connection(conn);
+
+    let (parent, _) = rt.create_session(conn).unwrap();
+    let (child, _) = rt.create_session(conn).unwrap();
+
+    rt.register_child(parent, child).unwrap();
+
+    rt.close_session(parent);
+
+    assert!(rt.get_session(parent).is_none());
+    assert!(rt.get_session(child).is_none());
+}
+
+#[test]
+fn unregister_child_removes_relationship_without_closing() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = ConnectionId(1);
+    rt.register_connection(conn);
+
+    let (parent, _) = rt.create_session(conn).unwrap();
+    let (child, _) = rt.create_session(conn).unwrap();
+
+    rt.register_child(parent, child).unwrap();
+    rt.unregister_child(parent, child);
+
+    rt.close_session(parent);
+
+    assert!(rt.get_session(parent).is_none());
+    assert!(rt.get_session(child).is_some());
+}
+
+#[test]
+fn register_child_rejects_missing_parent() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = ConnectionId(1);
+    rt.register_connection(conn);
+
+    let missing_parent = SessionId::new();
+    let (child, _) = rt.create_session(conn).unwrap();
+
+    let result = rt.register_child(missing_parent, child);
+    assert!(matches!(result, Err(RuntimeError::SessionNotFound(_))));
+    assert!(rt.get_session(child).is_some());
+}
+
+#[test]
+fn register_child_rejects_missing_child() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = ConnectionId(1);
+    rt.register_connection(conn);
+
+    let (parent, _) = rt.create_session(conn).unwrap();
+    let missing_child = SessionId::new();
+
+    let result = rt.register_child(parent, missing_child);
+    assert!(matches!(result, Err(RuntimeError::SessionNotFound(_))));
+}
+
+#[test]
+fn register_child_rejects_self_parent() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = ConnectionId(1);
+    rt.register_connection(conn);
+
+    let (session_id, _) = rt.create_session(conn).unwrap();
+
+    let result = rt.register_child(session_id, session_id);
+    assert!(matches!(result, Err(RuntimeError::Session { .. })));
+}
+
+#[test]
+fn register_child_rejects_cross_connection() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn_a = ConnectionId(1);
+    let conn_b = ConnectionId(2);
+    rt.register_connection(conn_a);
+    rt.register_connection(conn_b);
+
+    let (parent, _) = rt.create_session(conn_a).unwrap();
+    let (child, _) = rt.create_session(conn_b).unwrap();
+
+    let result = rt.register_child(parent, child);
+    assert!(matches!(result, Err(RuntimeError::Session { .. })));
+}
+
+#[test]
+fn register_child_rejects_multiple_parents() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = ConnectionId(1);
+    rt.register_connection(conn);
+
+    let (parent_a, _) = rt.create_session(conn).unwrap();
+    let (parent_b, _) = rt.create_session(conn).unwrap();
+    let (child, _) = rt.create_session(conn).unwrap();
+
+    rt.register_child(parent_a, child).unwrap();
+    let result = rt.register_child(parent_b, child);
+    assert!(matches!(result, Err(RuntimeError::Session { .. })));
+}
+
+#[test]
+fn register_child_rejects_cycle() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = ConnectionId(1);
+    rt.register_connection(conn);
+
+    let (a, _) = rt.create_session(conn).unwrap();
+    let (b, _) = rt.create_session(conn).unwrap();
+    let (c, _) = rt.create_session(conn).unwrap();
+
+    rt.register_child(a, b).unwrap();
+    rt.register_child(b, c).unwrap();
+
+    let result = rt.register_child(c, a);
+    assert!(matches!(result, Err(RuntimeError::Session { .. })));
+}
+
+#[test]
+fn close_session_recursively_closes_descendants() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = ConnectionId(1);
+    rt.register_connection(conn);
+
+    let (parent, _) = rt.create_session(conn).unwrap();
+    let (child, _) = rt.create_session(conn).unwrap();
+    let (grandchild, _) = rt.create_session(conn).unwrap();
+
+    rt.register_child(parent, child).unwrap();
+    rt.register_child(child, grandchild).unwrap();
+
+    rt.close_session(parent);
+
+    assert!(rt.get_session(parent).is_none());
+    assert!(rt.get_session(child).is_none());
+    assert!(rt.get_session(grandchild).is_none());
+}
+
+#[test]
+fn close_child_leaves_parent_alive() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = ConnectionId(1);
+    rt.register_connection(conn);
+
+    let (parent, _) = rt.create_session(conn).unwrap();
+    let (child, _) = rt.create_session(conn).unwrap();
+    let (grandchild, _) = rt.create_session(conn).unwrap();
+
+    rt.register_child(parent, child).unwrap();
+    rt.register_child(child, grandchild).unwrap();
+
+    rt.close_session(child);
+
+    assert!(rt.get_session(parent).is_some());
+    assert!(rt.get_session(child).is_none());
+    assert!(rt.get_session(grandchild).is_none());
+}
+
+#[test]
+fn close_parent_cancels_active_child_prompt() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = ConnectionId(1);
+    rt.register_connection(conn);
+
+    let (parent, _) = rt.create_session(conn).unwrap();
+    let (child, _) = rt.create_session(conn).unwrap();
+
+    rt.register_child(parent, child).unwrap();
+
+    let _ephemeral = rt.try_start_prompt(child).unwrap();
+    assert!(rt.has_active_prompt(child));
+
+    rt.close_session(parent);
+
+    assert!(rt.get_session(child).is_none());
+    assert!(!rt.has_active_prompt(child));
+}
+
+#[test]
+fn create_session_with_options_marks_session_hidden() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = ConnectionId(1);
+    rt.register_connection(conn);
+
+    let (visible, _) = rt.create_session(conn).unwrap();
+    let (hidden, _) = rt
+        .create_session_with_options(conn, CreateSessionOptions { hidden: true })
+        .unwrap();
+
+    assert!(!rt.is_session_hidden(visible));
+    assert!(rt.is_session_hidden(hidden));
+}
+
+#[test]
+fn sessions_for_connection_filters_hidden_sessions() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = ConnectionId(1);
+    rt.register_connection(conn);
+
+    let (visible, _) = rt.create_session(conn).unwrap();
+    let (hidden, _) = rt
+        .create_session_with_options(conn, CreateSessionOptions { hidden: true })
+        .unwrap();
+
+    let visible_only = rt.sessions_for_connection(conn, false);
+    assert_eq!(visible_only, vec![visible]);
+
+    let all = rt.sessions_for_connection(conn, true);
+    assert_eq!(all.len(), 2);
+    assert!(all.contains(&visible));
+    assert!(all.contains(&hidden));
+}
+
+#[test]
+fn closing_connection_recursively_closes_session_graphs() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn_a = ConnectionId(1);
+    let conn_b = ConnectionId(2);
+    rt.register_connection(conn_a);
+    rt.register_connection(conn_b);
+
+    let (parent, _) = rt.create_session(conn_a).unwrap();
+    let (child, _) = rt.create_session(conn_a).unwrap();
+    let (other, _) = rt.create_session(conn_b).unwrap();
+
+    rt.register_child(parent, child).unwrap();
+
+    rt.close_connection(conn_a);
+
+    assert!(rt.get_session(parent).is_none());
+    assert!(rt.get_session(child).is_none());
+    assert!(rt.get_session(other).is_some());
 }
 
 #[test]

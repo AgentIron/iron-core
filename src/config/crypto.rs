@@ -1,8 +1,7 @@
 use chacha20poly1305::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{rand_core::RngCore, Aead, KeyInit, OsRng},
     AeadCore, XChaCha20Poly1305, XNonce,
 };
-use rand::RngCore;
 use std::sync::Arc;
 
 /// Key material for credential encryption.
