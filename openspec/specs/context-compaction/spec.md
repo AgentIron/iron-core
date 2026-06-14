@@ -227,7 +227,7 @@ The Tool Philosophy system prompt section SHALL include the compress tool guidan
 - **THEN** the `CompactionAvailability` influence event shows `effect=Added` (never `Suppressed`)
 
 ### Requirement: Model-visible compress tool compacts selected ranges
-The system SHALL expose a runtime-owned `compress` tool to tool-capable models when compression is available or useful, allowing the active model to replace selected resolved history ranges with freeform durable summaries.
+The runtime-owned `compress` tool SHALL allow the active model to replace selected resolved history ranges with freeform durable summaries.
 
 #### Scenario: Model compresses a resolved range
 - **WHEN** the model calls `compress` with a topic, one or more valid source ranges, and summaries

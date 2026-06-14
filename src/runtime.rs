@@ -1207,23 +1207,41 @@ impl IronRuntime {
     }
 
     /// Cancel active prompts and remove a session plus all its descendants.
+    ///
+    /// This holds the session and relationship write locks for the entire
+    /// traversal so the subtree cannot mutate between collection and removal.
     fn cancel_and_remove_session_subtree(&self, root: SessionId) {
-        let descendants = self.collect_descendants_depth_first(root);
+        let mut sessions = self.inner.sessions.write();
+        let mut children_by_parent = self.inner.children_by_parent.write();
+        let mut parent_by_child = self.inner.parent_by_child.write();
+
+        let descendants = Self::collect_descendants_depth_first_locked(&children_by_parent, root);
 
         // Remove all descendants first, canceling any active prompts.
-        for session_id in &descendants {
-            self.cancel_active_prompt(*session_id);
-            self.remove_session_and_edges(*session_id);
+        for session_id in descendants {
+            Self::cancel_active_prompt_locked(&sessions, session_id);
+            Self::remove_session_and_edges_locked(
+                &mut sessions,
+                &mut children_by_parent,
+                &mut parent_by_child,
+                session_id,
+            );
         }
 
         // Finally remove the root itself.
-        self.cancel_active_prompt(root);
-        self.remove_session_and_edges(root);
+        Self::cancel_active_prompt_locked(&sessions, root);
+        Self::remove_session_and_edges_locked(
+            &mut sessions,
+            &mut children_by_parent,
+            &mut parent_by_child,
+            root,
+        );
     }
 
-    /// Collect all descendants of a session in depth-first order.
-    fn collect_descendants_depth_first(&self, parent: SessionId) -> Vec<SessionId> {
-        let children_by_parent = self.inner.children_by_parent.read();
+    fn collect_descendants_depth_first_locked(
+        children_by_parent: &HashMap<SessionId, BTreeSet<SessionId>>,
+        parent: SessionId,
+    ) -> Vec<SessionId> {
         let mut collected = Vec::new();
         let mut stack: Vec<SessionId> = children_by_parent
             .get(&parent)
@@ -1242,14 +1260,13 @@ impl IronRuntime {
         collected
     }
 
-    /// Remove a session from storage and clean all relationship indexes involving it.
-    fn remove_session_and_edges(&self, session_id: SessionId) {
-        let mut sessions = self.inner.sessions.write();
+    fn remove_session_and_edges_locked(
+        sessions: &mut HashMap<SessionId, Arc<RuntimeSession>>,
+        children_by_parent: &mut HashMap<SessionId, BTreeSet<SessionId>>,
+        parent_by_child: &mut HashMap<SessionId, SessionId>,
+        session_id: SessionId,
+    ) {
         sessions.remove(&session_id);
-        drop(sessions);
-
-        let mut children_by_parent = self.inner.children_by_parent.write();
-        let mut parent_by_child = self.inner.parent_by_child.write();
 
         // If this session had children, remove those child->parent edges.
         if let Some(children) = children_by_parent.remove(&session_id) {
@@ -1284,6 +1301,24 @@ impl IronRuntime {
             });
         }
 
+        // Acquire relationship write locks first so the parent/child checks and
+        // insertion are atomic. Session existence is verified under the session
+        // read lock while the relationship locks are held.
+        let mut children_by_parent = self.inner.children_by_parent.write();
+        let mut parent_by_child = self.inner.parent_by_child.write();
+
+        if parent_by_child.contains_key(&child_session_id) {
+            return Err(RuntimeError::Session {
+                message: "child session already has a parent".into(),
+            });
+        }
+
+        if Self::is_ancestor_of_locked(&parent_by_child, child_session_id, parent_session_id) {
+            return Err(RuntimeError::Session {
+                message: "registering child would create a cycle".into(),
+            });
+        }
+
         let sessions = self.inner.sessions.read();
         let parent = sessions
             .get(&parent_session_id)
@@ -1297,26 +1332,7 @@ impl IronRuntime {
                 message: "parent and child session must belong to the same connection".into(),
             });
         }
-        drop(sessions);
 
-        {
-            let parent_by_child = self.inner.parent_by_child.read();
-            if parent_by_child.contains_key(&child_session_id) {
-                return Err(RuntimeError::Session {
-                    message: "child session already has a parent".into(),
-                });
-            }
-            drop(parent_by_child);
-        }
-
-        if self.is_ancestor_of(child_session_id, parent_session_id) {
-            return Err(RuntimeError::Session {
-                message: "registering child would create a cycle".into(),
-            });
-        }
-
-        let mut children_by_parent = self.inner.children_by_parent.write();
-        let mut parent_by_child = self.inner.parent_by_child.write();
         children_by_parent
             .entry(parent_session_id)
             .or_default()
@@ -1346,9 +1362,11 @@ impl IronRuntime {
         }
     }
 
-    /// Return true if `ancestor` is an ancestor of `session_id` in the child graph.
-    fn is_ancestor_of(&self, ancestor: SessionId, session_id: SessionId) -> bool {
-        let parent_by_child = self.inner.parent_by_child.read();
+    fn is_ancestor_of_locked(
+        parent_by_child: &HashMap<SessionId, SessionId>,
+        ancestor: SessionId,
+        session_id: SessionId,
+    ) -> bool {
         let mut current = session_id;
         while let Some(parent) = parent_by_child.get(&current) {
             if *parent == ancestor {
@@ -1907,6 +1925,13 @@ impl IronRuntime {
 
     pub fn cancel_active_prompt(&self, session_id: SessionId) -> bool {
         let sessions = self.inner.sessions.read();
+        Self::cancel_active_prompt_locked(&sessions, session_id)
+    }
+
+    fn cancel_active_prompt_locked(
+        sessions: &HashMap<SessionId, Arc<RuntimeSession>>,
+        session_id: SessionId,
+    ) -> bool {
         if let Some(rs) = sessions.get(&session_id) {
             let active = rs.active_prompt.lock();
             if let Some(prompt) = active.as_ref() {
