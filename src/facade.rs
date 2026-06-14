@@ -1185,10 +1185,19 @@ impl AgentConnection {
     }
 
     /// Get the list of active session IDs on this connection.
+    ///
+    /// Hidden sessions are excluded from this list by default.
     pub fn active_sessions(&self) -> Vec<SessionId> {
         self.inner
             .runtime()
-            .sessions_for_connection(self.inner.id())
+            .sessions_for_connection(self.inner.id(), false)
+    }
+
+    /// Get all active session IDs on this connection, including hidden sessions.
+    pub fn active_sessions_include_hidden(&self) -> Vec<SessionId> {
+        self.inner
+            .runtime()
+            .sessions_for_connection(self.inner.id(), true)
     }
 
     /// Start a direct client-initiated auth flow for a plugin.

@@ -1,4 +1,4 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: The `compress` tool SHALL be unconditionally available in the session tool catalog
 The `compress` tool SHALL be registered in the runtime `ToolRegistry` at construction time and SHALL appear in every session's `SessionToolCatalog` (both `definitions` and `tool_map`), regardless of session state. The tool availability SHALL NOT depend on `uncompacted_tokens` or `compressed_blocks`.

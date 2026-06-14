@@ -59,10 +59,11 @@ grep-regex = "0.1"
 # Config store dependencies
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate", "chrono"] }
 directories = "6"
-keyring = { version = "3", features = ["tokio", "async-secret-service", "linux-native"] }
-secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+keyring = "4"
+keyring-core = "1"
+secret-service = { version = "5", features = ["rt-tokio-crypto-rust"] }
 base64 = "0.22"
-rand = "0.8"
+rand = "0.10"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 cfg-if = "1"
 
