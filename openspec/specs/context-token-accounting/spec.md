@@ -49,16 +49,17 @@ The system SHALL fall back to full provider-visible heuristic estimation when no
 - **AND** the session remains usable without provider usage support
 
 ### Requirement: Baseline invalidates on provider-visible rewrite
-The system SHALL invalidate the provider-reported input-token baseline when provider-visible context is rewritten rather than append-only.
+The system SHALL clear (invalidate) the provider-reported input-token baseline when provider-visible context is rewritten rather than append-only. Subsequent estimates MUST use full heuristic fallback until a new usage-bearing response establishes a new baseline.
 
 #### Scenario: Compaction invalidates baseline
 - **WHEN** compaction removes historical provider-visible context and creates compressed blocks
 - **THEN** the session token tracker clears the provider-reported input-token baseline
-- **AND** subsequent context estimates use full heuristic fallback until the next usage-bearing response establishes a new baseline
+- **AND** subsequent estimates MUST use full heuristic fallback until a new usage-bearing response establishes a new baseline
 
 #### Scenario: Request envelope rewrite invalidates baseline
 - **WHEN** instructions, active skill instructions, tool definitions, workspace-root prompt content, or compressed block rendering changes outside append-only transcript updates
-- **THEN** the session token tracker invalidates or conservatively refreshes the context estimate before using it for pressure decisions
+- **THEN** the session token tracker clears the provider-reported input-token baseline
+- **AND** subsequent estimates MUST use full heuristic fallback until a new usage-bearing response establishes a new baseline
 
 ### Requirement: Accumulated usage uses provider values only
 The system SHALL accumulate input, output, cached-input, cache-creation, cache-read, and reasoning-output token totals from provider-reported usage values only.

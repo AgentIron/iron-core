@@ -78,8 +78,8 @@ Provider/model-specific system prompting from `iron-providers` SHALL appear only
 - **WHEN** a client supplies multiple injection fragments
 - **THEN** the `Client Injection` section renders them in caller-specified order
 
-#### Scenario: Empty client injection omits extra content
+#### Scenario: Empty client injection renders an empty section
 - **WHEN** a client supplies no injection content
-- **THEN** the `Client Injection` section is empty or omitted according to the renderer policy
+- **THEN** the `Client Injection` section still renders, possibly empty
 - **AND** the rest of the section order remains stable
 

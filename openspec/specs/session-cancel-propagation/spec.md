@@ -1,7 +1,7 @@
 # session-cancel-propagation Specification
 
 ## Purpose
-TBD - created by archiving change cancel-propagation-foundation. Update Purpose after archive.
+This specification defines how cancellation and closure requests propagate through the runtime's parent/child session graph. It is intended for implementers of the ACP runtime and session lifecycle layer. The spec guarantees that cancelling or closing a parent session deterministically cancels or closes all registered descendant sessions owned by the same connection, and that child relationships can be registered and unregistered safely. It does not define cross-connection cancellation, persistence of cancellation state, or user-visible cancellation UI.
 ## Requirements
 ### Requirement: Runtime Tracks Parent Child Session Relationships
 

@@ -289,13 +289,13 @@ The system SHALL treat `identity_prompt` as the selected profile's model-facing 
 
 ### Requirement: Core SHALL add AutoApprove approval plumbing
 
-The system SHALL expose an `ApprovalStrategy::AutoApprove` variant so profile approval policy can be represented distinctly from existing approval strategies.
+The system SHALL expose an `AgentApproval::AutoApprove` variant so profile approval policy can be represented distinctly from existing profile approval policies.
 
 #### Scenario: AutoApprove is representable
 - **WHEN** code maps or stores an auto-approval profile policy
-- **THEN** the policy can be represented with `ApprovalStrategy::AutoApprove`
+- **THEN** the policy can be represented with `AgentApproval::AutoApprove`
 
 #### Scenario: Existing approval behavior remains stable
-- **WHEN** runtime tool approval checks use existing `Always`, `Never`, or `PerTool` strategies
+- **WHEN** runtime tool approval checks use existing `AgentApproval::PerTool` or `AgentApproval::ReadOnly` policies
 - **THEN** their approval decisions remain unchanged by the addition of `AutoApprove`
 
