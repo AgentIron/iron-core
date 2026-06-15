@@ -310,17 +310,20 @@ impl IronConnection {
 
         let sink = AcpPromptSink::new(acp_session_id.clone(), client.clone());
 
-        // All agent execution is profile-backed. Use the session profile or fall
-        // back to the default profile unless a managed provider context was stored
-        // by a prior model switch.
+        // Apply the selected profile identity layer unless the session already
+        // has explicit instructions.
         let selected_profile = self.selected_profile(session_profile_id)?;
         {
             let mut session = durable.lock();
             if let Some(profile_id) = session_profile_id {
                 session.profile_id = Some(profile_id.clone());
             }
-            if session.instructions.is_none() {
-                session.set_instructions(selected_profile.effective_identity_prompt());
+            if session.profile_identity.is_none() {
+                if let Some(ref identity) = selected_profile.identity_prompt {
+                    if !identity.trim().is_empty() {
+                        session.set_profile_identity(identity.clone());
+                    }
+                }
             }
         }
 
@@ -493,8 +496,12 @@ impl IronConnection {
             if let Some(profile_id) = session_profile_id {
                 session.profile_id = Some(profile_id.clone());
             }
-            if session.instructions.is_none() {
-                session.set_instructions(selected_profile.effective_identity_prompt());
+            if session.profile_identity.is_none() {
+                if let Some(ref identity) = selected_profile.identity_prompt {
+                    if !identity.trim().is_empty() {
+                        session.set_profile_identity(identity.clone());
+                    }
+                }
             }
         }
 

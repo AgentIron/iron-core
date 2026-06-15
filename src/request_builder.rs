@@ -19,6 +19,19 @@ pub struct EffectiveToolRequestContext<'a> {
     /// When set, overrides `config.model` in the inference request.
     /// Populated from `DurableSession::current_model` after a model switch.
     pub effective_model: Option<&'a str>,
+    /// Selected profile identity prompt for the executing agent profile.
+    /// When present and non-empty, this is rendered in `## 1. Identity`.
+    pub profile_identity: Option<&'a str>,
+}
+
+struct ComposedInstructionInputs<'a> {
+    session_instructions: Option<&'a str>,
+    repo_instruction_payload: Option<&'a crate::prompt::config::RepoInstructionPayload>,
+    python_exec_available: bool,
+    skill_instructions: Option<&'a str>,
+    context_pressure: crate::context::ContextPressure,
+    workspace_roots: Option<&'a [std::path::PathBuf]>,
+    profile_identity: Option<&'a str>,
 }
 
 /// Build an inference request using an effective tool view.
@@ -65,12 +78,15 @@ pub fn build_inference_request_with_effective_tools(
 
     let composed = build_composed_instructions(
         config,
-        context.instructions,
-        context.repo_instruction_payload,
-        context.python_exec_available,
-        context.skill_instructions,
-        context.context_pressure,
-        context.workspace_roots,
+        ComposedInstructionInputs {
+            session_instructions: context.instructions,
+            repo_instruction_payload: context.repo_instruction_payload,
+            python_exec_available: context.python_exec_available,
+            skill_instructions: context.skill_instructions,
+            context_pressure: context.context_pressure,
+            workspace_roots: context.workspace_roots,
+            profile_identity: context.profile_identity,
+        },
     );
     if !composed.is_empty() {
         request = request.with_instructions(composed);
@@ -97,6 +113,7 @@ pub fn build_inference_request(
             context_pressure: crate::context::ContextPressure::None,
             workspace_roots: None,
             effective_model: None,
+            profile_identity: None,
         },
         tool_registry,
     )
@@ -121,6 +138,7 @@ pub fn build_inference_request_with_context(
             context_pressure: crate::context::ContextPressure::None,
             workspace_roots: None,
             effective_model: None,
+            profile_identity: None,
         },
         tool_registry,
     )
@@ -145,6 +163,7 @@ pub fn build_inference_request_with_repo(
             context_pressure: crate::context::ContextPressure::None,
             workspace_roots: None,
             effective_model: None,
+            profile_identity: None,
         },
         tool_registry,
     )
@@ -188,12 +207,15 @@ pub fn build_inference_request_with_context_and_repo(
 
     let composed = build_composed_instructions(
         config,
-        context.instructions,
-        context.repo_instruction_payload,
-        context.python_exec_available || python_exec_available,
-        context.skill_instructions,
-        context.context_pressure,
-        context.workspace_roots,
+        ComposedInstructionInputs {
+            session_instructions: context.instructions,
+            repo_instruction_payload: context.repo_instruction_payload,
+            python_exec_available: context.python_exec_available || python_exec_available,
+            skill_instructions: context.skill_instructions,
+            context_pressure: context.context_pressure,
+            workspace_roots: context.workspace_roots,
+            profile_identity: context.profile_identity,
+        },
     );
     if !composed.is_empty() {
         request = request.with_instructions(composed);
@@ -202,20 +224,12 @@ pub fn build_inference_request_with_context_and_repo(
     Ok(request)
 }
 
-fn build_composed_instructions(
-    config: &Config,
-    session_instructions: Option<&str>,
-    repo_instruction_payload: Option<&crate::prompt::config::RepoInstructionPayload>,
-    python_exec_available: bool,
-    skill_instructions: Option<&str>,
-    context_pressure: crate::context::ContextPressure,
-    workspace_roots: Option<&[std::path::PathBuf]>,
-) -> String {
+fn build_composed_instructions(config: &Config, inputs: ComposedInstructionInputs<'_>) -> String {
     let baseline = crate::prompt::baseline::BASELINE_PROMPT;
 
-    let repo_payload = repo_instruction_payload.cloned().unwrap_or_default();
+    let repo_payload = inputs.repo_instruction_payload.cloned().unwrap_or_default();
 
-    let (working_dir, workspace_roots) = if let Some(roots) = workspace_roots {
+    let (working_dir, workspace_roots) = if let Some(roots) = inputs.workspace_roots {
         if roots.is_empty() {
             (std::env::current_dir().unwrap_or_default(), Vec::new())
         } else {
@@ -237,7 +251,7 @@ fn build_composed_instructions(
         &working_dir,
         &workspace_roots,
         is_git_repo,
-        python_exec_available,
+        inputs.python_exec_available,
     );
 
     let provider_guidance = resolve_provider_guidance(config);
@@ -247,13 +261,14 @@ fn build_composed_instructions(
         runtime_context: &runtime_context,
         repo_payload: &repo_payload,
         additional_inline: &config.prompt_composition.additional_inline,
-        session_instructions,
-        skill_instructions,
+        profile_identity: inputs.profile_identity,
+        session_instructions: inputs.session_instructions,
+        skill_instructions: inputs.skill_instructions,
         provider_guidance: provider_guidance.as_deref(),
         client_editing_guidance: config.prompt_composition.client_editing_guidance.as_deref(),
         client_injections: &config.prompt_composition.client_injections,
-        python_exec_available,
-        context_pressure,
+        python_exec_available: inputs.python_exec_available,
+        context_pressure: inputs.context_pressure,
     })
 }
 

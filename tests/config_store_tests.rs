@@ -1483,6 +1483,7 @@ fn create_test_handoff_bundle(id: &str) -> iron_core::context::handoff::HandoffB
         current_model: Some("gpt-4o".to_string()),
         current_provider_slug: Some("openai".to_string()),
         current_provider_api_key: Some("sk-test-key".to_string()),
+        profile_identity: None,
         hidden_tools: vec![],
     }
 }

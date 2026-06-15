@@ -169,6 +169,7 @@ impl PromptRunner {
             let request = {
                 let session = durable.lock();
                 let instructions = session.instructions.clone();
+                let profile_identity = session.profile_identity.clone();
                 let compressed_blocks = session.compressed_blocks.clone();
                 let repo_payload = session.repo_instruction_payload.clone();
                 let messages = session.to_transcript_with_visible_ids(true).messages;
@@ -181,7 +182,7 @@ impl PromptRunner {
                 let mut snapshot = {
                     let session = durable.lock();
                     crate::context::ActiveContextAccountant::estimate_snapshot(
-                        instructions.as_deref(),
+                        session.instruction_text_for_estimate().as_deref(),
                         &compressed_blocks,
                         &messages,
                         &tool_registry,
@@ -246,6 +247,7 @@ impl PromptRunner {
                             context_pressure,
                             workspace_roots: Some(&workspace_roots),
                             effective_model: effective_model.as_deref(),
+                            profile_identity: profile_identity.as_deref(),
                         },
                         tool_catalog.definitions(),
                     )
@@ -262,6 +264,7 @@ impl PromptRunner {
                             context_pressure,
                             workspace_roots: Some(&workspace_roots),
                             effective_model: effective_model.as_deref(),
+                            profile_identity: profile_identity.as_deref(),
                         },
                         &tool_registry,
                     )
@@ -2466,7 +2469,7 @@ impl PromptRunner {
             let session = durable.lock();
             let messages = session.to_transcript().messages;
             let snapshot = crate::context::ActiveContextAccountant::estimate_snapshot(
-                session.instructions.as_deref(),
+                session.instruction_text_for_estimate().as_deref(),
                 &session.compressed_blocks,
                 &messages,
                 &crate::tool::ToolRegistry::new(),

@@ -413,6 +413,10 @@ pub struct DurableSession {
     /// The profile id last used for this session, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<crate::profile::AgentProfileId>,
+    /// Profile identity prompt selected for this session, if any.
+    /// Rendered in `## 1. Identity` instead of client/session injection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_identity: Option<String>,
     #[serde(skip, default)]
     pub token_tracker: crate::context::SessionTokenTracker,
 }
@@ -443,6 +447,7 @@ impl DurableSession {
             workspace_roots: Vec::new(),
             pending_workspace_roots: None,
             profile_id: None,
+            profile_identity: None,
             token_tracker: crate::context::SessionTokenTracker::default(),
         }
     }
@@ -1155,6 +1160,32 @@ impl DurableSession {
     pub fn set_instructions(&mut self, instructions: impl Into<String>) {
         self.instructions = Some(instructions.into());
         self.token_tracker.invalidate_baseline();
+    }
+
+    pub fn set_profile_identity(&mut self, identity: impl Into<String>) {
+        let value = identity.into();
+        if value.trim().is_empty() {
+            self.profile_identity = None;
+        } else {
+            self.profile_identity = Some(value);
+        }
+        self.token_tracker.invalidate_baseline();
+    }
+
+    /// Combine rendered identity and explicit session instructions for token
+    /// accounting. This mirrors system prompt rendering: a missing or blank
+    /// profile identity still renders the core fallback identity in Section 1.
+    pub fn instruction_text_for_estimate(&self) -> Option<String> {
+        let identity = self
+            .profile_identity
+            .as_deref()
+            .filter(|identity| !identity.trim().is_empty())
+            .unwrap_or(crate::prompt::system::DEFAULT_RENDERED_IDENTITY);
+
+        match self.instructions.as_deref() {
+            None => Some(identity.to_string()),
+            Some(instructions) => Some(format!("{}\n\n{}", identity, instructions)),
+        }
     }
 
     pub fn record_script_start(

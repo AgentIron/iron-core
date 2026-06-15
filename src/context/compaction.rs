@@ -331,7 +331,7 @@ impl CompressTool {
         use crate::tool::ToolRegistry;
         let messages = session.to_transcript().messages;
         let snapshot = ActiveContextAccountant::estimate_snapshot(
-            session.instructions.as_deref(),
+            session.instruction_text_for_estimate().as_deref(),
             &session.compressed_blocks,
             &messages,
             &ToolRegistry::new(),

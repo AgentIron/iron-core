@@ -113,6 +113,7 @@ pub struct SystemPromptInputs<'a> {
     pub runtime_context: &'a str,
     pub repo_payload: &'a RepoInstructionPayload,
     pub additional_inline: &'a [String],
+    pub profile_identity: Option<&'a str>,
     pub session_instructions: Option<&'a str>,
     pub skill_instructions: Option<&'a str>,
     pub provider_guidance: Option<&'a str>,
@@ -132,6 +133,7 @@ impl SystemPromptFingerprint {
         push_part(&mut value, inputs.runtime_context);
         push_part(&mut value, &format!("{:?}", inputs.repo_payload));
         push_part(&mut value, &format!("{:?}", inputs.additional_inline));
+        push_part(&mut value, inputs.profile_identity.unwrap_or_default());
         push_part(&mut value, inputs.session_instructions.unwrap_or_default());
         push_part(&mut value, inputs.skill_instructions.unwrap_or_default());
         push_part(&mut value, inputs.provider_guidance.unwrap_or_default());
@@ -208,7 +210,11 @@ impl SystemPromptRenderer {
         let meta = section.metadata();
         let mut rendered = format!("## {}. {}\n", index, meta.title);
         let body = match section {
-            PromptSection::Identity => render_identity(),
+            PromptSection::Identity => inputs
+                .profile_identity
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(render_identity),
             PromptSection::StaticContext => inputs.runtime_context.to_string(),
             PromptSection::CoreGuidelines => render_core_guidelines(inputs.baseline),
             PromptSection::ToolPhilosophy => {
@@ -233,8 +239,10 @@ impl SystemPromptRenderer {
     }
 }
 
+pub(crate) const DEFAULT_RENDERED_IDENTITY: &str = "You are an AI coding agent powered by iron-core. Follow the core-owned instructions in this prompt and preserve the authority boundaries between core, provider, and client sections.";
+
 fn render_identity() -> String {
-    "You are an AI coding agent powered by iron-core. Follow the core-owned instructions in this prompt and preserve the authority boundaries between core, provider, and client sections.".to_string()
+    DEFAULT_RENDERED_IDENTITY.to_string()
 }
 
 fn render_core_guidelines(baseline: &str) -> String {
