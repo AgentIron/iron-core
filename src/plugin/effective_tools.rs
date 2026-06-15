@@ -105,7 +105,7 @@ impl Tool for PluginTool {
 ///
 /// Each variant captures enough context for clients and logs to produce
 /// actionable messages without needing to re-derive the cause.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnavailableReason {
     /// Plugin is not enabled for the current session.
     PluginNotEnabled,
@@ -122,6 +122,10 @@ pub enum UnavailableReason {
         required: Vec<String>,
         missing: Vec<String>,
     },
+    /// MCP server is not enabled for the current session.
+    McpServerNotEnabled,
+    /// MCP server is not connected/healthy.
+    McpServerNotHealthy(crate::mcp::server::McpServerHealth),
 }
 
 /// Result of canonical per-tool availability computation.

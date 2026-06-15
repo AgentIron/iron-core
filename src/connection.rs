@@ -113,8 +113,6 @@ pub struct IronConnection {
     profile_registry: Arc<RwLock<ProfileRegistry>>,
 }
 
-static CONNECTION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
 impl IronConnection {
     pub fn new(runtime: IronRuntime) -> Self {
         Self::new_with_profile_registry(
@@ -127,7 +125,7 @@ impl IronConnection {
         runtime: IronRuntime,
         profile_registry: Arc<RwLock<ProfileRegistry>>,
     ) -> Self {
-        let id = ConnectionId(CONNECTION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+        let id = crate::runtime::next_connection_id();
         runtime.register_connection(id);
         Self {
             id,
@@ -318,6 +316,9 @@ impl IronConnection {
         let selected_profile = self.selected_profile(session_profile_id)?;
         {
             let mut session = durable.lock();
+            if let Some(profile_id) = session_profile_id {
+                session.profile_id = Some(profile_id.clone());
+            }
             if session.instructions.is_none() {
                 session.set_instructions(selected_profile.effective_identity_prompt());
             }
@@ -489,6 +490,9 @@ impl IronConnection {
         let selected_profile = self.selected_profile(session_profile_id)?;
         {
             let mut session = durable.lock();
+            if let Some(profile_id) = session_profile_id {
+                session.profile_id = Some(profile_id.clone());
+            }
             if session.instructions.is_none() {
                 session.set_instructions(selected_profile.effective_identity_prompt());
             }
