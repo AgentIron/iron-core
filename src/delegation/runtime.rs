@@ -123,7 +123,7 @@ impl IronRuntime {
             let diagnostic = parent_catalog
                 .as_ref()
                 .zip(parent_durable.as_ref())
-                .and_then(|(catalog, durable)| catalog.inspect_tool(&*durable.lock(), name));
+                .and_then(|(catalog, durable)| catalog.inspect_tool(&durable.lock(), name));
 
             match diagnostic {
                 Some(diagnostic) if diagnostic.available => {
@@ -190,14 +190,14 @@ impl IronRuntime {
 
         let inherited_tools: Vec<String> = final_names
             .iter()
+            .filter(|n| parent_names.contains(*n))
             .cloned()
-            .filter(|n| parent_names.contains(n))
             .collect();
 
         let added_tools: Vec<String> = final_names
             .iter()
+            .filter(|n| !parent_names.contains(*n))
             .cloned()
-            .filter(|n| !parent_names.contains(n))
             .collect();
 
         let digest = compute_tool_catalog_digest(&final_defs);
@@ -352,7 +352,7 @@ impl IronRuntime {
             session
                 .messages
                 .last()
-                .and_then(|m| Some(m.text_content()))
+                .map(|m| m.text_content())
                 .filter(|t| !t.is_empty())
                 .map(|t| t.to_string())
         };
