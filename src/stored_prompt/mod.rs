@@ -90,11 +90,11 @@ impl StoredPromptRegistry {
     }
 
     pub fn unregister(&mut self, id: &str) -> bool {
-        self.prompts.remove(id).is_some()
+        self.prompts.remove(id.trim()).is_some()
     }
 
     pub fn get(&self, id: &str) -> Option<&StoredPrompt> {
-        self.prompts.get(id)
+        self.prompts.get(id.trim())
     }
 
     pub fn list(&self) -> Vec<StoredPromptEntry> {

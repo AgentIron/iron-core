@@ -1496,7 +1496,7 @@ impl PromptRunner {
         sink: &dyn PromptSink,
         call: &iron_providers::ToolCall,
     ) -> Result<crate::delegation::DelegationResult, String> {
-        let mut request = validate_delegation_arguments(&call.arguments)
+        let request = validate_delegation_arguments(&call.arguments)
             .map_err(|e| format!("invalid delegate_task arguments: {}", e))?;
 
         let parent_session_id = durable.lock().id;
@@ -1509,7 +1509,7 @@ impl PromptRunner {
             .ok_or_else(|| "delegate_task requires an ACP session id".to_string())?;
 
         let profile = self
-            .resolve_delegation_profile(durable, request.profile_id.take())
+            .resolve_delegation_profile(durable, request.profile_id.clone())
             .await?;
 
         let (result, _metadata) = self

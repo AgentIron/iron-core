@@ -316,7 +316,9 @@ impl IronConnection {
         let selected_profile = self.selected_profile(session_profile_id)?;
         {
             let mut session = durable.lock();
-            session.profile_id = session_profile_id.cloned();
+            if let Some(profile_id) = session_profile_id {
+                session.profile_id = Some(profile_id.clone());
+            }
             if session.instructions.is_none() {
                 session.set_instructions(selected_profile.effective_identity_prompt());
             }
@@ -488,7 +490,9 @@ impl IronConnection {
         let selected_profile = self.selected_profile(session_profile_id)?;
         {
             let mut session = durable.lock();
-            session.profile_id = session_profile_id.cloned();
+            if let Some(profile_id) = session_profile_id {
+                session.profile_id = Some(profile_id.clone());
+            }
             if session.instructions.is_none() {
                 session.set_instructions(selected_profile.effective_identity_prompt());
             }

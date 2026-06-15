@@ -48,6 +48,8 @@ pub enum PromptOutcome {
     Cancelled,
     /// The maximum number of turn requests was reached.
     MaxTurnRequests,
+    /// The turn stopped for a reason not recognized by this core version.
+    Unknown,
 }
 
 impl From<acp::StopReason> for PromptOutcome {
@@ -56,7 +58,7 @@ impl From<acp::StopReason> for PromptOutcome {
             acp::StopReason::EndTurn => PromptOutcome::EndTurn,
             acp::StopReason::Cancelled => PromptOutcome::Cancelled,
             acp::StopReason::MaxTurnRequests => PromptOutcome::MaxTurnRequests,
-            _ => PromptOutcome::EndTurn,
+            acp::StopReason::MaxTokens | acp::StopReason::Refusal | _ => PromptOutcome::Unknown,
         }
     }
 }
@@ -1022,7 +1024,7 @@ impl IronAgent {
 
     /// Unregister a stored prompt by stable ID.
     pub fn unregister_stored_prompt(&self, id: &str) -> bool {
-        self.stored_prompt_registry.write().unregister(id)
+        self.stored_prompt_registry.write().unregister(id.trim())
     }
 
     /// List all registered stored prompts with deterministic ordering.
@@ -1032,12 +1034,13 @@ impl IronAgent {
 
     /// Look up a registered stored prompt by stable ID.
     pub fn get_stored_prompt(&self, id: &str) -> Option<StoredPromptEntry> {
+        let normalized_id = id.trim();
         self.stored_prompt_registry
             .read()
-            .get(id)
+            .get(normalized_id)
             .cloned()
             .map(|prompt| StoredPromptEntry {
-                id: id.to_string(),
+                id: normalized_id.to_string(),
                 prompt,
             })
     }

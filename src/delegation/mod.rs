@@ -70,7 +70,12 @@ pub struct DelegationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
     /// Optional profile to use for the child run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "profile",
+        alias = "profile_id",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub profile_id: Option<AgentProfileId>,
     /// Requested skills to activate in the child run after profile filtering.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -110,6 +115,8 @@ pub enum DelegationOutcome {
     EndTurn,
     Cancelled,
     MaxTurnRequests,
+    /// The run stopped for a reason that is not recognized by this core version.
+    Unknown,
 }
 
 impl From<agent_client_protocol::schema::StopReason> for DelegationOutcome {
@@ -120,7 +127,9 @@ impl From<agent_client_protocol::schema::StopReason> for DelegationOutcome {
             agent_client_protocol::schema::StopReason::MaxTurnRequests => {
                 DelegationOutcome::MaxTurnRequests
             }
-            _ => DelegationOutcome::EndTurn,
+            agent_client_protocol::schema::StopReason::MaxTokens
+            | agent_client_protocol::schema::StopReason::Refusal
+            | _ => DelegationOutcome::Unknown,
         }
     }
 }
@@ -255,8 +264,14 @@ pub fn compute_tool_catalog_digest(definitions: &[ToolDefinition]) -> String {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
-    for def in definitions {
+    // Canonicalize ordering so the digest is independent of input order.
+    let mut defs: Vec<&ToolDefinition> = definitions.iter().collect();
+    defs.sort_by(|a, b| a.name.cmp(&b.name));
+    for def in defs {
+        // Hash all model-visible fields so schema/description changes are reflected.
         def.name.hash(&mut hasher);
+        def.description.hash(&mut hasher);
+        def.input_schema.to_string().hash(&mut hasher);
         def.requires_approval.hash(&mut hasher);
     }
     format!("{:016x}", hasher.finish())
@@ -333,7 +348,10 @@ pub fn apply_skill_filter(
 pub fn validate_delegation_arguments(
     value: &serde_json::Value,
 ) -> Result<DelegationRequest, String> {
-    serde_json::from_value(value.clone()).map_err(|e| format!("invalid delegate_task args: {}", e))
+    let request: DelegationRequest = serde_json::from_value(value.clone())
+        .map_err(|e| format!("invalid delegate_task args: {}", e))?;
+    request.validate()?;
+    Ok(request)
 }
 
 #[cfg(test)]
