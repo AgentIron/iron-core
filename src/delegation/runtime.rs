@@ -272,7 +272,11 @@ impl IronRuntime {
         // Set identity prompt.
         {
             let mut session = durable.lock();
-            session.set_instructions(profile.effective_identity_prompt());
+            if let Some(ref identity) = profile.identity_prompt {
+                if !identity.trim().is_empty() {
+                    session.set_profile_identity(identity.clone());
+                }
+            }
         }
 
         let (activated_skills, excluded_skills_by_profile, unavailable_requested_skills) = {

@@ -798,9 +798,10 @@ async fn prompt_applies_default_profile_identity_prompt() {
         .get_session(session.id())
         .expect("session exists");
     assert_eq!(
-        durable.lock().instructions,
+        durable.lock().profile_identity,
         Some(default_identity_prompt().to_string())
     );
+    assert_eq!(durable.lock().instructions, None);
 }
 
 #[tokio::test]
@@ -840,9 +841,10 @@ async fn prompt_managed_applies_default_profile_identity_prompt() {
         .get_session(session.id())
         .expect("session exists");
     assert_eq!(
-        durable.lock().instructions,
+        durable.lock().profile_identity,
         Some(default_identity_prompt().to_string())
     );
+    assert_eq!(durable.lock().instructions, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -877,9 +879,10 @@ async fn prompt_with_profile_uses_custom_identity_prompt() {
         .get_session(session.id())
         .expect("session exists");
     assert_eq!(
-        durable.lock().instructions,
+        durable.lock().profile_identity,
         Some("You are a Rust expert.".to_string())
     );
+    assert_eq!(durable.lock().instructions, None);
 }
 
 #[tokio::test]
@@ -896,6 +899,7 @@ async fn prompt_with_profile_unknown_returns_error_without_mutating_session() {
         .runtime()
         .get_session(session.id())
         .expect("session exists");
+    assert_eq!(durable.lock().profile_identity, None);
     assert_eq!(durable.lock().instructions, None);
 }
 
@@ -929,10 +933,8 @@ async fn prompt_with_profile_uses_managed_provider_resolution() {
         .runtime()
         .get_session(session.id())
         .expect("session exists");
-    assert_eq!(
-        durable.lock().instructions,
-        Some(default_identity_prompt().to_string())
-    );
+    assert_eq!(durable.lock().profile_identity, None);
+    assert_eq!(durable.lock().instructions, None);
 }
 
 #[tokio::test]

@@ -272,7 +272,7 @@ The system SHALL model all agent execution as profile-backed execution. When a c
 
 ### Requirement: Core SHALL use identity prompts as profile identity layers
 
-The system SHALL treat `identity_prompt` as the selected profile's model-facing identity instruction layer. A custom profile's non-blank `identity_prompt` SHALL replace the default profile's identity prompt for that selected profile rather than appending to it.
+The system SHALL treat `identity_prompt` as the selected profile's model-facing identity instruction layer. A custom profile's non-blank `identity_prompt` SHALL replace the default profile's identity prompt for that selected profile rather than appending to it, and the selected profile identity SHALL be supplied to system prompt composition as identity content rather than as client/session injection content.
 
 #### Scenario: Custom identity prompt is used
 - **WHEN** a selected non-default profile has a non-blank `identity_prompt`
@@ -287,6 +287,11 @@ The system SHALL treat `identity_prompt` as the selected profile's model-facing 
 - **WHEN** the built-in default profile is created
 - **THEN** it has a short generic identity prompt suitable for general software engineering assistance
 
+#### Scenario: Selected profile identity is distinct from session instructions
+- **WHEN** execution preparation supplies the selected profile identity to provider request construction
+- **THEN** the profile identity is available to the system prompt renderer as profile identity content
+- **AND** it is not treated as client-owned session instruction content solely because it came from the selected profile
+
 ### Requirement: Core SHALL add AutoApprove approval plumbing
 
 The system SHALL expose an `AgentApproval::AutoApprove` variant so profile approval policy can be represented distinctly from existing profile approval policies.
@@ -298,4 +303,3 @@ The system SHALL expose an `AgentApproval::AutoApprove` variant so profile appro
 #### Scenario: Existing approval behavior remains stable
 - **WHEN** runtime tool approval checks use existing `AgentApproval::PerTool` or `AgentApproval::ReadOnly` policies
 - **THEN** their approval decisions remain unchanged by the addition of `AutoApprove`
-

@@ -46,6 +46,9 @@ pub struct HandoffBundle {
     pub current_provider_slug: Option<String>,
     /// Current provider API key (if managed)
     pub current_provider_api_key: Option<String>,
+    /// Profile identity prompt selected for this session, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_identity: Option<String>,
     /// Tools hidden due to model capability differences
     #[serde(default)]
     pub hidden_tools: Vec<String>,
@@ -80,7 +83,7 @@ impl HandoffExporter {
         let size_estimate = estimate_bundle_size(
             compressed_blocks,
             &tail,
-            session.instructions.as_deref(),
+            session.instruction_text_for_estimate().as_deref(),
             &session.skill_state,
         );
 
@@ -132,6 +135,7 @@ impl HandoffExporter {
             current_model: session.current_model.clone(),
             current_provider_slug: session.current_provider_slug.clone(),
             current_provider_api_key: session.current_provider_api_key.clone(),
+            profile_identity: session.profile_identity.clone(),
             hidden_tools: session.hidden_tools.clone(),
         };
 
@@ -165,6 +169,10 @@ impl HandoffImporter {
 
         if let Some(instr) = bundle.instructions {
             target.set_instructions(instr);
+        }
+
+        if let Some(identity) = bundle.profile_identity {
+            target.set_profile_identity(identity);
         }
 
         if !bundle.compressed_blocks.is_empty() {
@@ -220,6 +228,10 @@ impl HandoffImporter {
 
         if let Some(instr) = bundle.instructions {
             session.set_instructions(instr);
+        }
+
+        if let Some(identity) = bundle.profile_identity {
+            session.set_profile_identity(identity);
         }
 
         if !bundle.handoff_note.is_empty() {

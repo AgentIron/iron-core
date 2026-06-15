@@ -30,6 +30,7 @@ fn render_system_prompt<'a>(
         runtime_context,
         repo_payload: payload,
         additional_inline: &[],
+        profile_identity: None,
         session_instructions: None,
         skill_instructions: None,
         provider_guidance,
@@ -97,6 +98,7 @@ fn prompt_preserves_repo_and_session_content_inside_client_injection() {
         runtime_context: "RUNTIME",
         repo_payload: &payload,
         additional_inline: &["INLINE".to_string()],
+        profile_identity: None,
         session_instructions: Some("SESSION"),
         skill_instructions: Some("SKILLS"),
         provider_guidance: None,
@@ -582,6 +584,7 @@ fn system_prompt_cache_reuses_output_until_inputs_change_or_invalidate() {
             runtime_context: "Working directory: /one",
             repo_payload: &payload,
             additional_inline: &[],
+            profile_identity: None,
             session_instructions: None,
             skill_instructions: None,
             provider_guidance: None,
@@ -597,6 +600,7 @@ fn system_prompt_cache_reuses_output_until_inputs_change_or_invalidate() {
             runtime_context: "Working directory: /one",
             repo_payload: &payload,
             additional_inline: &[],
+            profile_identity: None,
             session_instructions: None,
             skill_instructions: None,
             provider_guidance: None,
@@ -614,6 +618,7 @@ fn system_prompt_cache_reuses_output_until_inputs_change_or_invalidate() {
             runtime_context: "Working directory: /two",
             repo_payload: &payload,
             additional_inline: &[],
+            profile_identity: None,
             session_instructions: None,
             skill_instructions: None,
             provider_guidance: None,
@@ -632,6 +637,7 @@ fn system_prompt_cache_reuses_output_until_inputs_change_or_invalidate() {
             runtime_context: "Working directory: /two",
             repo_payload: &payload,
             additional_inline: &[],
+            profile_identity: None,
             session_instructions: None,
             skill_instructions: None,
             provider_guidance: None,
@@ -711,4 +717,128 @@ fn provider_name_overrides_manual_provider_guidance() {
         instr.contains("Anthropic Messages API"),
         "should include resolved anthropic fragment"
     );
+}
+
+#[test]
+fn profile_identity_renders_in_identity_section() {
+    let payload = RepoInstructionPayload::default();
+    let result = SystemPromptRenderer::render(&SystemPromptInputs {
+        baseline: "BASELINE",
+        runtime_context: "RUNTIME",
+        repo_payload: &payload,
+        additional_inline: &[],
+        profile_identity: Some("You are a Rust expert."),
+        session_instructions: None,
+        skill_instructions: None,
+        provider_guidance: None,
+        client_editing_guidance: None,
+        client_injections: &[],
+        python_exec_available: false,
+        context_pressure: iron_core::ContextPressure::None,
+    });
+
+    let identity_pos = section_position(&result, "## 1. Identity");
+    let identity_content_pos = result.find("You are a Rust expert.").unwrap();
+    let client_pos = section_position(&result, "## 9. Client Injection");
+    assert!(identity_pos < identity_content_pos);
+    assert!(identity_content_pos < client_pos);
+    assert!(!result[client_pos..].contains("You are a Rust expert."));
+}
+
+#[test]
+fn missing_profile_identity_uses_core_fallback() {
+    let payload = RepoInstructionPayload::default();
+    let result = SystemPromptRenderer::render(&SystemPromptInputs {
+        baseline: "BASELINE",
+        runtime_context: "RUNTIME",
+        repo_payload: &payload,
+        additional_inline: &[],
+        profile_identity: None,
+        session_instructions: None,
+        skill_instructions: None,
+        provider_guidance: None,
+        client_editing_guidance: None,
+        client_injections: &[],
+        python_exec_available: false,
+        context_pressure: iron_core::ContextPressure::None,
+    });
+
+    let identity_pos = section_position(&result, "## 1. Identity");
+    assert!(result[identity_pos..].contains("You are an AI coding agent powered by iron-core"));
+}
+
+#[test]
+fn blank_profile_identity_uses_core_fallback() {
+    let payload = RepoInstructionPayload::default();
+    let result = SystemPromptRenderer::render(&SystemPromptInputs {
+        baseline: "BASELINE",
+        runtime_context: "RUNTIME",
+        repo_payload: &payload,
+        additional_inline: &[],
+        profile_identity: Some("   "),
+        session_instructions: None,
+        skill_instructions: None,
+        provider_guidance: None,
+        client_editing_guidance: None,
+        client_injections: &[],
+        python_exec_available: false,
+        context_pressure: iron_core::ContextPressure::None,
+    });
+
+    let identity_pos = section_position(&result, "## 1. Identity");
+    assert!(result[identity_pos..].contains("You are an AI coding agent powered by iron-core"));
+}
+
+#[test]
+fn session_instructions_remain_in_client_injection_with_profile_identity() {
+    let payload = RepoInstructionPayload::default();
+    let result = SystemPromptRenderer::render(&SystemPromptInputs {
+        baseline: "BASELINE",
+        runtime_context: "RUNTIME",
+        repo_payload: &payload,
+        additional_inline: &[],
+        profile_identity: Some("You are a Rust expert."),
+        session_instructions: Some("Explicit session instructions."),
+        skill_instructions: None,
+        provider_guidance: None,
+        client_editing_guidance: None,
+        client_injections: &[],
+        python_exec_available: false,
+        context_pressure: iron_core::ContextPressure::None,
+    });
+
+    let identity_pos = section_position(&result, "## 1. Identity");
+    let client_pos = section_position(&result, "## 9. Client Injection");
+    assert!(result[identity_pos..client_pos].contains("You are a Rust expert."));
+    assert!(result[client_pos..].contains("Explicit session instructions."));
+}
+
+#[test]
+fn profile_identity_changes_prompt_fingerprint() {
+    use iron_core::prompt::SystemPromptFingerprint;
+
+    let base_inputs = SystemPromptInputs {
+        baseline: "BASELINE",
+        runtime_context: "RUNTIME",
+        repo_payload: &RepoInstructionPayload::default(),
+        additional_inline: &[],
+        profile_identity: None,
+        session_instructions: None,
+        skill_instructions: None,
+        provider_guidance: None,
+        client_editing_guidance: None,
+        client_injections: &[],
+        python_exec_available: false,
+        context_pressure: iron_core::ContextPressure::None,
+    };
+
+    let fp_without = SystemPromptFingerprint::from_inputs(&base_inputs);
+
+    let with_identity = SystemPromptInputs {
+        profile_identity: Some("You are a Rust expert."),
+        ..base_inputs
+    };
+    let fp_with = SystemPromptFingerprint::from_inputs(&with_identity);
+
+    assert_ne!(fp_without, fp_with);
 }

@@ -2324,7 +2324,7 @@ impl AgentSession {
         let session = self.durable.lock();
         let tail = session.to_transcript();
         let mut snapshot = crate::context::ContextTelemetry::for_session(
-            session.instructions.as_deref(),
+            session.instruction_text_for_estimate().as_deref(),
             &session.compressed_blocks,
             &tail.messages,
             tool_registry,

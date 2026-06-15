@@ -19,6 +19,9 @@ pub struct EffectiveToolRequestContext<'a> {
     /// When set, overrides `config.model` in the inference request.
     /// Populated from `DurableSession::current_model` after a model switch.
     pub effective_model: Option<&'a str>,
+    /// Selected profile identity prompt for the executing agent profile.
+    /// When present and non-empty, this is rendered in `## 1. Identity`.
+    pub profile_identity: Option<&'a str>,
 }
 
 /// Build an inference request using an effective tool view.
@@ -71,6 +74,7 @@ pub fn build_inference_request_with_effective_tools(
         context.skill_instructions,
         context.context_pressure,
         context.workspace_roots,
+        context.profile_identity,
     );
     if !composed.is_empty() {
         request = request.with_instructions(composed);
@@ -97,6 +101,7 @@ pub fn build_inference_request(
             context_pressure: crate::context::ContextPressure::None,
             workspace_roots: None,
             effective_model: None,
+            profile_identity: None,
         },
         tool_registry,
     )
@@ -121,6 +126,7 @@ pub fn build_inference_request_with_context(
             context_pressure: crate::context::ContextPressure::None,
             workspace_roots: None,
             effective_model: None,
+            profile_identity: None,
         },
         tool_registry,
     )
@@ -145,6 +151,7 @@ pub fn build_inference_request_with_repo(
             context_pressure: crate::context::ContextPressure::None,
             workspace_roots: None,
             effective_model: None,
+            profile_identity: None,
         },
         tool_registry,
     )
@@ -194,6 +201,7 @@ pub fn build_inference_request_with_context_and_repo(
         context.skill_instructions,
         context.context_pressure,
         context.workspace_roots,
+        context.profile_identity,
     );
     if !composed.is_empty() {
         request = request.with_instructions(composed);
@@ -210,6 +218,7 @@ fn build_composed_instructions(
     skill_instructions: Option<&str>,
     context_pressure: crate::context::ContextPressure,
     workspace_roots: Option<&[std::path::PathBuf]>,
+    profile_identity: Option<&str>,
 ) -> String {
     let baseline = crate::prompt::baseline::BASELINE_PROMPT;
 
@@ -247,6 +256,7 @@ fn build_composed_instructions(
         runtime_context: &runtime_context,
         repo_payload: &repo_payload,
         additional_inline: &config.prompt_composition.additional_inline,
+        profile_identity,
         session_instructions,
         skill_instructions,
         provider_guidance: provider_guidance.as_deref(),

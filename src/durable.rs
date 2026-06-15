@@ -413,6 +413,10 @@ pub struct DurableSession {
     /// The profile id last used for this session, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<crate::profile::AgentProfileId>,
+    /// Profile identity prompt selected for this session, if any.
+    /// Rendered in `## 1. Identity` instead of client/session injection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_identity: Option<String>,
     #[serde(skip, default)]
     pub token_tracker: crate::context::SessionTokenTracker,
 }
@@ -443,6 +447,7 @@ impl DurableSession {
             workspace_roots: Vec::new(),
             pending_workspace_roots: None,
             profile_id: None,
+            profile_identity: None,
             token_tracker: crate::context::SessionTokenTracker::default(),
         }
     }
@@ -1155,6 +1160,27 @@ impl DurableSession {
     pub fn set_instructions(&mut self, instructions: impl Into<String>) {
         self.instructions = Some(instructions.into());
         self.token_tracker.invalidate_baseline();
+    }
+
+    pub fn set_profile_identity(&mut self, identity: impl Into<String>) {
+        let value = identity.into();
+        if value.trim().is_empty() {
+            self.profile_identity = None;
+        } else {
+            self.profile_identity = Some(value);
+        }
+        self.token_tracker.invalidate_baseline();
+    }
+
+    /// Combine profile identity and explicit session instructions for token
+    /// accounting. Both contribute to the instructions category of context usage.
+    pub fn instruction_text_for_estimate(&self) -> Option<String> {
+        match (self.profile_identity.as_deref(), self.instructions.as_deref()) {
+            (None, None) => None,
+            (Some(p), None) => Some(p.to_string()),
+            (None, Some(i)) => Some(i.to_string()),
+            (Some(p), Some(i)) => Some(format!("{}\n\n{}", p, i)),
+        }
     }
 
     pub fn record_script_start(
