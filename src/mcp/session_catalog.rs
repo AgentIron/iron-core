@@ -779,11 +779,45 @@ impl SessionToolCatalog {
             });
         }
 
-        // --- Phase 2: plugin tools NOT in the catalog (unavailable) ---
+        // --- Phase 2: MCP tools NOT in the catalog (unavailable) ---
 
-        // Collect namespaced names already emitted so we don't duplicate.
-        let emitted: std::collections::HashSet<String> =
+        let mut emitted: std::collections::HashSet<String> =
             diagnostics.iter().map(|d| d.name.clone()).collect();
+
+        for server in self.mcp_registry.list_servers() {
+            let server_id = server.config.id.clone();
+            let enabled = Self::is_mcp_server_enabled_for_session(session, &server_id);
+            let namespaced_prefix = format!("mcp_{}_", server_id);
+
+            for tool_info in &server.discovered_tools {
+                let namespaced = format!("{}{}", namespaced_prefix, tool_info.name);
+                if emitted.contains(namespaced.as_str()) {
+                    continue;
+                }
+
+                let unavailable_reason = if !enabled {
+                    Some(UnavailableReason::McpServerNotEnabled)
+                } else if !server.health.is_usable() {
+                    Some(UnavailableReason::McpServerNotHealthy(server.health))
+                } else {
+                    None
+                };
+
+                diagnostics.push(ToolDiagnostic {
+                    name: namespaced,
+                    source: ToolSource::Mcp {
+                        server_id: server_id.clone(),
+                    },
+                    available: unavailable_reason.is_none(),
+                    unavailable_reason,
+                    requires_approval: true,
+                    description: tool_info.description.clone(),
+                });
+                emitted.insert(format!("mcp_{}_{}", server_id, tool_info.name));
+            }
+        }
+
+        // --- Phase 3: plugin tools NOT in the catalog (unavailable) ---
 
         for plugin in self.plugin_registry.list() {
             let plugin_id = &plugin.config.id;
@@ -867,6 +901,15 @@ impl SessionToolCatalog {
         diagnostics.retain(|d| !hidden_tools.contains(d.name.as_str()));
 
         diagnostics
+    }
+    /// Diagnostic information for a single tool name, if known.
+    ///
+    /// Returns `Some` for both available and unavailable tools; returns `None`
+    /// only when the name is not recognised at all.
+    pub fn inspect_tool(&self, session: &DurableSession, name: &str) -> Option<ToolDiagnostic> {
+        self.inspect_tools(session)
+            .into_iter()
+            .find(|diagnostic| diagnostic.name == name)
     }
 }
 

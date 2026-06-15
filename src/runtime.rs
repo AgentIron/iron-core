@@ -16,7 +16,8 @@ use crate::{
     plugin::status::{PluginInfo, PluginStatus},
     plugin::wasm_host::WasmHost,
     profile::{
-        managed_profile_prompt_context, AgentProfile, AgentProfileProvider, ResolvedProfileProvider,
+        managed_profile_prompt_context, AgentProfile, AgentProfileId, AgentProfileProvider,
+        ResolvedProfileProvider,
     },
     provider_credential::domain::{
         ProviderAuthError, ProviderAuthResult, ProviderAuthStatus, ProviderPromptContext,
@@ -27,6 +28,7 @@ use crate::{
     skill::source::FilesystemSkillSource,
     skill::SkillOrigin,
     skill::{LoadedSkill, SkillCatalog, SkillDiagnostic},
+    stored_prompt::StoredPromptRegistry,
     tool::ToolRegistry,
 };
 use iron_providers::Provider;
@@ -72,7 +74,12 @@ struct RuntimeInner {
     debug_sequence: crate::debug::SequenceGenerator,
     builtin_tool_config: Mutex<Option<crate::builtin::BuiltinToolConfig>>,
     model_capability_registry: RwLock<crate::context::model_switch::ModelCapabilityRegistry>,
+    profile_registry: RwLock<Option<Arc<RwLock<ProfileRegistry>>>>,
+    stored_prompt_registry: RwLock<Option<Arc<RwLock<StoredPromptRegistry>>>>,
 }
+
+/// Registry of named agent profiles available for delegation and session creation.
+pub(crate) type ProfileRegistry = HashMap<AgentProfileId, AgentProfile>;
 
 struct ActivePrompt {
     ephemeral: Arc<Mutex<EphemeralTurn>>,
@@ -120,6 +127,13 @@ struct RuntimeConnection {
 /// Stable identifier for a client connection registered with the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnectionId(pub u64);
+
+static CONNECTION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Allocate the next connection ID.
+pub fn next_connection_id() -> ConnectionId {
+    ConnectionId(CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+}
 
 /// Shared runtime backing one or more `IronAgent` facade values.
 ///
@@ -238,6 +252,8 @@ impl IronRuntime {
             model_capability_registry: RwLock::new(
                 crate::context::model_switch::ModelCapabilityRegistry::new(),
             ),
+            profile_registry: RwLock::new(None),
+            stored_prompt_registry: RwLock::new(None),
         };
 
         let this = Self {
@@ -258,6 +274,8 @@ impl IronRuntime {
         }
 
         this.register_compress_tool();
+        this.register_delegate_task_tool();
+        this.register_run_task_tool();
         this.hydrate_builtin_model_capability_registry();
 
         // Emit runtime configuration debug event (new())
@@ -351,6 +369,8 @@ impl IronRuntime {
             model_capability_registry: RwLock::new(
                 crate::context::model_switch::ModelCapabilityRegistry::new(),
             ),
+            profile_registry: RwLock::new(None),
+            stored_prompt_registry: RwLock::new(None),
         };
 
         let this = Self {
@@ -371,6 +391,8 @@ impl IronRuntime {
         }
 
         this.register_compress_tool();
+        this.register_delegate_task_tool();
+        this.register_run_task_tool();
         this.hydrate_builtin_model_capability_registry();
 
         // Emit runtime configuration debug event
@@ -469,6 +491,26 @@ impl IronRuntime {
         if let Some(ref sink) = *self.debug_sink() {
             crate::debug::emit_debug(sink.as_ref(), event);
         }
+    }
+
+    /// Set the profile registry used to resolve named profiles for delegation.
+    pub fn set_profile_registry(&self, registry: Arc<RwLock<ProfileRegistry>>) {
+        *self.inner.profile_registry.write() = Some(registry);
+    }
+
+    /// Access the profile registry, if one has been set.
+    pub(crate) fn profile_registry(&self) -> Option<Arc<RwLock<ProfileRegistry>>> {
+        self.inner.profile_registry.read().clone()
+    }
+
+    /// Set the stored-prompt registry used by `run_task`.
+    pub fn set_stored_prompt_registry(&self, registry: Arc<RwLock<StoredPromptRegistry>>) {
+        *self.inner.stored_prompt_registry.write() = Some(registry);
+    }
+
+    /// Access the stored-prompt registry, if one has been set.
+    pub(crate) fn stored_prompt_registry(&self) -> Option<Arc<RwLock<StoredPromptRegistry>>> {
+        self.inner.stored_prompt_registry.read().clone()
     }
 
     /// Borrow the validated runtime configuration.
@@ -666,6 +708,99 @@ impl IronRuntime {
         let tool = crate::tool::FunctionTool::new(definition, |_args| {
             Err(crate::error::RuntimeError::tool_execution(
                 "compress must be handled by the orchestrator".to_string(),
+            ))
+        });
+        self.register_tool(tool);
+    }
+
+    /// Register the `delegate_task` model-facing tool.
+    pub fn register_delegate_task_tool(&self) {
+        use crate::tool::{FunctionTool, ToolDefinition};
+        let definition = ToolDefinition::new(
+            "delegate_task",
+            "Spawn an autonomous sub-agent to work on a task with a potentially narrower profile and tool catalog. Returns a delegation result with the child session id and final text.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "The task or goal to delegate to the sub-agent"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Optional additional context for the sub-agent"
+                    },
+                    "profile_id": {
+                        "type": "string",
+                        "description": "Optional profile id for the sub-agent. Defaults to the current session's profile."
+                    },
+                    "max_iterations": {
+                        "type": "integer",
+                        "description": "Maximum number of turns the sub-agent may take",
+                        "minimum": 1,
+                        "maximum": 100
+                    },
+                    "child_approval_mode": {
+                        "type": "string",
+                        "enum": ["auto_approve", "propagate_to_parent"],
+                        "description": "How tool approvals inside the child session are handled"
+                    },
+                    "tool_base": {
+                        "type": "string",
+                        "enum": ["parent_effective", "child_default"],
+                        "description": "Base catalog for the child session"
+                    },
+                    "tool_additions": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Tool names to add to the child's catalog beyond the base"
+                    },
+                    "tool_deny": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Tool names to explicitly remove from the child's catalog"
+                    }
+                },
+                "required": ["goal"]
+            }),
+        );
+        let tool = FunctionTool::new(definition, |_args| {
+            Err(crate::error::RuntimeError::tool_execution(
+                "delegate_task must be handled by the orchestrator".to_string(),
+            ))
+        });
+        self.register_tool(tool);
+    }
+
+    /// Register the `run_task` model-facing tool.
+    pub fn register_run_task_tool(&self) {
+        use crate::tool::{FunctionTool, ToolDefinition};
+        let definition = ToolDefinition::new(
+            "run_task",
+            "Run a stored prompt as an autonomous sub-agent task.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The id of the stored prompt/task to run"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Optional additional context for this run"
+                    },
+                    "child_approval_mode": {
+                        "type": "string",
+                        "enum": ["auto_approve", "propagate_to_parent"],
+                        "description": "How tool approvals inside the child session are handled"
+                    }
+                },
+                "required": ["task_id"]
+            }),
+        );
+        let tool = FunctionTool::new(definition, |_args| {
+            Err(crate::error::RuntimeError::tool_execution(
+                "run_task must be handled by the orchestrator".to_string(),
             ))
         });
         self.register_tool(tool);
@@ -1925,7 +2060,14 @@ impl IronRuntime {
 
     pub fn cancel_active_prompt(&self, session_id: SessionId) -> bool {
         let sessions = self.inner.sessions.read();
-        Self::cancel_active_prompt_locked(&sessions, session_id)
+        let children_by_parent = self.inner.children_by_parent.read();
+        let mut cancelled = Self::cancel_active_prompt_locked(&sessions, session_id);
+        for child_id in
+            Self::collect_descendants_depth_first_locked(&children_by_parent, session_id)
+        {
+            cancelled |= Self::cancel_active_prompt_locked(&sessions, child_id);
+        }
+        cancelled
     }
 
     fn cancel_active_prompt_locked(
@@ -2043,6 +2185,48 @@ impl IronRuntime {
             .filter(|(_, rs)| rs.connection_id == connection_id && (include_hidden || !rs.hidden))
             .map(|(id, _)| *id)
             .collect()
+    }
+
+    /// Create a new standalone connection.
+    ///
+    /// Delegated child sessions can use this connection while remaining linked to
+    /// the parent session through parent-child relationship tracking.
+    pub fn new_connection(&self) -> ConnectionId {
+        let id = crate::runtime::next_connection_id();
+        self.register_connection(id);
+        id
+    }
+
+    /// Create a hidden session on the given connection.
+    pub fn create_hidden_session(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Result<(SessionId, Arc<Mutex<DurableSession>>), RuntimeError> {
+        self.create_session_with_options(connection_id, CreateSessionOptions { hidden: true })
+    }
+
+    /// List child session IDs registered under a parent session.
+    pub fn list_child_sessions(&self, parent_session_id: SessionId) -> Vec<SessionId> {
+        let children_by_parent = self.inner.children_by_parent.read();
+        children_by_parent
+            .get(&parent_session_id)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// List all hidden sessions across all connections, with optional parent.
+    pub fn list_hidden_sessions(&self) -> Vec<(SessionId, ConnectionId, Option<SessionId>)> {
+        let sessions = self.inner.sessions.read();
+        let parent_by_child = self.inner.parent_by_child.read();
+        let mut result = Vec::new();
+        for (session_id, rs) in sessions.iter() {
+            if rs.hidden {
+                let parent = parent_by_child.get(session_id).copied();
+                result.push((*session_id, rs.connection_id, parent));
+            }
+        }
+        result.sort_by_key(|(id, _, _)| id.0);
+        result
     }
 
     pub fn shutdown(&self) {

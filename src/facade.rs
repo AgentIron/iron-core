@@ -17,6 +17,9 @@ use crate::{
     provider_credential::domain::{ProviderAuthStatus, ProviderPromptContext, ProviderSlug},
     provider_credential::store::DynCredentialStore,
     runtime::{ConnectionId, IronRuntime},
+    stored_prompt::{
+        load_prompts, PromptLoadReport, StoredPrompt, StoredPromptEntry, StoredPromptRegistry,
+    },
     tool::Tool,
 };
 use agent_client_protocol::schema as acp;
@@ -531,6 +534,7 @@ fn default_profile_registry() -> ProfileRegistry {
 pub struct IronAgent {
     runtime: IronRuntime,
     profile_registry: Arc<RwLock<ProfileRegistry>>,
+    stored_prompt_registry: Arc<RwLock<StoredPromptRegistry>>,
 }
 
 impl IronAgent {
@@ -539,9 +543,15 @@ impl IronAgent {
     /// This creates an agent with its own private Tokio runtime. For integration
     /// with an existing Tokio runtime, use [`IronAgent::with_tokio_handle`].
     pub fn new<P: Provider + 'static>(config: Config, provider: P) -> Self {
+        let runtime = IronRuntime::new(config, provider);
+        let profile_registry = Arc::new(RwLock::new(default_profile_registry()));
+        let stored_prompt_registry = Arc::new(RwLock::new(StoredPromptRegistry::new()));
+        runtime.set_profile_registry(profile_registry.clone());
+        runtime.set_stored_prompt_registry(stored_prompt_registry.clone());
         Self {
-            runtime: IronRuntime::new(config, provider),
-            profile_registry: Arc::new(RwLock::new(default_profile_registry())),
+            runtime,
+            profile_registry,
+            stored_prompt_registry,
         }
     }
 
@@ -554,9 +564,15 @@ impl IronAgent {
         provider: P,
         handle: tokio::runtime::Handle,
     ) -> Self {
+        let runtime = IronRuntime::from_handle(config, provider, handle);
+        let profile_registry = Arc::new(RwLock::new(default_profile_registry()));
+        let stored_prompt_registry = Arc::new(RwLock::new(StoredPromptRegistry::new()));
+        runtime.set_profile_registry(profile_registry.clone());
+        runtime.set_stored_prompt_registry(stored_prompt_registry.clone());
         Self {
-            runtime: IronRuntime::from_handle(config, provider, handle),
-            profile_registry: Arc::new(RwLock::new(default_profile_registry())),
+            runtime,
+            profile_registry,
+            stored_prompt_registry,
         }
     }
 
@@ -566,9 +582,15 @@ impl IronAgent {
         provider: P,
         credential_store: DynCredentialStore,
     ) -> Self {
+        let runtime = IronRuntime::new_with_credential_store(config, provider, credential_store);
+        let profile_registry = Arc::new(RwLock::new(default_profile_registry()));
+        let stored_prompt_registry = Arc::new(RwLock::new(StoredPromptRegistry::new()));
+        runtime.set_profile_registry(profile_registry.clone());
+        runtime.set_stored_prompt_registry(stored_prompt_registry.clone());
         Self {
-            runtime: IronRuntime::new_with_credential_store(config, provider, credential_store),
-            profile_registry: Arc::new(RwLock::new(default_profile_registry())),
+            runtime,
+            profile_registry,
+            stored_prompt_registry,
         }
     }
 
@@ -987,6 +1009,54 @@ impl IronAgent {
             })
     }
 
+    /// Register or replace a stored prompt by stable ID.
+    pub fn register_stored_prompt(
+        &self,
+        id: impl Into<String>,
+        prompt: StoredPrompt,
+    ) -> Result<(), String> {
+        self.stored_prompt_registry
+            .write()
+            .register(id.into(), prompt)
+    }
+
+    /// Unregister a stored prompt by stable ID.
+    pub fn unregister_stored_prompt(&self, id: &str) -> bool {
+        self.stored_prompt_registry.write().unregister(id)
+    }
+
+    /// List all registered stored prompts with deterministic ordering.
+    pub fn list_stored_prompts(&self) -> Vec<StoredPromptEntry> {
+        self.stored_prompt_registry.read().list()
+    }
+
+    /// Look up a registered stored prompt by stable ID.
+    pub fn get_stored_prompt(&self, id: &str) -> Option<StoredPromptEntry> {
+        self.stored_prompt_registry
+            .read()
+            .get(id)
+            .cloned()
+            .map(|prompt| StoredPromptEntry {
+                id: id.to_string(),
+                prompt,
+            })
+    }
+
+    /// Load typed stored prompts from a `ConfigStore` into the registry.
+    pub async fn load_stored_prompts(
+        &self,
+        store: &ConfigStore,
+    ) -> Result<PromptLoadReport, crate::config::ConfigError> {
+        let report = load_prompts(store).await?;
+        let mut registry = self.stored_prompt_registry.write();
+        for entry in &report.loaded {
+            registry
+                .register(entry.id.clone(), entry.prompt.clone())
+                .map_err(crate::config::ConfigError::Validation)?;
+        }
+        Ok(report)
+    }
+
     /// Establish a new connection to the agent.
     ///
     /// Returns an [`AgentConnection`] which can be used to create sessions
@@ -1009,6 +1079,7 @@ impl Clone for IronAgent {
         Self {
             runtime: self.runtime.clone(),
             profile_registry: self.profile_registry.clone(),
+            stored_prompt_registry: self.stored_prompt_registry.clone(),
         }
     }
 }
@@ -1021,6 +1092,14 @@ type AsyncPermissionHandler =
     Box<dyn Fn(PermissionRequest) -> Pin<Box<dyn std::future::Future<Output = PermissionVerdict>>>>;
 
 type SyncPermissionHandler = Rc<RefCell<Option<Box<dyn Fn(&str) -> PermissionVerdict>>>>;
+
+/// Inspectable metadata for a hidden runtime session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenSessionInfo {
+    pub session_id: SessionId,
+    pub connection_id: ConnectionId,
+    pub parent_session_id: Option<SessionId>,
+}
 
 /// A connection to an Iron agent.
 ///
@@ -1198,6 +1277,42 @@ impl AgentConnection {
         self.inner
             .runtime()
             .sessions_for_connection(self.inner.id(), true)
+    }
+
+    /// List hidden sessions visible to this connection for inspection.
+    ///
+    /// Includes hidden sessions directly owned by this connection and hidden
+    /// child sessions whose parent session is owned by this connection.
+    pub fn hidden_sessions(&self) -> Vec<HiddenSessionInfo> {
+        let runtime = self.inner.runtime();
+        let connection_id = self.inner.id();
+        runtime
+            .list_hidden_sessions()
+            .into_iter()
+            .filter(|(_, child_connection_id, parent_session_id)| {
+                *child_connection_id == connection_id
+                    || parent_session_id.and_then(|parent| runtime.get_session_connection(parent))
+                        == Some(connection_id)
+            })
+            .map(
+                |(session_id, connection_id, parent_session_id)| HiddenSessionInfo {
+                    session_id,
+                    connection_id,
+                    parent_session_id,
+                },
+            )
+            .collect()
+    }
+
+    /// List child sessions registered under a parent session owned by this connection.
+    pub fn child_sessions(&self, parent: &AgentSession) -> Result<Vec<SessionId>, RuntimeError> {
+        let owner = self.inner.runtime().get_session_connection(parent.id);
+        if owner != Some(self.inner.id()) {
+            return Err(RuntimeError::Connection(
+                "session not owned by this connection".into(),
+            ));
+        }
+        Ok(self.inner.runtime().list_child_sessions(parent.id))
     }
 
     /// Start a direct client-initiated auth flow for a plugin.

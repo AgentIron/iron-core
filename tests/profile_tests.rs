@@ -1,6 +1,7 @@
 use futures::stream::{self, BoxStream};
 use futures::StreamExt;
-use iron_core::config::{ConfigStore, ProfileInput};
+use iron_core::config::{ConfigStore, ProfileInput, PromptInput};
+use iron_core::STORED_PROMPT_SCHEMA_VERSION;
 use iron_core::{
     profile::{
         default_identity_prompt, normalize_profile_name, AgentApproval, AgentProfile,
@@ -14,7 +15,7 @@ use iron_core::{
         store::{InMemoryCredentialStore, ProviderCredentialStore},
         DurableCredentialStore,
     },
-    Config, IronAgent, IronRuntime, PromptOutcome,
+    Config, IronAgent, IronRuntime, PromptOutcome, StoredPrompt,
     PROFILE_SCHEMA_VERSION as EXPORTED_SCHEMA_VERSION,
 };
 use iron_providers::{InferenceRequest, Provider, ProviderEvent};
@@ -1024,4 +1025,75 @@ fn blank_identity_prompt_falls_back_to_default() {
         profile.effective_identity_prompt(),
         default_identity_prompt()
     );
+}
+
+#[test]
+fn stored_prompt_registry_crud_is_deterministic() {
+    let agent = test_agent();
+    let prompt = StoredPrompt {
+        instructions: "Review the latest changes".to_string(),
+        skills: Vec::new(),
+        profile: None,
+    };
+
+    agent
+        .register_stored_prompt("review", prompt.clone())
+        .unwrap();
+
+    assert_eq!(agent.get_stored_prompt("review").unwrap().prompt, prompt);
+    assert_eq!(agent.list_stored_prompts()[0].id, "review");
+    assert!(agent.unregister_stored_prompt("review"));
+    assert!(agent.get_stored_prompt("review").is_none());
+}
+
+#[tokio::test]
+async fn load_stored_prompts_populates_registry() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+    let prompt = StoredPrompt {
+        instructions: "Summarize this session".to_string(),
+        skills: vec!["summarizer".to_string()],
+        profile: None,
+    };
+    store
+        .set_prompt(&PromptInput {
+            id: "summary".to_string(),
+            schema_version: STORED_PROMPT_SCHEMA_VERSION,
+            payload: serde_json::to_value(&prompt).unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let agent = test_agent();
+    let report = agent.load_stored_prompts(&store).await.unwrap();
+
+    assert_eq!(report.loaded.len(), 1);
+    assert_eq!(agent.get_stored_prompt("summary").unwrap().prompt, prompt);
+}
+
+#[test]
+fn connection_can_inspect_hidden_child_sessions() {
+    let agent = test_agent();
+    let conn = agent.connect();
+    let parent = conn.create_session().unwrap();
+    let (child_session_id, _) = agent.runtime().create_hidden_session(conn.id()).unwrap();
+
+    agent
+        .runtime()
+        .register_child(parent.id(), child_session_id)
+        .unwrap();
+
+    assert!(!conn.active_sessions().contains(&child_session_id));
+    assert!(conn
+        .active_sessions_include_hidden()
+        .contains(&child_session_id));
+    assert_eq!(
+        conn.child_sessions(&parent).unwrap(),
+        vec![child_session_id]
+    );
+
+    let hidden = conn.hidden_sessions();
+    assert_eq!(hidden.len(), 1);
+    assert_eq!(hidden[0].session_id, child_session_id);
+    assert_eq!(hidden[0].connection_id, conn.id());
+    assert_eq!(hidden[0].parent_session_id, Some(parent.id()));
 }

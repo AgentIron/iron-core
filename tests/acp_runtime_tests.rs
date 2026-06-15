@@ -16,13 +16,18 @@ use futures::StreamExt;
 use iron_core::{
     config::ApprovalStrategy,
     facade::{PermissionVerdict, PromptEvent, PromptOutcome, ToolResultStatus},
+    profile::{
+        AgentApproval, AgentProfile, AgentProfileId, AgentProfileProvider, SkillFilter, ToolFilter,
+    },
     skill::{LoadedSkill, SkillMetadata, SkillOrigin},
     tool::{FunctionTool, ToolDefinition},
     AuthInteractionResponse, AuthInteractionResult, AuthState, Config, ConnectionId, ContentBlock,
-    ContextManagementConfig, CreateSessionOptions, DurableSession, EphemeralTurn, IronAgent,
-    IronRuntime, OAuthRequirements, PluginHealth, PluginIdentity, PluginManifest, PluginPublisher,
-    PluginSource, PluginSourceConfig, PresentationMetadata, Provider, ProviderEvent, RuntimeError,
-    SessionId, ToolAuthRequirements, ToolRecordStatus, ToolTerminalOutcome, TurnPhase,
+    ContextManagementConfig, CreateSessionOptions, DelegationOutcome, DelegationResult,
+    DurableSession, EphemeralTurn, IronAgent, IronRuntime, OAuthRequirements, PluginHealth,
+    PluginIdentity, PluginManifest, PluginPublisher, PluginSource, PluginSourceConfig,
+    PresentationMetadata, Provider, ProviderEvent, RuntimeError, SessionId, StoredPrompt,
+    SubAgentToolPolicy, ToolAuthRequirements, ToolPolicyDiagnosticReason, ToolRecordStatus,
+    ToolTerminalOutcome, TurnPhase,
 };
 use iron_providers::{InferenceRequest, ToolCall};
 use serde_json::json;
@@ -347,6 +352,411 @@ fn activate_skill_duplicate_activation_returns_lightweight_confirmation() {
         let second_payload = second_payload.unwrap();
         assert_eq!(second_payload["status"], "already_active");
         assert!(second_payload.get("content").is_none());
+    });
+}
+
+#[test]
+fn delegate_task_runs_hidden_child_and_returns_final_text() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![ProviderEvent::ToolCall {
+                call: ToolCall::new(
+                    "dlg1",
+                    "delegate_task",
+                    json!({
+                        "goal": "Inspect the delegated work",
+                        "context": "Keep the result short",
+                        "max_iterations": 3
+                    }),
+                ),
+            }],
+            vec![
+                ProviderEvent::Output {
+                    content: "child completed".to_string(),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![ProviderEvent::Complete],
+        ]);
+        let agent = IronAgent::new(Config::default(), provider);
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+        let (_handle, mut events) = session.prompt_stream("delegate it");
+
+        let mut tool_result = None;
+        while let Some(event) = events.next().await {
+            if let PromptEvent::ToolResult {
+                call_id,
+                status,
+                result,
+                ..
+            } = event.clone()
+            {
+                if call_id == "dlg1" {
+                    tool_result = Some((status, result));
+                }
+            }
+            if matches!(event, PromptEvent::Complete { .. }) {
+                break;
+            }
+        }
+
+        let (status, payload) = tool_result.expect("expected delegate_task result");
+        assert_eq!(status, ToolResultStatus::Completed);
+        let result: DelegationResult =
+            serde_json::from_value(payload.expect("expected delegate_task payload"))
+                .expect("delegate_task result should deserialize");
+        assert_eq!(result.outcome, DelegationOutcome::EndTurn);
+        assert_eq!(result.final_text.as_deref(), Some("child completed"));
+
+        let hidden = conn.hidden_sessions();
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].session_id, result.child_session_id);
+
+        let child = agent
+            .runtime()
+            .get_session(result.child_session_id)
+            .expect("child session should remain inspectable");
+        let child = child.lock();
+        assert!(child
+            .messages
+            .iter()
+            .any(|m| { m.is_user() && m.text_content().contains("Inspect the delegated work") }));
+        assert!(child
+            .messages
+            .iter()
+            .any(|m| { m.is_user() && m.text_content().contains("Keep the result short") }));
+    });
+}
+
+fn delegate_task_child_approval_records_status(
+    verdict: PermissionVerdict,
+    expected_status: ToolRecordStatus,
+) {
+    run_local(async move {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![ProviderEvent::ToolCall {
+                call: ToolCall::new(
+                    "dlg-approval",
+                    "delegate_task",
+                    json!({"goal": "Call the risky child tool"}),
+                ),
+            }],
+            vec![
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new("child-risk", "child_risky", json!({"ok": true})),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![
+                ProviderEvent::Output {
+                    content: "child done".to_string(),
+                },
+                ProviderEvent::Complete,
+            ],
+            vec![ProviderEvent::Complete],
+        ]);
+        let agent = IronAgent::new(Config::default(), provider);
+        let executions = Arc::new(AtomicUsize::new(0));
+        let exec_clone = executions.clone();
+        agent.register_tool(FunctionTool::new(
+            ToolDefinition::new("child_risky", "child_risky", json!({})).with_approval(true),
+            move |_| {
+                exec_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({"ok": true}))
+            },
+        ));
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+        let (handle, mut events) = session.prompt_stream("delegate it");
+
+        while let Some(event) = events.next().await {
+            match event {
+                PromptEvent::ApprovalRequest { ref call_id, .. } => {
+                    match verdict {
+                        PermissionVerdict::AllowOnce => handle.approve(call_id).unwrap(),
+                        PermissionVerdict::Deny => handle.deny(call_id).unwrap(),
+                        PermissionVerdict::Cancel => {
+                            handle.cancel().await;
+                        }
+                    };
+                }
+                PromptEvent::Complete { .. } => break,
+                _ => {}
+            }
+        }
+
+        let hidden = conn.hidden_sessions();
+        assert_eq!(hidden.len(), 1);
+        let child = agent.runtime().get_session(hidden[0].session_id).unwrap();
+        let records = child.lock().tool_records.clone();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].call_id, "child-risk");
+        assert_eq!(records[0].status, expected_status);
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            usize::from(verdict == PermissionVerdict::AllowOnce)
+        );
+    });
+}
+
+#[test]
+fn delegated_child_propagated_approval_allow_is_recorded() {
+    delegate_task_child_approval_records_status(
+        PermissionVerdict::AllowOnce,
+        ToolRecordStatus::Completed,
+    );
+}
+
+#[test]
+fn delegated_child_propagated_approval_denial_is_recorded() {
+    delegate_task_child_approval_records_status(PermissionVerdict::Deny, ToolRecordStatus::Denied);
+}
+
+#[test]
+fn delegated_child_propagated_approval_cancellation_is_recorded() {
+    delegate_task_child_approval_records_status(
+        PermissionVerdict::Cancel,
+        ToolRecordStatus::Cancelled,
+    );
+}
+
+#[test]
+fn cancelling_parent_session_cancels_active_child_prompt() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = rt.new_connection();
+    let (parent_id, _) = rt.create_session(conn).unwrap();
+    let (child_id, _) = rt.create_hidden_session(conn).unwrap();
+    rt.register_child(parent_id, child_id).unwrap();
+
+    let parent_turn = rt.try_start_prompt(parent_id).unwrap();
+    let child_turn = rt.try_start_prompt(child_id).unwrap();
+
+    assert!(rt.cancel_active_prompt(parent_id));
+    assert!(parent_turn.lock().is_cancel_requested());
+    assert!(child_turn.lock().is_cancel_requested());
+}
+
+#[test]
+fn closing_parent_session_removes_child_relationships_and_sessions() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    let conn = rt.new_connection();
+    let (parent_id, _) = rt.create_session(conn).unwrap();
+    let (child_id, _) = rt.create_hidden_session(conn).unwrap();
+    rt.register_child(parent_id, child_id).unwrap();
+
+    rt.close_session(parent_id);
+
+    assert!(rt.get_session(parent_id).is_none());
+    assert!(rt.get_session(child_id).is_none());
+    assert!(rt.list_child_sessions(parent_id).is_empty());
+    assert!(rt.list_hidden_sessions().is_empty());
+}
+
+#[test]
+fn child_tool_policy_reports_inheritance_additions_filters_and_diagnostics() {
+    let rt = IronRuntime::new(Config::default(), MockProvider::default());
+    rt.register_tool(FunctionTool::simple("parent_tool", "parent_tool", |_| {
+        Ok(json!({"ok": true}))
+    }));
+    rt.register_tool(FunctionTool::simple("extra_tool", "extra_tool", |_| {
+        Ok(json!({"ok": true}))
+    }));
+    let conn = rt.new_connection();
+    let (parent_id, parent) = rt.create_session(conn).unwrap();
+    parent.lock().hidden_tools.push("extra_tool".to_string());
+
+    let inherited = rt
+        .derive_child_tool_catalog(
+            parent_id,
+            &AgentProfile {
+                name: "default".to_string(),
+                provider: AgentProfileProvider::RuntimeDefault,
+                tools: ToolFilter::Inherit,
+                skills: SkillFilter::Inherit,
+                approval: AgentApproval::PerTool,
+                identity_prompt: None,
+            },
+            &SubAgentToolPolicy {
+                deny: vec!["parent_tool".to_string()],
+                additions: vec!["extra_tool".to_string()],
+                ..SubAgentToolPolicy::inherit_parent()
+            },
+        )
+        .unwrap();
+    assert!(inherited.removed_tools.contains(&"parent_tool".to_string()));
+    assert!(inherited.added_tools.contains(&"extra_tool".to_string()));
+    assert!(inherited.unavailable_requested_additions.is_empty());
+    assert!(!inherited.digest.is_empty());
+
+    let filtered = rt
+        .derive_child_tool_catalog(
+            parent_id,
+            &AgentProfile {
+                name: "limited".to_string(),
+                provider: AgentProfileProvider::RuntimeDefault,
+                tools: ToolFilter::Allow(vec!["parent_tool".to_string()]),
+                skills: SkillFilter::Inherit,
+                approval: AgentApproval::PerTool,
+                identity_prompt: None,
+            },
+            &SubAgentToolPolicy {
+                additions: vec!["extra_tool".to_string(), "missing_tool".to_string()],
+                ..SubAgentToolPolicy::inherit_parent()
+            },
+        )
+        .unwrap();
+    assert!(filtered
+        .excluded_by_profile
+        .contains(&"extra_tool".to_string()));
+    assert!(filtered
+        .unavailable_requested_additions
+        .contains(&"missing_tool".to_string()));
+    assert!(filtered.diagnostics.iter().any(|diagnostic| {
+        diagnostic.tool_name == "extra_tool"
+            && diagnostic.reason == ToolPolicyDiagnosticReason::ExcludedByProfile
+    }));
+    assert!(filtered.diagnostics.iter().any(|diagnostic| {
+        diagnostic.tool_name == "missing_tool"
+            && diagnostic.reason == ToolPolicyDiagnosticReason::Missing
+    }));
+}
+
+#[test]
+fn child_tool_policy_diagnoses_unavailable_plugin_tool() {
+    let agent = IronAgent::new(Config::default(), MockProvider::default());
+    register_test_auth_plugin(&agent, "auth-plugin");
+    let rt = agent.runtime();
+
+    let conn = rt.new_connection();
+    let (parent_id, parent) = rt.create_session(conn).unwrap();
+    parent.lock().set_plugin_enabled("auth-plugin", true);
+
+    let result = rt
+        .derive_child_tool_catalog(
+            parent_id,
+            &AgentProfile {
+                name: "default".to_string(),
+                provider: AgentProfileProvider::RuntimeDefault,
+                tools: ToolFilter::Inherit,
+                skills: SkillFilter::Inherit,
+                approval: AgentApproval::PerTool,
+                identity_prompt: None,
+            },
+            &SubAgentToolPolicy {
+                additions: vec!["plugin_auth-plugin_gated_tool".to_string()],
+                ..SubAgentToolPolicy::inherit_parent()
+            },
+        )
+        .unwrap();
+
+    assert!(result
+        .unavailable_requested_additions
+        .contains(&"plugin_auth-plugin_gated_tool".to_string()));
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.tool_name == "plugin_auth-plugin_gated_tool"
+            && matches!(
+                diagnostic.reason,
+                ToolPolicyDiagnosticReason::PluginAuthRequired { .. }
+            )
+    }));
+}
+
+#[test]
+fn run_task_activates_stored_prompt_requested_skills() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![ProviderEvent::ToolCall {
+                call: ToolCall::new("task1", "run_task", json!({"task_id": "review-task"})),
+            }],
+            vec![ProviderEvent::Complete],
+            vec![ProviderEvent::Complete],
+        ]);
+        let agent = IronAgent::new(Config::default(), provider);
+        agent
+            .runtime()
+            .register_skill(make_skill("review", "Review code"));
+        agent
+            .register_stored_prompt(
+                "review-task",
+                StoredPrompt {
+                    instructions: "Review this change".to_string(),
+                    skills: vec!["review".to_string()],
+                    profile: None,
+                },
+            )
+            .unwrap();
+
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+        let (_handle, mut events) = session.prompt_stream("run it");
+
+        while let Some(event) = events.next().await {
+            if matches!(event, PromptEvent::Complete { .. }) {
+                break;
+            }
+        }
+
+        let hidden = conn.hidden_sessions();
+        assert_eq!(hidden.len(), 1);
+        let child = agent.runtime().get_session(hidden[0].session_id).unwrap();
+        assert_eq!(child.lock().list_active_skills(), vec!["review"]);
+    });
+}
+
+#[test]
+fn run_task_requested_skills_respect_profile_filter() {
+    run_local(async {
+        let provider = MockProvider::with_infer_responses(vec![
+            vec![ProviderEvent::ToolCall {
+                call: ToolCall::new("task2", "run_task", json!({"task_id": "blocked-task"})),
+            }],
+            vec![ProviderEvent::Complete],
+            vec![ProviderEvent::Complete],
+        ]);
+        let agent = IronAgent::new(Config::default(), provider);
+        let profile_id = AgentProfileId::from("limited");
+        agent
+            .register_profile(
+                profile_id.clone(),
+                AgentProfile {
+                    name: "limited".to_string(),
+                    provider: AgentProfileProvider::RuntimeDefault,
+                    tools: ToolFilter::Inherit,
+                    skills: SkillFilter::Allow(vec!["allowed".to_string()]),
+                    approval: AgentApproval::PerTool,
+                    identity_prompt: None,
+                },
+            )
+            .unwrap();
+        agent
+            .runtime()
+            .register_skill(make_skill("blocked", "Blocked"));
+        agent
+            .register_stored_prompt(
+                "blocked-task",
+                StoredPrompt {
+                    instructions: "Try blocked skill".to_string(),
+                    skills: vec!["blocked".to_string()],
+                    profile: Some(profile_id),
+                },
+            )
+            .unwrap();
+
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
+        let (_handle, mut events) = session.prompt_stream("run it");
+
+        while let Some(event) = events.next().await {
+            if matches!(event, PromptEvent::Complete { .. }) {
+                break;
+            }
+        }
+
+        let hidden = conn.hidden_sessions();
+        assert_eq!(hidden.len(), 1);
+        let child = agent.runtime().get_session(hidden[0].session_id).unwrap();
+        assert!(child.lock().list_active_skills().is_empty());
     });
 }
 

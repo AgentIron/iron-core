@@ -167,6 +167,7 @@ pub mod config;
 pub mod connection;
 pub mod context;
 pub mod debug;
+pub mod delegation;
 pub mod durable;
 pub mod embedded_python;
 pub mod ephemeral;
@@ -184,6 +185,7 @@ pub mod request_builder;
 pub mod runtime;
 pub mod schema;
 pub mod skill;
+pub mod stored_prompt;
 pub mod tool;
 pub mod transport;
 
@@ -204,6 +206,12 @@ pub use context::{
     PendingModelSwitch, SessionModelInfo, TailRetentionPolicy, TailRetentionRule, TokenUsageTotals,
     HANDOFF_DEFAULT_TARGET_TOKENS,
 };
+pub use delegation::{
+    compute_tool_catalog_digest, validate_delegation_arguments, ChildApprovalMode,
+    DelegationMetadata, DelegationOutcome, DelegationRequest, DelegationResult, SubAgentToolBase,
+    SubAgentToolPolicy, ToolPolicyDiagnostic, ToolPolicyDiagnosticReason,
+    DELEGATION_SCHEMA_VERSION,
+};
 pub use durable::{
     ContentBlock, DurableScriptRecord, DurableSession, DurableToolRecord, ScriptRecordStatus,
     SessionId, StructuredMessage, TimelineEntry, ToolRecordStatus, ToolTerminalOutcome,
@@ -222,6 +230,10 @@ pub use profile::{
 };
 pub use prompt_turn::PromptTurn;
 pub use runtime::{ConnectionId, CreateSessionOptions, IronRuntime};
+pub use stored_prompt::{
+    load_prompts, PromptLoadDiagnostic, PromptLoadIssue, PromptLoadReport, StoredPrompt,
+    StoredPromptEntry, StoredPromptRegistry, STORED_PROMPT_SCHEMA_VERSION,
+};
 pub use tool::{FunctionTool, Tool, ToolDefinition, ToolRegistry};
 
 pub use builtin::{

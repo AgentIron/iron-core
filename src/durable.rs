@@ -410,6 +410,9 @@ pub struct DurableSession {
     /// Pending workspace roots to be applied at the next turn boundary.
     #[serde(default)]
     pub pending_workspace_roots: Option<Vec<std::path::PathBuf>>,
+    /// The profile id last used for this session, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<crate::profile::AgentProfileId>,
     #[serde(skip, default)]
     pub token_tracker: crate::context::SessionTokenTracker,
 }
@@ -439,6 +442,7 @@ impl DurableSession {
             hidden_tools: Vec::new(),
             workspace_roots: Vec::new(),
             pending_workspace_roots: None,
+            profile_id: None,
             token_tracker: crate::context::SessionTokenTracker::default(),
         }
     }

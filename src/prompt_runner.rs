@@ -1,9 +1,13 @@
 use crate::config::Config;
 use crate::connection::SharedClientChannel;
+use crate::delegation::{
+    validate_delegation_arguments, ChildApprovalMode, DelegationRequest, SubAgentToolPolicy,
+};
 use crate::durable::DurableSession;
-use crate::ephemeral::EphemeralTurn;
+use crate::ephemeral::{EphemeralTurn, TurnPhase};
 use crate::mcp::SessionToolCatalog;
 use crate::plugin::rich_output::transcript_text as plugin_transcript_text;
+use crate::profile::{AgentProfile, AgentProfileId};
 use crate::prompt_lifecycle::{
     ApprovalRequest, ApprovalVerdict, PromptLifecycleEvent, PromptSink, ToolUpdateStatus,
 };
@@ -862,13 +866,19 @@ impl PromptRunner {
             );
         }
 
-        let verdict = sink
-            .request_approval(ApprovalRequest {
-                call_id: call_id.to_string(),
-                tool_name: tool_name.to_string(),
-                arguments: arguments.clone(),
-            })
-            .await;
+        let mut phase_rx = ephemeral.lock().phase_watcher();
+        let approval_fut = sink.request_approval(ApprovalRequest {
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            arguments: arguments.clone(),
+        });
+
+        let verdict = tokio::select! {
+            _ = phase_rx.wait_for(|phase| matches!(phase, TurnPhase::Cancelled)) => {
+                ApprovalVerdict::Cancelled
+            }
+            verdict = approval_fut => verdict,
+        };
 
         {
             let mut turn = ephemeral.lock();
@@ -1051,6 +1061,16 @@ impl PromptRunner {
             let turn_id = ephemeral.lock().turn_id.clone();
             self.execute_compress_tool(durable, sink, call, turn_id)
                 .await;
+            return;
+        }
+
+        if call.tool_name == "delegate_task" {
+            self.execute_delegate_task(durable, sink, call).await;
+            return;
+        }
+
+        if call.tool_name == "run_task" {
+            self.execute_run_task(durable, sink, call).await;
             return;
         }
 
@@ -1382,6 +1402,311 @@ impl PromptRunner {
         }
     }
 
+    async fn execute_delegate_task(
+        &self,
+        durable: &Arc<Mutex<DurableSession>>,
+        sink: &dyn PromptSink,
+        call: iron_providers::ToolCall,
+    ) {
+        let call_id = call.call_id.clone();
+        let session_id = durable.lock().id;
+
+        self.runtime.emit_debug(crate::debug::DebugEvent {
+            timestamp: chrono::Utc::now(),
+            sequence: self.runtime.next_debug_sequence(),
+            severity: crate::debug::DebugSeverity::Info,
+            scope: crate::debug::DebugScope {
+                session_id: Some(session_id),
+                tool_call_id: Some(call_id.clone()),
+                ..crate::debug::DebugScope::default()
+            },
+            payload: crate::debug::DebugPayload::Tool(
+                crate::debug::ToolDebugEvent::ExecutionStarted {
+                    tool_name: "delegate_task".to_string(),
+                    tool_source: "orchestrator".to_string(),
+                    call_id: call_id.clone(),
+                },
+            ),
+        });
+
+        {
+            let mut session = durable.lock();
+            session.start_tool_call(&call_id, "delegate_task", call.arguments.clone());
+        }
+
+        let (result_value, status) = match self.run_delegation_from_call(durable, sink, &call).await
+        {
+            Ok(result) => {
+                let value = limit_result_size(
+                    serde_json::to_value(&result)
+                        .unwrap_or(serde_json::json!({"error": "serialization failed"})),
+                );
+                {
+                    let mut session = durable.lock();
+                    session.complete_tool_call(&call_id, value.clone());
+                }
+                (value, ToolUpdateStatus::Completed)
+            }
+            Err(error) => {
+                let value = serde_json::json!({"error": error});
+                {
+                    let mut session = durable.lock();
+                    session.fail_tool_call(&call_id, value.clone());
+                }
+                (value, ToolUpdateStatus::Failed)
+            }
+        };
+
+        sink.emit(PromptLifecycleEvent::ToolCallUpdate {
+            call_id: call_id.clone(),
+            tool_name: "delegate_task".to_string(),
+            status,
+            output: Some(result_value.clone()),
+        })
+        .await;
+
+        self.runtime.emit_debug(crate::debug::DebugEvent {
+            timestamp: chrono::Utc::now(),
+            sequence: self.runtime.next_debug_sequence(),
+            severity: crate::debug::DebugSeverity::Info,
+            scope: crate::debug::DebugScope {
+                session_id: Some(session_id),
+                tool_call_id: Some(call_id.clone()),
+                ..crate::debug::DebugScope::default()
+            },
+            payload: crate::debug::DebugPayload::Tool(
+                crate::debug::ToolDebugEvent::ExecutionFinished {
+                    tool_name: "delegate_task".to_string(),
+                    call_id: call_id.clone(),
+                    status: match status {
+                        ToolUpdateStatus::Completed => "completed".to_string(),
+                        _ => "failed".to_string(),
+                    },
+                    duration_ms: None,
+                    truncated: false,
+                    reason: None,
+                },
+            ),
+        });
+    }
+
+    async fn run_delegation_from_call(
+        &self,
+        durable: &Arc<Mutex<DurableSession>>,
+        sink: &dyn PromptSink,
+        call: &iron_providers::ToolCall,
+    ) -> Result<crate::delegation::DelegationResult, String> {
+        let mut request = validate_delegation_arguments(&call.arguments)
+            .map_err(|e| format!("invalid delegate_task arguments: {}", e))?;
+
+        let parent_session_id = durable.lock().id;
+
+        let parent_client = sink
+            .parent_client_channel()
+            .ok_or_else(|| "delegate_task requires a client-backed prompt sink".to_string())?;
+        let parent_session_acp_id = sink
+            .parent_session_acp_id()
+            .ok_or_else(|| "delegate_task requires an ACP session id".to_string())?;
+
+        let profile = self
+            .resolve_delegation_profile(durable, request.profile_id.take())
+            .await?;
+
+        let (result, _metadata) = self
+            .runtime
+            .run_delegation(
+                parent_session_id,
+                Some(call.call_id.clone()),
+                request,
+                profile,
+                parent_client,
+                parent_session_acp_id,
+            )
+            .await?;
+        Ok(result)
+    }
+
+    async fn resolve_delegation_profile(
+        &self,
+        durable: &Arc<Mutex<DurableSession>>,
+        explicit_profile_id: Option<AgentProfileId>,
+    ) -> Result<AgentProfile, String> {
+        let profile_id = explicit_profile_id
+            .or_else(|| durable.lock().profile_id.clone())
+            .unwrap_or_else(|| AgentProfileId::from("default"));
+
+        let registry = self
+            .runtime
+            .profile_registry()
+            .ok_or_else(|| "profile registry not configured".to_string())?;
+        let profile = {
+            let guard = registry.read();
+            guard.get(&profile_id).cloned()
+        };
+        profile.ok_or_else(|| format!("profile '{}' not found", profile_id.as_str()))
+    }
+
+    async fn execute_run_task(
+        &self,
+        durable: &Arc<Mutex<DurableSession>>,
+        sink: &dyn PromptSink,
+        call: iron_providers::ToolCall,
+    ) {
+        let call_id = call.call_id.clone();
+        let session_id = durable.lock().id;
+
+        self.runtime.emit_debug(crate::debug::DebugEvent {
+            timestamp: chrono::Utc::now(),
+            sequence: self.runtime.next_debug_sequence(),
+            severity: crate::debug::DebugSeverity::Info,
+            scope: crate::debug::DebugScope {
+                session_id: Some(session_id),
+                tool_call_id: Some(call_id.clone()),
+                ..crate::debug::DebugScope::default()
+            },
+            payload: crate::debug::DebugPayload::Tool(
+                crate::debug::ToolDebugEvent::ExecutionStarted {
+                    tool_name: "run_task".to_string(),
+                    tool_source: "orchestrator".to_string(),
+                    call_id: call_id.clone(),
+                },
+            ),
+        });
+
+        {
+            let mut session = durable.lock();
+            session.start_tool_call(&call_id, "run_task", call.arguments.clone());
+        }
+
+        let (result_value, status) = match self.run_stored_prompt_task(durable, sink, &call).await {
+            Ok(result) => {
+                let value = limit_result_size(
+                    serde_json::to_value(&result)
+                        .unwrap_or(serde_json::json!({"error": "serialization failed"})),
+                );
+                {
+                    let mut session = durable.lock();
+                    session.complete_tool_call(&call_id, value.clone());
+                }
+                (value, ToolUpdateStatus::Completed)
+            }
+            Err(error) => {
+                let value = serde_json::json!({"error": error});
+                {
+                    let mut session = durable.lock();
+                    session.fail_tool_call(&call_id, value.clone());
+                }
+                (value, ToolUpdateStatus::Failed)
+            }
+        };
+
+        sink.emit(PromptLifecycleEvent::ToolCallUpdate {
+            call_id: call_id.clone(),
+            tool_name: "run_task".to_string(),
+            status,
+            output: Some(result_value.clone()),
+        })
+        .await;
+
+        self.runtime.emit_debug(crate::debug::DebugEvent {
+            timestamp: chrono::Utc::now(),
+            sequence: self.runtime.next_debug_sequence(),
+            severity: crate::debug::DebugSeverity::Info,
+            scope: crate::debug::DebugScope {
+                session_id: Some(session_id),
+                tool_call_id: Some(call_id.clone()),
+                ..crate::debug::DebugScope::default()
+            },
+            payload: crate::debug::DebugPayload::Tool(
+                crate::debug::ToolDebugEvent::ExecutionFinished {
+                    tool_name: "run_task".to_string(),
+                    call_id: call_id.clone(),
+                    status: match status {
+                        ToolUpdateStatus::Completed => "completed".to_string(),
+                        _ => "failed".to_string(),
+                    },
+                    duration_ms: None,
+                    truncated: false,
+                    reason: None,
+                },
+            ),
+        });
+    }
+
+    async fn run_stored_prompt_task(
+        &self,
+        durable: &Arc<Mutex<DurableSession>>,
+        sink: &dyn PromptSink,
+        call: &iron_providers::ToolCall,
+    ) -> Result<crate::delegation::DelegationResult, String> {
+        let task_id = call
+            .arguments
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "run_task requires 'task_id'".to_string())?;
+
+        let context = call
+            .arguments
+            .get("context")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let child_approval_mode = call
+            .arguments
+            .get("child_approval_mode")
+            .and_then(|v| v.as_str())
+            .and_then(|s| match s {
+                "auto_approve" => Some(ChildApprovalMode::AutoApprove),
+                "propagate_to_parent" => Some(ChildApprovalMode::PropagateToParent),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        let registry = self
+            .runtime
+            .stored_prompt_registry()
+            .ok_or_else(|| "stored prompt registry not configured".to_string())?;
+        let prompt = registry
+            .read()
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| format!("stored prompt '{}' not found", task_id))?;
+
+        let request = DelegationRequest {
+            goal: prompt.instructions,
+            context,
+            profile_id: prompt.profile,
+            requested_skills: prompt.skills,
+            max_iterations: 10,
+            child_approval_mode,
+            tool_policy: SubAgentToolPolicy::inherit_parent(),
+        };
+
+        let parent_session_id = durable.lock().id;
+        let parent_client = sink
+            .parent_client_channel()
+            .ok_or_else(|| "run_task requires a client-backed prompt sink".to_string())?;
+        let parent_session_acp_id = sink
+            .parent_session_acp_id()
+            .ok_or_else(|| "run_task requires an ACP session id".to_string())?;
+
+        let profile = self
+            .resolve_delegation_profile(durable, request.profile_id.clone())
+            .await?;
+
+        let (result, _metadata) = self
+            .runtime
+            .run_delegation(
+                parent_session_id,
+                Some(call.call_id.clone()),
+                request,
+                profile,
+                parent_client,
+                parent_session_acp_id,
+            )
+            .await?;
+        Ok(result)
+    }
     async fn execute_activate_skill(
         &self,
         durable: &Arc<Mutex<DurableSession>>,

@@ -67,6 +67,18 @@ pub trait PromptSink {
         &self,
         request: ApprovalRequest,
     ) -> Pin<Box<dyn std::future::Future<Output = ApprovalVerdict>>>;
+
+    /// Return the underlying client channel if this sink is backed by one.
+    ///
+    /// Used by delegation to forward child approval requests to the parent UI.
+    fn parent_client_channel(&self) -> Option<SharedClientChannel> {
+        None
+    }
+
+    /// Return the parent ACP session id used to route delegation UI events.
+    fn parent_session_acp_id(&self) -> Option<acp::SessionId> {
+        None
+    }
 }
 
 pub(crate) struct AcpPromptSink {
@@ -262,5 +274,13 @@ impl PromptSink for AcpPromptSink {
                 Err(_) => ApprovalVerdict::Denied,
             }
         })
+    }
+
+    fn parent_client_channel(&self) -> Option<SharedClientChannel> {
+        Some(self.client.clone())
+    }
+
+    fn parent_session_acp_id(&self) -> Option<acp::SessionId> {
+        Some(self.session_id.clone())
     }
 }
