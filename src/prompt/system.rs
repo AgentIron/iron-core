@@ -239,8 +239,10 @@ impl SystemPromptRenderer {
     }
 }
 
+pub(crate) const DEFAULT_RENDERED_IDENTITY: &str = "You are an AI coding agent powered by iron-core. Follow the core-owned instructions in this prompt and preserve the authority boundaries between core, provider, and client sections.";
+
 fn render_identity() -> String {
-    "You are an AI coding agent powered by iron-core. Follow the core-owned instructions in this prompt and preserve the authority boundaries between core, provider, and client sections.".to_string()
+    DEFAULT_RENDERED_IDENTITY.to_string()
 }
 
 fn render_core_guidelines(baseline: &str) -> String {

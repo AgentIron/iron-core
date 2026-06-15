@@ -1172,14 +1172,19 @@ impl DurableSession {
         self.token_tracker.invalidate_baseline();
     }
 
-    /// Combine profile identity and explicit session instructions for token
-    /// accounting. Both contribute to the instructions category of context usage.
+    /// Combine rendered identity and explicit session instructions for token
+    /// accounting. This mirrors system prompt rendering: a missing or blank
+    /// profile identity still renders the core fallback identity in Section 1.
     pub fn instruction_text_for_estimate(&self) -> Option<String> {
-        match (self.profile_identity.as_deref(), self.instructions.as_deref()) {
-            (None, None) => None,
-            (Some(p), None) => Some(p.to_string()),
-            (None, Some(i)) => Some(i.to_string()),
-            (Some(p), Some(i)) => Some(format!("{}\n\n{}", p, i)),
+        let identity = self
+            .profile_identity
+            .as_deref()
+            .filter(|identity| !identity.trim().is_empty())
+            .unwrap_or(crate::prompt::system::DEFAULT_RENDERED_IDENTITY);
+
+        match self.instructions.as_deref() {
+            None => Some(identity.to_string()),
+            Some(instructions) => Some(format!("{}\n\n{}", identity, instructions)),
         }
     }
 
