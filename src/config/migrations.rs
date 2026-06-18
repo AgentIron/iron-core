@@ -137,11 +137,25 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
             INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 4);
             "#,
     ),
+    (
+        5,
+        r#"
+            CREATE TABLE IF NOT EXISTS bootstrap_metadata (
+                domain TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (domain, key)
+            );
+
+            INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 5);
+            "#,
+    ),
 ];
 
 /// The current schema version.
 #[allow(dead_code)]
-pub const CURRENT_SCHEMA_VERSION: i64 = 4;
+pub const CURRENT_SCHEMA_VERSION: i64 = 5;
 
 /// Apply all pending migrations to the database.
 pub async fn apply_migrations(pool: &sqlx::SqlitePool) -> Result<(), super::error::ConfigError> {

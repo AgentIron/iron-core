@@ -43,7 +43,7 @@ impl SessionPluginEnablement {
     pub fn list_enabled(&self) -> Vec<String> {
         self.enabled
             .iter()
-            .filter(|(_, &enabled)| enabled)
+            .filter(|&(_, enabled)| *enabled)
             .map(|(id, _)| id.clone())
             .collect()
     }

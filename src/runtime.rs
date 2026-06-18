@@ -103,6 +103,9 @@ struct CachedSessionToolCatalog {
     plugin_enablement: crate::plugin::session::SessionPluginEnablement,
     available_skills: Vec<(String, String)>,
     hidden_tools: Vec<String>,
+    /// Session-effective tool filter included in cache identity so that
+    /// filter changes invalidate the cached catalog.
+    effective_tool_filter: Option<crate::profile::ToolFilter>,
     catalog: Arc<SessionToolCatalog>,
 }
 
@@ -565,11 +568,51 @@ impl IronRuntime {
             AgentProfileProvider::RuntimeDefault => Ok(ResolvedProfileProvider::RuntimeDefault(
                 self.inner.provider.clone(),
             )),
-            AgentProfileProvider::Managed { .. } => {
+            AgentProfileProvider::Managed {
+                provider_slug,
+                model,
+            } => {
                 let context = managed_profile_prompt_context(&profile.provider)
                     .expect("managed profile always yields a prompt context");
-                let provider = self.resolve_managed_provider(&context).await?;
-                Ok(ResolvedProfileProvider::Managed(provider))
+
+                // Check against the effective model catalog (built-in + custom).
+                let catalog_available = {
+                    let registry = self.inner.model_capability_registry.read();
+                    registry.get(provider_slug.as_str(), model).is_some()
+                };
+
+                if !catalog_available {
+                    // Provider/model not in effective catalog — fall back to runtime default
+                    // with a diagnostic if the default is usable.
+                    let default_provider = self.inner.provider.clone();
+                    return Ok(ResolvedProfileProvider::Fallback {
+                        provider: default_provider,
+                        diagnostic: format!(
+                            "Profile provider/model '{}/{}' is not available in the effective model catalog. Using runtime default.",
+                            provider_slug.as_str(),
+                            model
+                        ),
+                    });
+                }
+
+                // Catalog says available; try to resolve credentials and construct provider.
+                match self.resolve_managed_provider(&context).await {
+                    Ok(provider) => Ok(ResolvedProfileProvider::Managed(provider)),
+                    Err(auth_err) => {
+                        // Credential/provider construction failed — fall back to runtime default
+                        // if it is usable, preserving the explicit failure reason.
+                        let default_provider = self.inner.provider.clone();
+                        Ok(ResolvedProfileProvider::Fallback {
+                            provider: default_provider,
+                            diagnostic: format!(
+                                "Profile provider '{}/{}' is unavailable ({}). Using runtime default.",
+                                provider_slug.as_str(),
+                                model,
+                                auth_err
+                            ),
+                        })
+                    }
+                }
             }
         }
     }
@@ -2293,6 +2336,7 @@ impl IronRuntime {
                     && cached.plugin_enablement == session_guard.plugin_enablement
                     && cached.available_skills == available_skills
                     && cached.hidden_tools == session_guard.hidden_tools
+                    && cached.effective_tool_filter == session_guard.effective_tool_filter
                 {
                     return Some((*cached.catalog).clone());
                 }
@@ -2334,6 +2378,7 @@ impl IronRuntime {
                 plugin_enablement: session_guard.plugin_enablement.clone(),
                 available_skills,
                 hidden_tools: session_guard.hidden_tools.clone(),
+                effective_tool_filter: session_guard.effective_tool_filter.clone(),
                 catalog: catalog.clone(),
             });
         }

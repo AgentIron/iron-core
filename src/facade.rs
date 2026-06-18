@@ -806,6 +806,18 @@ impl IronAgent {
         }
     }
 
+    /// Seed the three shipped default profiles (explore, plan, apply) into the
+    /// given config store according to `policy`.
+    ///
+    /// Delegates to [`crate::profile::seed_default_profiles`].
+    pub async fn seed_default_profiles(
+        &self,
+        store: &ConfigStore,
+        policy: crate::profile::DefaultProfileSeedPolicy,
+    ) -> Result<crate::profile::DefaultProfileSeedReport, crate::config::ConfigError> {
+        crate::profile::seed_default_profiles(store, policy).await
+    }
+
     /// Register or replace an agent profile by stable ID.
     ///
     /// Validates the profile name and rejects reserved `default` IDs/names.
@@ -827,6 +839,17 @@ impl IronAgent {
             .ok_or_else(|| format!("invalid profile name: '{}'", profile.name))?;
         if name.eq_ignore_ascii_case("default") {
             return Err("profile name 'default' is reserved".to_string());
+        }
+
+        // Reject ReadOnly and RequireApproval at the registration boundary.
+        if !matches!(
+            profile.approval,
+            AgentApproval::PerTool | AgentApproval::AutoApprove
+        ) {
+            return Err(format!(
+                "invalid profile approval value: {:?}. Only PerTool and AutoApprove are supported.",
+                profile.approval
+            ));
         }
 
         let mut registry = self.profile_registry.write();
@@ -1228,19 +1251,48 @@ impl AgentConnection {
     /// Create a new session with an explicit profile.
     ///
     /// The selected profile ID is resolved against the agent's profile registry
-    /// at prompt time. If the profile is not found or is removed before a prompt
-    /// runs, the prompt returns an error instead of falling back to the built-in
-    /// default profile.
+    /// at session creation time. If the profile is not found, the method returns
+    /// an error and no session is allocated. The resolved profile policy is
+    /// snapshotted into the session immediately so later edits or deletion of
+    /// the stored profile do not affect this session.
     ///
     /// # Errors
     ///
-    /// Returns an error if the runtime has been shut down.
+    /// Returns an error if the profile is not found in the registry or if the
+    /// runtime has been shut down.
     pub fn create_session_with_profile(
         &self,
         profile_id: AgentProfileId,
     ) -> Result<AgentSession, RuntimeError> {
+        // Validate profile exists in registry BEFORE creating the session,
+        // to avoid leaving an orphaned session on error.
+        let selected_profile = {
+            let registry = self.inner.profile_registry().read();
+            registry
+                .get(&profile_id)
+                .cloned()
+                .ok_or_else(|| RuntimeError::Session {
+                    message: format!("Profile '{}' not found in registry", profile_id.as_str()),
+                })?
+        };
+
         let connection_id = self.inner.id();
         let (session_id, durable) = self.inner.runtime().create_session(connection_id)?;
+
+        // Snapshot effective policy into the DurableSession so later
+        // edits/deletion of the stored profile do not affect this session.
+        {
+            let mut session = durable.lock();
+            session.profile_id = Some(profile_id.clone());
+            session.effective_tool_filter = Some(selected_profile.tools.clone());
+            session.effective_approval = Some(selected_profile.approval);
+            if let Some(ref identity) = selected_profile.identity_prompt {
+                if !identity.trim().is_empty() {
+                    session.set_profile_identity(identity.clone());
+                }
+            }
+        }
+
         Ok(AgentSession {
             id: session_id,
             durable,

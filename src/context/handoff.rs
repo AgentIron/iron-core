@@ -52,6 +52,25 @@ pub struct HandoffBundle {
     /// Tools hidden due to model capability differences
     #[serde(default)]
     pub hidden_tools: Vec<String>,
+    /// The profile id last used for this session, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<crate::profile::AgentProfileId>,
+    /// Session-effective snapshot of the profile's tool filter at setup time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_tool_filter: Option<crate::profile::ToolFilter>,
+    /// Session-effective snapshot of the profile's approval posture at setup time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_approval: Option<crate::profile::AgentApproval>,
+    /// Session-effective snapshot of the resolved model at setup time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
+    /// Whether the session was created with a profile that is no longer available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_unavailable: Option<String>,
+    /// Session-effective snapshot of the resolved provider context at setup time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_provider_context:
+        Option<crate::provider_credential::domain::ProviderPromptContext>,
 }
 
 pub struct HandoffExporter;
@@ -95,7 +114,7 @@ impl HandoffExporter {
         let mut loss_notes = Vec::new();
         for msg in &tail {
             for block in msg.content_blocks().iter() {
-                if let crate::durable::ContentBlock::Resource { ref uri, .. } = block {
+                if let crate::durable::ContentBlock::Resource { uri, .. } = block {
                     if is_local_resource(uri.as_str()) {
                         loss_notes.push(format!(
                             "Local resource '{}' may not be accessible at destination",
@@ -137,6 +156,12 @@ impl HandoffExporter {
             current_provider_api_key: session.current_provider_api_key.clone(),
             profile_identity: session.profile_identity.clone(),
             hidden_tools: session.hidden_tools.clone(),
+            profile_id: session.profile_id.clone(),
+            effective_tool_filter: session.effective_tool_filter.clone(),
+            effective_approval: session.effective_approval,
+            effective_model: session.effective_model.clone(),
+            profile_unavailable: session.profile_unavailable.clone(),
+            effective_provider_context: session.effective_provider_context.clone(),
         };
 
         if config.handoff_export.include_portability_notes && !loss_notes.is_empty() {
@@ -200,6 +225,12 @@ impl HandoffImporter {
         target.current_provider_slug = bundle.current_provider_slug.clone();
         target.current_provider_api_key = bundle.current_provider_api_key.clone();
         target.hidden_tools = bundle.hidden_tools.clone();
+        target.profile_id = bundle.profile_id.clone();
+        target.effective_tool_filter = bundle.effective_tool_filter.clone();
+        target.effective_approval = bundle.effective_approval;
+        target.effective_model = bundle.effective_model.clone();
+        target.profile_unavailable = bundle.profile_unavailable.clone();
+        target.effective_provider_context = bundle.effective_provider_context.clone();
 
         // Recreate timeline entries from model switch history
         for record in &bundle.model_switch_history {
@@ -263,6 +294,12 @@ impl HandoffImporter {
         session.current_provider_slug = bundle.current_provider_slug.clone();
         session.current_provider_api_key = bundle.current_provider_api_key.clone();
         session.hidden_tools = bundle.hidden_tools.clone();
+        session.profile_id = bundle.profile_id.clone();
+        session.effective_tool_filter = bundle.effective_tool_filter.clone();
+        session.effective_approval = bundle.effective_approval;
+        session.effective_model = bundle.effective_model.clone();
+        session.profile_unavailable = bundle.profile_unavailable.clone();
+        session.effective_provider_context = bundle.effective_provider_context.clone();
 
         // Recreate timeline entries from model switch history
         for record in &bundle.model_switch_history {

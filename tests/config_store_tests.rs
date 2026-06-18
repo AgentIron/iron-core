@@ -1016,7 +1016,7 @@ async fn test_migrations_v1_to_v2() {
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
 
     // Verify v2/v3 tables exist by using the new APIs
     store
@@ -1368,7 +1368,7 @@ async fn test_migrations_v2_to_v3_custom_models_columns() {
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
 
     // Verify the new columns have correct defaults for existing rows
     let retrieved = store
@@ -1485,6 +1485,12 @@ fn create_test_handoff_bundle(id: &str) -> iron_core::context::handoff::HandoffB
         current_provider_api_key: Some("sk-test-key".to_string()),
         profile_identity: None,
         hidden_tools: vec![],
+        profile_id: None,
+        effective_tool_filter: None,
+        effective_approval: None,
+        effective_model: None,
+        effective_provider_context: None,
+        profile_unavailable: None,
     }
 }
 

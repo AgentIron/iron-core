@@ -138,7 +138,7 @@ pub enum ProviderAuthError {
 pub type ProviderAuthResult<T> = Result<T, ProviderAuthError>;
 
 /// Context supplied by the client when resolving credentials for a prompt.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderPromptContext {
     /// Provider slug (e.g. "kimi-code", "codex").
     pub provider_slug: ProviderSlug,
@@ -146,6 +146,7 @@ pub struct ProviderPromptContext {
     pub model: String,
     /// Optional API key supplied by the client. When present and supported by
     /// the provider, this takes precedence over any stored OAuth credential.
+    #[serde(default, skip_serializing)]
     pub api_key: Option<String>,
 }
 

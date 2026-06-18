@@ -591,10 +591,11 @@ pub use effective_catalog::{
 };
 pub use error::ConfigError;
 pub use records::{
-    CredentialRecord, CustomModelInput, CustomModelRecord, DefaultModelInput, DefaultModelRecord,
-    McpServerConfigInput, McpServerConfigRecord, ProfileInput, ProfileRecord, PromptInput,
-    PromptRecord, ProviderConfigInput, ProviderConfigRecord, RuntimeSettingsSnapshot,
-    SavedHandoffInput, SavedHandoffMetadata, SavedHandoffRecord, ScheduleInput, ScheduleRecord,
-    SkillSettingsInput, SkillSettingsRecord,
+    BootstrapMetadataInput, BootstrapMetadataRecord, CredentialRecord, CustomModelInput,
+    CustomModelRecord, DefaultModelInput, DefaultModelRecord, McpServerConfigInput,
+    McpServerConfigRecord, ProfileInput, ProfileRecord, PromptInput, PromptRecord,
+    ProviderConfigInput, ProviderConfigRecord, RuntimeSettingsSnapshot, SavedHandoffInput,
+    SavedHandoffMetadata, SavedHandoffRecord, ScheduleInput, ScheduleRecord, SkillSettingsInput,
+    SkillSettingsRecord,
 };
 pub use store::{default_config_path, ConfigStore, OpenOptions};

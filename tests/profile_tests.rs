@@ -15,7 +15,7 @@ use iron_core::{
         store::{InMemoryCredentialStore, ProviderCredentialStore},
         DurableCredentialStore,
     },
-    Config, IronAgent, IronRuntime, PromptOutcome, StoredPrompt,
+    Config, IronAgent, IronRuntime, StoredPrompt,
     PROFILE_SCHEMA_VERSION as EXPORTED_SCHEMA_VERSION,
 };
 use iron_providers::{InferenceRequest, Provider, ProviderEvent};
@@ -97,7 +97,7 @@ fn profile_serialization_roundtrip() {
         },
         tools: ToolFilter::Allow(vec!["read".to_string(), "search".to_string()]),
         skills: SkillFilter::Allow(vec!["rust".to_string()]),
-        approval: AgentApproval::ReadOnly,
+        approval: AgentApproval::PerTool,
         identity_prompt: Some("You review code.".to_string()),
     };
 
@@ -121,6 +121,21 @@ fn runtime_default_provider_serialization() {
     assert!(value.get("RuntimeDefault").is_some() || value.get("runtime_default").is_some());
     let decoded: AgentProfile = serde_json::from_value(value).unwrap();
     assert_eq!(decoded, profile);
+}
+
+#[test]
+fn deserializing_readonly_as_agent_approval_fails() {
+    let value = json!("ReadOnly");
+    let result = serde_json::from_value::<AgentApproval>(value);
+    assert!(
+        result.is_err(),
+        "ReadOnly should be rejected during deserialization"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("ReadOnly"),
+        "error should mention ReadOnly: {err}"
+    );
 }
 
 #[test]
@@ -707,43 +722,50 @@ async fn resolve_managed_provider_with_credentials() {
 }
 
 #[tokio::test]
-async fn resolve_managed_provider_missing_resolver() {
+async fn resolve_managed_provider_missing_resolver_fallback() {
+    // Without a credential resolver, the managed provider falls back to runtime default
+    // with a diagnostic.
     let runtime = IronRuntime::new(Config::default(), TestProvider);
     let profile = managed_profile("managed", "openai", "gpt-4o");
-    let result = runtime.resolve_profile_provider(&profile).await;
-    assert!(matches!(
-        result,
-        Err(iron_core::provider_credential::domain::ProviderAuthError::NotConfigured(_))
-    ));
+    let result = runtime.resolve_profile_provider(&profile).await.unwrap();
+    assert!(
+        matches!(result, ResolvedProfileProvider::Fallback { .. }),
+        "expected Fallback, got {:?}",
+        result
+    );
 }
 
 #[tokio::test]
-async fn resolve_managed_provider_missing_credential() {
+async fn resolve_managed_provider_missing_credential_fallback() {
+    // Without a stored credential, the managed provider falls back to runtime default
+    // with a diagnostic.
     let config_store = ConfigStore::open_in_memory().await.unwrap();
     let durable = Arc::new(DurableCredentialStore::new(config_store));
     let store: Arc<dyn ProviderCredentialStore> = durable.clone();
 
     let runtime = IronRuntime::new_with_credential_store(Config::default(), TestProvider, store);
     let profile = managed_profile("managed", "openai", "gpt-4o");
-    let result = runtime.resolve_profile_provider(&profile).await;
-    assert!(matches!(
-        result,
-        Err(iron_core::provider_credential::domain::ProviderAuthError::NotConfigured(_))
-    ));
+    let result = runtime.resolve_profile_provider(&profile).await.unwrap();
+    assert!(
+        matches!(result, ResolvedProfileProvider::Fallback { .. }),
+        "expected Fallback, got {:?}",
+        result
+    );
 }
 
 #[tokio::test]
-async fn resolve_managed_provider_nonexistent_provider_is_not_configured() {
-    // A provider slug with no stored credential resolves as NotConfigured.
+async fn resolve_managed_provider_nonexistent_provider_fallback() {
+    // A provider slug with no stored credential resolves as Fallback to runtime default.
     let in_memory = Arc::new(InMemoryCredentialStore::new());
     let store: Arc<dyn ProviderCredentialStore> = in_memory.clone();
     let runtime = IronRuntime::new_with_credential_store(Config::default(), TestProvider, store);
     let profile = managed_profile("managed", "nonexistent-provider", "model");
-    let result = runtime.resolve_profile_provider(&profile).await;
-    assert!(matches!(
-        result,
-        Err(iron_core::provider_credential::domain::ProviderAuthError::NotConfigured(_))
-    ));
+    let result = runtime.resolve_profile_provider(&profile).await.unwrap();
+    assert!(
+        matches!(result, ResolvedProfileProvider::Fallback { .. }),
+        "expected Fallback, got {:?}",
+        result
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -889,18 +911,10 @@ async fn prompt_with_profile_uses_custom_identity_prompt() {
 async fn prompt_with_profile_unknown_returns_error_without_mutating_session() {
     let agent = test_agent();
     let conn = agent.connect();
-    let session = conn
-        .create_session_with_profile(AgentProfileId::from("unknown"))
-        .unwrap();
-    let outcome = session.prompt("hello").await;
-
-    assert_eq!(outcome, PromptOutcome::EndTurn);
-    let durable = agent
-        .runtime()
-        .get_session(session.id())
-        .expect("session exists");
-    assert_eq!(durable.lock().profile_identity, None);
-    assert_eq!(durable.lock().instructions, None);
+    let result = conn.create_session_with_profile(AgentProfileId::from("unknown"));
+    assert!(result.is_err(), "unknown profile should return error");
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("not found"));
 }
 
 #[tokio::test]
@@ -940,7 +954,7 @@ async fn prompt_with_profile_uses_managed_provider_resolution() {
 #[tokio::test]
 async fn resolve_managed_provider_unsupported_oauth_for_openai() {
     // openai supports only API keys; storing an OAuth credential yields
-    // UnsupportedCredential from the resolver.
+    // a fallback to runtime default with a diagnostic.
     let config_store = ConfigStore::open_in_memory().await.unwrap();
     let durable = Arc::new(DurableCredentialStore::new(config_store));
     let store: Arc<dyn ProviderCredentialStore> = durable.clone();
@@ -958,14 +972,12 @@ async fn resolve_managed_provider_unsupported_oauth_for_openai() {
 
     let runtime = IronRuntime::new_with_credential_store(Config::default(), TestProvider, store);
     let profile = managed_profile("managed", "openai", "gpt-4o");
-    let result = runtime.resolve_profile_provider(&profile).await;
-    assert!(matches!(
-        result,
-        Err(iron_core::provider_credential::domain::ProviderAuthError::UnsupportedCredential {
-            provider,
-            mode: CredentialMode::OAuthBearer,
-        }) if provider == "openai"
-    ));
+    let result = runtime.resolve_profile_provider(&profile).await.unwrap();
+    assert!(
+        matches!(result, ResolvedProfileProvider::Fallback { .. }),
+        "expected Fallback, got {:?}",
+        result
+    );
 }
 
 #[tokio::test]
@@ -1098,4 +1110,417 @@ fn connection_can_inspect_hidden_child_sessions() {
     assert_eq!(hidden[0].session_id, child_session_id);
     assert_eq!(hidden[0].connection_id, conn.id());
     assert_eq!(hidden[0].parent_session_id, Some(parent.id()));
+}
+
+#[tokio::test]
+async fn seed_default_profiles_first_run_creates_all_and_writes_marker() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+    let report = iron_core::profile::seed_default_profiles(
+        &store,
+        iron_core::profile::DefaultProfileSeedPolicy::FirstRunOnly,
+    )
+    .await
+    .unwrap();
+
+    assert!(!report.marker_was_present);
+    assert!(report.marker_written);
+    assert_eq!(report.created.len(), 3);
+    assert!(report.skipped_existing.is_empty());
+    // Assert exact profile IDs
+    let created_ids: Vec<&str> = report.created.iter().map(|id| id.as_str()).collect();
+    assert!(created_ids.contains(&"explore"));
+    assert!(created_ids.contains(&"plan"));
+    assert!(created_ids.contains(&"apply"));
+
+    let marker = store
+        .get_bootstrap_metadata(
+            iron_core::profile::DEFAULT_PROFILE_SEED_DOMAIN,
+            iron_core::profile::DEFAULT_PROFILE_SEED_KEY,
+        )
+        .await
+        .unwrap();
+    assert!(marker.is_some());
+}
+
+#[tokio::test]
+async fn seed_default_profiles_first_run_preserves_existing_creates_missing_writes_marker() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let explore_payload = json!({
+        "name": "Explore",
+        "provider": "RuntimeDefault",
+        "tools": "Inherit",
+        "skills": "Inherit",
+        "approval": "PerTool"
+    });
+    store
+        .set_profile(&ProfileInput {
+            id: "explore".to_string(),
+            schema_version: PROFILE_SCHEMA_VERSION,
+            payload: explore_payload,
+        })
+        .await
+        .unwrap();
+
+    let report = iron_core::profile::seed_default_profiles(
+        &store,
+        iron_core::profile::DefaultProfileSeedPolicy::FirstRunOnly,
+    )
+    .await
+    .unwrap();
+
+    assert!(!report.marker_was_present);
+    assert!(report.marker_written);
+    assert_eq!(report.created.len(), 2);
+    assert_eq!(report.skipped_existing.len(), 1);
+    assert_eq!(report.skipped_existing[0].as_str(), "explore");
+
+    let marker = store
+        .get_bootstrap_metadata(
+            iron_core::profile::DEFAULT_PROFILE_SEED_DOMAIN,
+            iron_core::profile::DEFAULT_PROFILE_SEED_KEY,
+        )
+        .await
+        .unwrap();
+    assert!(marker.is_some());
+}
+
+#[tokio::test]
+async fn seed_default_profiles_after_marker_deleting_plan_first_run_does_not_recreate() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let report = iron_core::profile::seed_default_profiles(
+        &store,
+        iron_core::profile::DefaultProfileSeedPolicy::FirstRunOnly,
+    )
+    .await
+    .unwrap();
+    assert!(report.marker_written);
+
+    store.delete_profile("plan").await.unwrap();
+
+    let report2 = iron_core::profile::seed_default_profiles(
+        &store,
+        iron_core::profile::DefaultProfileSeedPolicy::FirstRunOnly,
+    )
+    .await
+    .unwrap();
+
+    assert!(report2.marker_was_present);
+    assert!(!report2.marker_written);
+    assert!(report2.created.is_empty());
+
+    let plan = store.get_profile("plan").await.unwrap();
+    assert!(plan.is_none());
+}
+
+#[tokio::test]
+async fn seed_default_profiles_restore_missing_recreates_deleted_without_overwriting() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let report = iron_core::profile::seed_default_profiles(
+        &store,
+        iron_core::profile::DefaultProfileSeedPolicy::FirstRunOnly,
+    )
+    .await
+    .unwrap();
+    assert!(report.marker_written);
+
+    // Modify the explore profile before deleting plan, to verify restore
+    // does not overwrite the modified profile.
+    let modified_payload = json!({
+        "name": "Explore",
+        "provider": "RuntimeDefault",
+        "tools": "Inherit",
+        "skills": "Inherit",
+        "approval": "AutoApprove"
+    });
+    store
+        .set_profile(&ProfileInput {
+            id: "explore".to_string(),
+            schema_version: PROFILE_SCHEMA_VERSION,
+            payload: modified_payload,
+        })
+        .await
+        .unwrap();
+
+    store.delete_profile("plan").await.unwrap();
+
+    let report2 = iron_core::profile::seed_default_profiles(
+        &store,
+        iron_core::profile::DefaultProfileSeedPolicy::RestoreMissing,
+    )
+    .await
+    .unwrap();
+
+    assert!(report2.marker_was_present);
+    assert!(report2.marker_written);
+    assert_eq!(report2.created.len(), 1);
+    assert_eq!(report2.skipped_existing.len(), 2);
+    assert_eq!(report2.created[0].as_str(), "plan");
+
+    let plan = store.get_profile("plan").await.unwrap();
+    assert!(plan.is_some());
+
+    // Verify the modified explore profile was NOT overwritten
+    let explore = store.get_profile("explore").await.unwrap();
+    assert!(explore.is_some());
+    let explore_profile: AgentApproval =
+        serde_json::from_value(explore.unwrap().payload.get("approval").unwrap().clone()).unwrap();
+    assert_eq!(
+        explore_profile,
+        AgentApproval::AutoApprove,
+        "modified explore profile should not be overwritten by seed"
+    );
+}
+
+#[tokio::test]
+async fn seed_default_profiles_first_run_with_failure_does_not_write_marker() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+    let report = iron_core::profile::seed_default_profiles(
+        &store,
+        iron_core::profile::DefaultProfileSeedPolicy::FirstRunOnly,
+    )
+    .await
+    .unwrap();
+
+    assert!(report.marker_written);
+    assert_eq!(report.created.len(), 3);
+    assert!(report.skipped_existing.is_empty());
+
+    let failures: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            matches!(
+                d,
+                iron_core::profile::DefaultProfileSeedDiagnostic::StorageFailure { .. }
+            )
+        })
+        .collect();
+    assert!(failures.is_empty());
+}
+
+#[tokio::test]
+async fn seed_default_profiles_metadata_apis_work_for_in_memory_store() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+
+    let report = iron_core::profile::seed_default_profiles(
+        &store,
+        iron_core::profile::DefaultProfileSeedPolicy::FirstRunOnly,
+    )
+    .await
+    .unwrap();
+
+    assert!(report.marker_written);
+
+    let marker = store
+        .get_bootstrap_metadata(
+            iron_core::profile::DEFAULT_PROFILE_SEED_DOMAIN,
+            iron_core::profile::DEFAULT_PROFILE_SEED_KEY,
+        )
+        .await
+        .unwrap();
+    assert!(marker.is_some());
+    assert_eq!(
+        marker.unwrap().value,
+        iron_core::profile::DEFAULT_PROFILE_SEED_VERSION
+    );
+}
+
+#[tokio::test]
+async fn tool_filter_inherit_exposes_all_tools() {
+    let agent = test_agent();
+    let conn = agent.connect();
+    let session = conn.create_session().unwrap();
+
+    // Inherit filter (default) should expose all tools
+    let diagnostics = session.get_tool_diagnostics();
+    assert!(
+        !diagnostics.is_empty(),
+        "Inherit filter should expose at least some tools"
+    );
+}
+
+#[tokio::test]
+async fn tool_filter_allow_exposes_only_listed_tools() {
+    let agent = test_agent();
+
+    // First, find a tool that exists in the registry
+    let conn = agent.connect();
+    let session = conn.create_session().unwrap();
+    let all_diagnostics = session.get_tool_diagnostics();
+    let first_tool = all_diagnostics
+        .iter()
+        .find(|d| d.available)
+        .map(|d| d.name.clone())
+        .expect("at least one tool should be available");
+
+    // Create a profile with Allow filter for that tool
+    let profile = AgentProfile {
+        name: "allow-one".to_string(),
+        provider: AgentProfileProvider::RuntimeDefault,
+        tools: ToolFilter::Allow(vec![first_tool.clone()]),
+        skills: SkillFilter::Inherit,
+        approval: AgentApproval::PerTool,
+        identity_prompt: None,
+    };
+    agent
+        .register_profile(AgentProfileId::from("allow-one"), profile)
+        .unwrap();
+
+    let session2 = conn
+        .create_session_with_profile("allow-one".into())
+        .unwrap();
+    let diagnostics = session2.get_tool_diagnostics();
+    let tool_diag = diagnostics.iter().find(|d| d.name == first_tool);
+    assert!(
+        tool_diag.is_some(),
+        "Allow filter should include '{}'",
+        first_tool
+    );
+    assert!(
+        tool_diag.unwrap().available,
+        "{} should be available",
+        first_tool
+    );
+}
+
+#[tokio::test]
+async fn tool_filter_deny_removes_listed_tools() {
+    let agent = test_agent();
+
+    // First, find a tool that exists in the registry
+    let conn = agent.connect();
+    let session = conn.create_session().unwrap();
+    let all_diagnostics = session.get_tool_diagnostics();
+    let first_tool = all_diagnostics
+        .iter()
+        .find(|d| d.available)
+        .map(|d| d.name.clone())
+        .expect("at least one tool should be available");
+
+    // Create a profile with Deny filter for that tool
+    let profile = AgentProfile {
+        name: "deny-one".to_string(),
+        provider: AgentProfileProvider::RuntimeDefault,
+        tools: ToolFilter::Deny(vec![first_tool.clone()]),
+        skills: SkillFilter::Inherit,
+        approval: AgentApproval::PerTool,
+        identity_prompt: None,
+    };
+    agent
+        .register_profile(AgentProfileId::from("deny-one"), profile)
+        .unwrap();
+
+    let session2 = conn.create_session_with_profile("deny-one".into()).unwrap();
+    let diagnostics = session2.get_tool_diagnostics();
+    let tool_diag = diagnostics.iter().find(|d| d.name == first_tool);
+    assert!(
+        tool_diag.is_some(),
+        "Deny filter should still show '{}' in diagnostics with unavailable reason",
+        first_tool
+    );
+    let diag = tool_diag.unwrap();
+    assert!(
+        !diag.available,
+        "Denied tool '{}' should be marked as unavailable",
+        first_tool
+    );
+    assert!(
+        matches!(
+            diag.unavailable_reason,
+            Some(iron_core::plugin::effective_tools::UnavailableReason::DeniedByProfileFilter)
+        ),
+        "Denied tool should have DeniedByProfileFilter reason, got {:?}",
+        diag.unavailable_reason
+    );
+}
+
+#[tokio::test]
+async fn tool_filter_unknown_tool_name_emits_diagnostic() {
+    let agent = test_agent();
+
+    // Create a profile with Allow filter for a non-existent tool
+    let profile = AgentProfile {
+        name: "allow-unknown".to_string(),
+        provider: AgentProfileProvider::RuntimeDefault,
+        tools: ToolFilter::Allow(vec!["nonexistent_tool_xyz".to_string()]),
+        skills: SkillFilter::Inherit,
+        approval: AgentApproval::PerTool,
+        identity_prompt: None,
+    };
+    agent
+        .register_profile(AgentProfileId::from("allow-unknown"), profile)
+        .unwrap();
+
+    let conn = agent.connect();
+    let session = conn
+        .create_session_with_profile("allow-unknown".into())
+        .unwrap();
+    let diagnostics = session.get_tool_diagnostics();
+    let unknown_diag = diagnostics
+        .iter()
+        .find(|d| d.name == "nonexistent_tool_xyz");
+    assert!(
+        unknown_diag.is_some(),
+        "Unknown tool name should produce a diagnostic"
+    );
+    let diag = unknown_diag.unwrap();
+    assert!(
+        !diag.available,
+        "Unknown tool should be marked as unavailable"
+    );
+    assert!(
+        matches!(
+            diag.unavailable_reason,
+            Some(iron_core::plugin::effective_tools::UnavailableReason::UnknownToolName)
+        ),
+        "Unknown tool should have UnknownToolName reason, got {:?}",
+        diag.unavailable_reason
+    );
+}
+
+#[tokio::test]
+async fn tool_filter_deny_unknown_tool_name_emits_diagnostic() {
+    let agent = test_agent();
+
+    // Create a profile with Deny filter for a non-existent tool
+    let profile = AgentProfile {
+        name: "deny-unknown".to_string(),
+        provider: AgentProfileProvider::RuntimeDefault,
+        tools: ToolFilter::Deny(vec!["nonexistent_tool_abc".to_string()]),
+        skills: SkillFilter::Inherit,
+        approval: AgentApproval::PerTool,
+        identity_prompt: None,
+    };
+    agent
+        .register_profile(AgentProfileId::from("deny-unknown"), profile)
+        .unwrap();
+
+    let conn = agent.connect();
+    let session = conn
+        .create_session_with_profile("deny-unknown".into())
+        .unwrap();
+    let diagnostics = session.get_tool_diagnostics();
+    let unknown_diag = diagnostics
+        .iter()
+        .find(|d| d.name == "nonexistent_tool_abc");
+    assert!(
+        unknown_diag.is_some(),
+        "Unknown tool name in Deny filter should produce a diagnostic"
+    );
+    let diag = unknown_diag.unwrap();
+    assert!(
+        !diag.available,
+        "Unknown tool should be marked as unavailable"
+    );
+    assert!(
+        matches!(
+            diag.unavailable_reason,
+            Some(iron_core::plugin::effective_tools::UnavailableReason::UnknownToolName)
+        ),
+        "Unknown tool should have UnknownToolName reason, got {:?}",
+        diag.unavailable_reason
+    );
 }

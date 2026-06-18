@@ -48,6 +48,8 @@ pub struct SessionToolCatalog {
     definitions: Vec<ToolDefinition>,
     /// Map from tool name to tool info for lookup
     tool_map: Arc<HashMap<String, ToolInfo>>,
+    /// Session-effective tool filter snapshot from profile.
+    effective_tool_filter: Option<crate::profile::ToolFilter>,
 }
 
 /// Summary of an MCP server's status for a session.
@@ -273,6 +275,25 @@ impl SessionToolCatalog {
         definitions.retain(|d| !hidden_tools.contains(&d.name));
         tool_map.retain(|name, _| !hidden_tools.contains(name));
 
+        // Apply session-effective tool filter from profile snapshot, if any.
+        if let Some(ref filter) = session.effective_tool_filter {
+            match filter {
+                crate::profile::ToolFilter::Inherit => {}
+                crate::profile::ToolFilter::Allow(allowed) => {
+                    let allowed_set: std::collections::HashSet<String> =
+                        allowed.iter().cloned().collect();
+                    definitions.retain(|d| allowed_set.contains(&d.name));
+                    tool_map.retain(|name, _| allowed_set.contains(name));
+                }
+                crate::profile::ToolFilter::Deny(denied) => {
+                    let denied_set: std::collections::HashSet<String> =
+                        denied.iter().cloned().collect();
+                    definitions.retain(|d| !denied_set.contains(&d.name));
+                    tool_map.retain(|name, _| !denied_set.contains(name));
+                }
+            }
+        }
+
         Self {
             local_registry,
             mcp_registry,
@@ -281,6 +302,7 @@ impl SessionToolCatalog {
             connection_manager,
             definitions,
             tool_map: Arc::new(tool_map),
+            effective_tool_filter: session.effective_tool_filter.clone(),
         }
     }
 
@@ -833,7 +855,7 @@ impl SessionToolCatalog {
                         let namespaced = format!("plugin_{}_{}", plugin_id, tool.name);
                         if !emitted.contains(namespaced.as_str()) {
                             diagnostics.push(ToolDiagnostic {
-                                name: namespaced,
+                                name: namespaced.clone(),
                                 source: ToolSource::Plugin {
                                     plugin_id: plugin_id.clone(),
                                 },
@@ -842,6 +864,7 @@ impl SessionToolCatalog {
                                 requires_approval: tool.requires_approval,
                                 description: tool.description.clone(),
                             });
+                            emitted.insert(namespaced);
                         }
                     }
                 }
@@ -855,7 +878,7 @@ impl SessionToolCatalog {
                         let namespaced = format!("plugin_{}_{}", plugin_id, tool.name);
                         if !emitted.contains(namespaced.as_str()) {
                             diagnostics.push(ToolDiagnostic {
-                                name: namespaced,
+                                name: namespaced.clone(),
                                 source: ToolSource::Plugin {
                                     plugin_id: plugin_id.clone(),
                                 },
@@ -866,6 +889,7 @@ impl SessionToolCatalog {
                                 requires_approval: tool.requires_approval,
                                 description: tool.description.clone(),
                             });
+                            emitted.insert(namespaced);
                         }
                     }
                 }
@@ -883,7 +907,7 @@ impl SessionToolCatalog {
 
                     let result = compute_tool_availability(&plugin, tool);
                     diagnostics.push(ToolDiagnostic {
-                        name: namespaced,
+                        name: namespaced.clone(),
                         source: ToolSource::Plugin {
                             plugin_id: plugin_id.clone(),
                         },
@@ -892,6 +916,7 @@ impl SessionToolCatalog {
                         requires_approval: tool.requires_approval,
                         description: tool.description.clone(),
                     });
+                    emitted.insert(namespaced);
                 }
             }
         }
@@ -899,6 +924,108 @@ impl SessionToolCatalog {
         let hidden_tools: std::collections::HashSet<&str> =
             session.hidden_tools.iter().map(|s| s.as_str()).collect();
         diagnostics.retain(|d| !hidden_tools.contains(d.name.as_str()));
+
+        // --- Phase 4: tools excluded by the session-effective profile filter ---
+        // Build a helper closure that returns true when a tool name is excluded
+        // by the effective filter (Allow or Deny).
+        if let Some(ref filter) = self.effective_tool_filter {
+            let is_excluded = |name: &str| -> bool {
+                match filter {
+                    crate::profile::ToolFilter::Allow(allow_names) => {
+                        !allow_names.iter().any(|a| a == name)
+                    }
+                    crate::profile::ToolFilter::Deny(deny_names) => {
+                        deny_names.iter().any(|d| d == name)
+                    }
+                    crate::profile::ToolFilter::Inherit => false,
+                }
+            };
+
+            // Re-add excluded tools that were filtered out of tool_map
+            // but exist in the underlying registries.
+            for def in self.local_registry.definitions() {
+                if is_excluded(&def.name) && !emitted.contains(&def.name) {
+                    diagnostics.push(ToolDiagnostic {
+                        name: def.name.clone(),
+                        source: ToolSource::Local,
+                        available: false,
+                        unavailable_reason: Some(UnavailableReason::DeniedByProfileFilter),
+                        requires_approval: self
+                            .local_registry
+                            .get(&def.name)
+                            .map(|t| t.requires_approval())
+                            .unwrap_or(false),
+                        description: def.description.clone(),
+                    });
+                    emitted.insert(def.name.clone());
+                }
+            }
+            // Also check MCP and plugin registries for excluded tools
+            for server in self.mcp_registry.list_servers() {
+                for tool_info in &server.discovered_tools {
+                    let namespaced = format!("mcp_{}_{}", server.config.id, tool_info.name);
+                    if is_excluded(&namespaced) && !emitted.contains(&namespaced) {
+                        diagnostics.push(ToolDiagnostic {
+                            name: namespaced.clone(),
+                            source: ToolSource::Mcp {
+                                server_id: server.config.id.clone(),
+                            },
+                            available: false,
+                            unavailable_reason: Some(UnavailableReason::DeniedByProfileFilter),
+                            requires_approval: true,
+                            description: tool_info.description.clone(),
+                        });
+                        emitted.insert(namespaced);
+                    }
+                }
+            }
+            for plugin in self.plugin_registry.list() {
+                if let Some(manifest) = &plugin.manifest {
+                    for tool in &manifest.tools {
+                        let namespaced = format!("plugin_{}_{}", plugin.config.id, tool.name);
+                        if is_excluded(&namespaced) && !emitted.contains(&namespaced) {
+                            diagnostics.push(ToolDiagnostic {
+                                name: namespaced.clone(),
+                                source: ToolSource::Plugin {
+                                    plugin_id: plugin.config.id.clone(),
+                                },
+                                available: false,
+                                unavailable_reason: Some(UnavailableReason::DeniedByProfileFilter),
+                                requires_approval: tool.requires_approval,
+                                description: tool.description.clone(),
+                            });
+                            emitted.insert(namespaced);
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Phase 5: tool names referenced by profile filter but not in catalog ---
+        if let Some(ref filter) = session.effective_tool_filter {
+            let filter_names: Vec<String> = match filter {
+                crate::profile::ToolFilter::Allow(names) => names.clone(),
+                crate::profile::ToolFilter::Deny(names) => names.clone(),
+                crate::profile::ToolFilter::Inherit => vec![],
+            };
+            let known_names: std::collections::HashSet<String> =
+                diagnostics.iter().map(|d| d.name.clone()).collect();
+            for name in filter_names {
+                if !known_names.contains(&name) {
+                    diagnostics.push(ToolDiagnostic {
+                        name: name.clone(),
+                        source: ToolSource::Local,
+                        available: false,
+                        unavailable_reason: Some(UnavailableReason::UnknownToolName),
+                        requires_approval: false,
+                        description: format!(
+                            "Tool '{}' is referenced by the profile filter but is not available in the current catalog.",
+                            name
+                        ),
+                    });
+                }
+            }
+        }
 
         diagnostics
     }

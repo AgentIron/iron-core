@@ -90,18 +90,47 @@ pub enum SkillFilter {
 }
 
 /// Approval posture for a profile.
+///
+/// Only `PerTool` and `AutoApprove` are valid user-facing values.
+/// `ReadOnly` and `RequireApproval` are rejected during deserialization
+/// and profile validation/registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(try_from = "AgentApprovalRaw")]
 pub enum AgentApproval {
     /// Require approval for each tool call.
     #[default]
     PerTool,
-    /// Auto-approve tool calls (plumbing only; not enforced by this slice).
+    /// Auto-approve all tool calls for this profile.
     AutoApprove,
-    /// Read-only execution; no tool calls are allowed.
-    ReadOnly,
 }
 
-/// An agent identity profile.
+/// Raw deserialization helper for `AgentApproval`.
+/// Used to reject `ReadOnly` and `RequireApproval` at the deserialization boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum AgentApprovalRaw {
+    PerTool,
+    AutoApprove,
+    ReadOnly,
+    RequireApproval,
+}
+
+impl TryFrom<AgentApprovalRaw> for AgentApproval {
+    type Error = String;
+
+    fn try_from(value: AgentApprovalRaw) -> Result<Self, Self::Error> {
+        match value {
+            AgentApprovalRaw::PerTool => Ok(AgentApproval::PerTool),
+            AgentApprovalRaw::AutoApprove => Ok(AgentApproval::AutoApprove),
+            AgentApprovalRaw::ReadOnly => {
+                Err("ReadOnly is not a valid user-facing profile approval value".to_string())
+            }
+            AgentApprovalRaw::RequireApproval => Err(
+                "RequireApproval is not a valid user-facing profile approval value; use PerTool"
+                    .to_string(),
+            ),
+        }
+    }
+}
 ///
 /// `name` is a user-facing unique label. The stable identity handle is the
 /// profile ID supplied at registration or loaded from `ConfigStore`.
@@ -155,6 +184,73 @@ impl AgentProfile {
     }
 }
 
+// ============================================================================
+// Shipped default profile definitions
+// ============================================================================
+
+/// Core-owned shipped default profile IDs.
+pub const SHIPPED_PROFILE_IDS: &[&str] = &["explore", "plan", "apply"];
+
+/// Build the shipped default `AgentProfile` definitions.
+///
+/// These are bootstrap templates for ordinary persisted profile records.
+/// They use `RuntimeDefault`, `ToolFilter::Inherit`, `SkillFilter::Inherit`,
+/// and `PerTool` approval. Each carries a profile-specific identity prompt.
+pub fn shipped_default_profiles() -> Vec<(AgentProfileId, AgentProfile)> {
+    vec![
+        (
+            AgentProfileId::from("explore"),
+            AgentProfile {
+                name: "Explore".to_string(),
+                provider: AgentProfileProvider::RuntimeDefault,
+                tools: ToolFilter::Inherit,
+                skills: SkillFilter::Inherit,
+                approval: AgentApproval::PerTool,
+                identity_prompt: Some(
+                    "You are an exploratory research agent. Your goal is to broadly investigate \
+                     topics, gather information, and surface options without committing to a specific \
+                     implementation. You should ask clarifying questions, consider alternatives, and \
+                     summarize findings."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            AgentProfileId::from("plan"),
+            AgentProfile {
+                name: "Plan".to_string(),
+                provider: AgentProfileProvider::RuntimeDefault,
+                tools: ToolFilter::Inherit,
+                skills: SkillFilter::Inherit,
+                approval: AgentApproval::PerTool,
+                identity_prompt: Some(
+                    "You are a planning agent. Your goal is to analyze requirements, break work \
+                     into actionable steps, and produce structured plans. You should identify \
+                     dependencies, estimate effort, and propose milestones before any implementation \
+                     begins."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            AgentProfileId::from("apply"),
+            AgentProfile {
+                name: "Apply".to_string(),
+                provider: AgentProfileProvider::RuntimeDefault,
+                tools: ToolFilter::Inherit,
+                skills: SkillFilter::Inherit,
+                approval: AgentApproval::PerTool,
+                identity_prompt: Some(
+                    "You are an implementation agent. Your goal is to execute plans, write code, \
+                     run tests, and deliver working solutions. You should focus on correctness, \
+                     test coverage, and incremental progress toward the stated goal."
+                        .to_string(),
+                ),
+            },
+        ),
+    ]
+}
+
 /// Built-in default identity prompt for profiles without a custom prompt.
 pub fn default_identity_prompt() -> &'static str {
     "You are a helpful software engineering agent."
@@ -166,6 +262,26 @@ pub enum ResolvedProfileProvider {
     RuntimeDefault(Arc<dyn Provider>),
     /// An owned managed provider constructed through credential resolution.
     Managed(Box<dyn Provider>),
+    /// Fallback to the runtime default provider because the explicit
+    /// provider/model reference was unavailable or credential resolution
+    /// failed. The diagnostic explains why the fallback occurred.
+    Fallback {
+        provider: Arc<dyn Provider>,
+        diagnostic: String,
+    },
+}
+
+impl std::fmt::Debug for ResolvedProfileProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolvedProfileProvider::RuntimeDefault(_) => f.debug_tuple("RuntimeDefault").finish(),
+            ResolvedProfileProvider::Managed(_) => f.debug_tuple("Managed").finish(),
+            ResolvedProfileProvider::Fallback { diagnostic, .. } => f
+                .debug_struct("Fallback")
+                .field("diagnostic", diagnostic)
+                .finish(),
+        }
+    }
 }
 
 impl ResolvedProfileProvider {
@@ -174,6 +290,15 @@ impl ResolvedProfileProvider {
         match self {
             ResolvedProfileProvider::RuntimeDefault(arc) => arc.as_ref(),
             ResolvedProfileProvider::Managed(boxed) => boxed.as_ref(),
+            ResolvedProfileProvider::Fallback { provider, .. } => provider.as_ref(),
+        }
+    }
+
+    /// Return the fallback diagnostic, if any.
+    pub fn fallback_diagnostic(&self) -> Option<&str> {
+        match self {
+            ResolvedProfileProvider::Fallback { diagnostic, .. } => Some(diagnostic.as_str()),
+            _ => None,
         }
     }
 }
@@ -195,6 +320,8 @@ pub enum ProfileLoadIssue {
     DuplicateName,
     /// The listed record was missing when read.
     MissingRecord,
+    /// The profile approval value `ReadOnly` was rejected.
+    ReadOnlyRejected,
 }
 
 /// Per-profile diagnostic returned by best-effort profile loading.
@@ -275,6 +402,166 @@ pub fn managed_profile_prompt_context(
             api_key: None,
         }),
     }
+}
+
+// ============================================================================
+// Default profile seeding
+// ============================================================================
+
+/// Domain for bootstrap metadata used by default-profile seeding.
+pub const DEFAULT_PROFILE_SEED_DOMAIN: &str = "agent_profiles";
+/// Key for the durable seed marker.
+pub const DEFAULT_PROFILE_SEED_KEY: &str = "default_seed";
+/// Current seed marker version.
+pub const DEFAULT_PROFILE_SEED_VERSION: &str = "1";
+
+/// Policy for the default-profile seed operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultProfileSeedPolicy {
+    /// Create missing shipped defaults only when the seed marker is absent,
+    /// then write the marker.
+    FirstRunOnly,
+    /// Create missing shipped defaults regardless of marker state, but still
+    /// preserve existing records.
+    RestoreMissing,
+}
+
+/// Diagnostic for a single shipped default during seeding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefaultProfileSeedDiagnostic {
+    /// The profile was created successfully.
+    Created(AgentProfileId),
+    /// The profile already existed and was skipped.
+    SkippedExisting(AgentProfileId),
+    /// The profile was missing and not recreated (first-run already done).
+    SkippedFirstRunDone(AgentProfileId),
+    /// Storage failure for this profile.
+    StorageFailure {
+        profile_id: AgentProfileId,
+        reason: String,
+    },
+}
+
+/// Result of a default-profile seed operation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DefaultProfileSeedReport {
+    /// Policy used for this seed operation.
+    pub policy: DefaultProfileSeedPolicy,
+    /// Whether the durable seed marker was present before the operation.
+    pub marker_was_present: bool,
+    /// Whether the marker was written during this operation.
+    pub marker_written: bool,
+    /// Profiles that were created.
+    pub created: Vec<AgentProfileId>,
+    /// Profiles that were skipped because they already existed.
+    pub skipped_existing: Vec<AgentProfileId>,
+    /// Diagnostics for each shipped default processed.
+    pub diagnostics: Vec<DefaultProfileSeedDiagnostic>,
+}
+
+impl DefaultProfileSeedReport {
+    /// Create a report for a seed operation that did nothing.
+    pub fn no_op(policy: DefaultProfileSeedPolicy, marker_was_present: bool) -> Self {
+        Self {
+            policy,
+            marker_was_present,
+            marker_written: false,
+            created: Vec::new(),
+            skipped_existing: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+}
+
+/// Seed shipped default profiles into the config store.
+///
+/// This is a core-owned, non-destructive operation. Existing profiles are never
+/// overwritten. Under `FirstRunOnly`, missing defaults are only created when
+/// the durable seed marker is absent; the marker is then written so later
+/// startups do not recreate user-deleted defaults.
+///
+/// Returns a structured report describing created, skipped, and diagnostic
+/// outcomes for each shipped default.
+pub async fn seed_default_profiles(
+    store: &crate::config::ConfigStore,
+    policy: DefaultProfileSeedPolicy,
+) -> Result<DefaultProfileSeedReport, crate::config::ConfigError> {
+    use crate::config::records::{BootstrapMetadataInput, ProfileInput};
+
+    let marker = store
+        .get_bootstrap_metadata(DEFAULT_PROFILE_SEED_DOMAIN, DEFAULT_PROFILE_SEED_KEY)
+        .await?;
+    let marker_was_present = marker.is_some();
+
+    // Under FirstRunOnly, if marker is present we do nothing.
+    if matches!(policy, DefaultProfileSeedPolicy::FirstRunOnly) && marker_was_present {
+        let mut report = DefaultProfileSeedReport::no_op(policy, true);
+        for (id, _profile) in shipped_default_profiles() {
+            report
+                .diagnostics
+                .push(DefaultProfileSeedDiagnostic::SkippedFirstRunDone(id));
+        }
+        return Ok(report);
+    }
+
+    let mut report = DefaultProfileSeedReport {
+        policy,
+        marker_was_present,
+        marker_written: false,
+        created: Vec::new(),
+        skipped_existing: Vec::new(),
+        diagnostics: Vec::new(),
+    };
+
+    for (id, profile) in shipped_default_profiles() {
+        let payload = serde_json::to_value(&profile).map_err(|e| {
+            crate::config::ConfigError::Serialization(format!(
+                "Failed to serialize shipped default profile {}: {}",
+                id.as_str(),
+                e
+            ))
+        })?;
+        let input = ProfileInput {
+            id: id.as_str().to_string(),
+            schema_version: PROFILE_SCHEMA_VERSION,
+            payload,
+        };
+        let inserted = store.insert_profile_if_missing(&input).await?;
+        if !inserted {
+            report.skipped_existing.push(id.clone());
+            report
+                .diagnostics
+                .push(DefaultProfileSeedDiagnostic::SkippedExisting(id));
+            continue;
+        }
+
+        report.created.push(id.clone());
+        report
+            .diagnostics
+            .push(DefaultProfileSeedDiagnostic::Created(id));
+    }
+
+    // Write the seed marker so that subsequent startups do not recreate
+    // user-deleted defaults (under FirstRunOnly policy).
+    if matches!(policy, DefaultProfileSeedPolicy::FirstRunOnly) || !report.created.is_empty() {
+        let marker_input = BootstrapMetadataInput {
+            domain: DEFAULT_PROFILE_SEED_DOMAIN.to_string(),
+            key: DEFAULT_PROFILE_SEED_KEY.to_string(),
+            value: DEFAULT_PROFILE_SEED_VERSION.to_string(),
+        };
+        match store.set_bootstrap_metadata(&marker_input).await {
+            Ok(()) => report.marker_written = true,
+            Err(e) => {
+                // Do not report successful seed if marker could not be persisted.
+                return Err(crate::config::ConfigError::Migration(format!(
+                    "Failed to write default-profile seed marker: {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 #[cfg(test)]
