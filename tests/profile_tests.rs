@@ -125,7 +125,7 @@ fn runtime_default_provider_serialization() {
 
 #[test]
 fn deserializing_readonly_as_agent_approval_fails() {
-    let value = json!({"approval": "ReadOnly"});
+    let value = json!("ReadOnly");
     let result = serde_json::from_value::<AgentApproval>(value);
     assert!(
         result.is_err(),

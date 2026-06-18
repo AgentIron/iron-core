@@ -925,15 +925,26 @@ impl SessionToolCatalog {
             session.hidden_tools.iter().map(|s| s.as_str()).collect();
         diagnostics.retain(|d| !hidden_tools.contains(d.name.as_str()));
 
-        // --- Phase 4: tools denied by the session-effective profile filter ---
-        if let Some(crate::profile::ToolFilter::Deny(ref denied_names)) = self.effective_tool_filter
-        {
-            let denied_set: std::collections::HashSet<String> =
-                denied_names.iter().cloned().collect();
-            // Re-add denied tools that were filtered out of tool_map
+        // --- Phase 4: tools excluded by the session-effective profile filter ---
+        // Build a helper closure that returns true when a tool name is excluded
+        // by the effective filter (Allow or Deny).
+        if let Some(ref filter) = self.effective_tool_filter {
+            let is_excluded = |name: &str| -> bool {
+                match filter {
+                    crate::profile::ToolFilter::Allow(allow_names) => {
+                        !allow_names.iter().any(|a| a == name)
+                    }
+                    crate::profile::ToolFilter::Deny(deny_names) => {
+                        deny_names.iter().any(|d| d == name)
+                    }
+                    crate::profile::ToolFilter::Inherit => false,
+                }
+            };
+
+            // Re-add excluded tools that were filtered out of tool_map
             // but exist in the underlying registries.
             for def in self.local_registry.definitions() {
-                if denied_set.contains(&def.name) && !emitted.contains(&def.name) {
+                if is_excluded(&def.name) && !emitted.contains(&def.name) {
                     diagnostics.push(ToolDiagnostic {
                         name: def.name.clone(),
                         source: ToolSource::Local,
@@ -949,11 +960,11 @@ impl SessionToolCatalog {
                     emitted.insert(def.name.clone());
                 }
             }
-            // Also check MCP and plugin registries for denied tools
+            // Also check MCP and plugin registries for excluded tools
             for server in self.mcp_registry.list_servers() {
                 for tool_info in &server.discovered_tools {
                     let namespaced = format!("mcp_{}_{}", server.config.id, tool_info.name);
-                    if denied_set.contains(&namespaced) && !emitted.contains(&namespaced) {
+                    if is_excluded(&namespaced) && !emitted.contains(&namespaced) {
                         diagnostics.push(ToolDiagnostic {
                             name: namespaced.clone(),
                             source: ToolSource::Mcp {
@@ -972,7 +983,7 @@ impl SessionToolCatalog {
                 if let Some(manifest) = &plugin.manifest {
                     for tool in &manifest.tools {
                         let namespaced = format!("plugin_{}_{}", plugin.config.id, tool.name);
-                        if denied_set.contains(&namespaced) && !emitted.contains(&namespaced) {
+                        if is_excluded(&namespaced) && !emitted.contains(&namespaced) {
                             diagnostics.push(ToolDiagnostic {
                                 name: namespaced.clone(),
                                 source: ToolSource::Plugin {
