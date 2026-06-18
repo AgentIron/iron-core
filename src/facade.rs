@@ -1269,17 +1269,13 @@ impl AgentConnection {
         // DurableSession so later edits/deletion of the stored profile do not
         // affect this session.
         let registry = self.inner.profile_registry().read();
-        let selected_profile = registry
-            .get(&profile_id)
-            .cloned()
-            .unwrap_or_else(|| AgentProfile {
-                name: profile_id.as_str().to_string(),
-                provider: AgentProfileProvider::RuntimeDefault,
-                tools: ToolFilter::Inherit,
-                skills: SkillFilter::Inherit,
-                approval: AgentApproval::PerTool,
-                identity_prompt: Some(default_identity_prompt().to_string()),
-            });
+        let selected_profile =
+            registry
+                .get(&profile_id)
+                .cloned()
+                .ok_or_else(|| RuntimeError::Session {
+                    message: format!("Profile '{}' not found in registry", profile_id.as_str()),
+                })?;
         {
             let mut session = durable.lock();
             session.profile_id = Some(profile_id.clone());

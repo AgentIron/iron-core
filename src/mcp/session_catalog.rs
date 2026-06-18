@@ -855,7 +855,7 @@ impl SessionToolCatalog {
                         let namespaced = format!("plugin_{}_{}", plugin_id, tool.name);
                         if !emitted.contains(namespaced.as_str()) {
                             diagnostics.push(ToolDiagnostic {
-                                name: namespaced,
+                                name: namespaced.clone(),
                                 source: ToolSource::Plugin {
                                     plugin_id: plugin_id.clone(),
                                 },
@@ -864,6 +864,7 @@ impl SessionToolCatalog {
                                 requires_approval: tool.requires_approval,
                                 description: tool.description.clone(),
                             });
+                            emitted.insert(namespaced);
                         }
                     }
                 }
@@ -877,7 +878,7 @@ impl SessionToolCatalog {
                         let namespaced = format!("plugin_{}_{}", plugin_id, tool.name);
                         if !emitted.contains(namespaced.as_str()) {
                             diagnostics.push(ToolDiagnostic {
-                                name: namespaced,
+                                name: namespaced.clone(),
                                 source: ToolSource::Plugin {
                                     plugin_id: plugin_id.clone(),
                                 },
@@ -888,6 +889,7 @@ impl SessionToolCatalog {
                                 requires_approval: tool.requires_approval,
                                 description: tool.description.clone(),
                             });
+                            emitted.insert(namespaced);
                         }
                     }
                 }
@@ -905,7 +907,7 @@ impl SessionToolCatalog {
 
                     let result = compute_tool_availability(&plugin, tool);
                     diagnostics.push(ToolDiagnostic {
-                        name: namespaced,
+                        name: namespaced.clone(),
                         source: ToolSource::Plugin {
                             plugin_id: plugin_id.clone(),
                         },
@@ -914,6 +916,7 @@ impl SessionToolCatalog {
                         requires_approval: tool.requires_approval,
                         description: tool.description.clone(),
                     });
+                    emitted.insert(namespaced);
                 }
             }
         }

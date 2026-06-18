@@ -1489,6 +1489,7 @@ fn create_test_handoff_bundle(id: &str) -> iron_core::context::handoff::HandoffB
         effective_tool_filter: None,
         effective_approval: None,
         effective_model: None,
+        effective_provider_context: None,
         profile_unavailable: None,
     }
 }

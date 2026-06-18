@@ -15,16 +15,13 @@ fn session_approval_requires_permission(
     config: &Config,
     tool_requires_approval: bool,
 ) -> bool {
-    let result = match session.effective_approval {
+    match session.effective_approval {
         Some(crate::profile::AgentApproval::AutoApprove) => false,
         Some(crate::profile::AgentApproval::PerTool) => tool_requires_approval,
         None => config
             .default_approval_strategy
             .is_approval_required(tool_requires_approval),
-    };
-    eprintln!("DEBUG session_approval_requires_permission: effective_approval={:?}, config_strategy={:?}, tool_requires={:?}, result={}",
-        session.effective_approval, config.default_approval_strategy, tool_requires_approval, result);
-    result
+    }
 }
 use crate::profile::{AgentProfile, AgentProfileId};
 use crate::prompt_lifecycle::{
@@ -1054,18 +1051,6 @@ impl PromptRunner {
             .await
         {
             return;
-        }
-
-        // ReadOnly rejection: if the session snapshot says ReadOnly, reject every
-        // tool call immediately with a clear error, regardless of the tool name.
-        // NOTE: ReadOnly is no longer a valid user-facing profile approval value.
-        // This guard is kept defensively for sessions that may have been created
-        // before the restriction, or for future internal tool-policy uses.
-        {
-            let session = durable.lock();
-            if session.effective_approval == Some(crate::profile::AgentApproval::PerTool) {
-                // PerTool keeps normal behavior; no early rejection here.
-            }
         }
 
         #[cfg(feature = "embedded-python")]

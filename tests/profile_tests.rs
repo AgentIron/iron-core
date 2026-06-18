@@ -15,7 +15,7 @@ use iron_core::{
         store::{InMemoryCredentialStore, ProviderCredentialStore},
         DurableCredentialStore,
     },
-    Config, IronAgent, IronRuntime, PromptOutcome, StoredPrompt,
+    Config, IronAgent, IronRuntime, StoredPrompt,
     PROFILE_SCHEMA_VERSION as EXPORTED_SCHEMA_VERSION,
 };
 use iron_providers::{InferenceRequest, Provider, ProviderEvent};
@@ -121,6 +121,21 @@ fn runtime_default_provider_serialization() {
     assert!(value.get("RuntimeDefault").is_some() || value.get("runtime_default").is_some());
     let decoded: AgentProfile = serde_json::from_value(value).unwrap();
     assert_eq!(decoded, profile);
+}
+
+#[test]
+fn deserializing_readonly_as_agent_approval_fails() {
+    let value = json!({"approval": "ReadOnly"});
+    let result = serde_json::from_value::<AgentApproval>(value);
+    assert!(
+        result.is_err(),
+        "ReadOnly should be rejected during deserialization"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("ReadOnly"),
+        "error should mention ReadOnly: {err}"
+    );
 }
 
 #[test]
@@ -896,23 +911,10 @@ async fn prompt_with_profile_uses_custom_identity_prompt() {
 async fn prompt_with_profile_unknown_returns_error_without_mutating_session() {
     let agent = test_agent();
     let conn = agent.connect();
-    let session = conn
-        .create_session_with_profile(AgentProfileId::from("unknown"))
-        .unwrap();
-    let outcome = session.prompt("hello").await;
-
-    // With Fix 5, unknown profiles fall back to runtime default with a diagnostic.
-    // The session should still have a snapshot of the default profile identity.
-    assert_eq!(outcome, PromptOutcome::EndTurn);
-    let durable = agent
-        .runtime()
-        .get_session(session.id())
-        .expect("session exists");
-    assert_eq!(
-        durable.lock().profile_identity,
-        Some("You are a helpful software engineering agent.".to_string())
-    );
-    assert_eq!(durable.lock().instructions, None);
+    let result = conn.create_session_with_profile(AgentProfileId::from("unknown"));
+    assert!(result.is_err(), "unknown profile should return error");
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("not found"));
 }
 
 #[tokio::test]
@@ -1124,6 +1126,11 @@ async fn seed_default_profiles_first_run_creates_all_and_writes_marker() {
     assert!(report.marker_written);
     assert_eq!(report.created.len(), 3);
     assert!(report.skipped_existing.is_empty());
+    // Assert exact profile IDs
+    let created_ids: Vec<&str> = report.created.iter().map(|id| id.as_str()).collect();
+    assert!(created_ids.contains(&"explore"));
+    assert!(created_ids.contains(&"plan"));
+    assert!(created_ids.contains(&"apply"));
 
     let marker = store
         .get_bootstrap_metadata(
@@ -1166,6 +1173,7 @@ async fn seed_default_profiles_first_run_preserves_existing_creates_missing_writ
     assert!(report.marker_written);
     assert_eq!(report.created.len(), 2);
     assert_eq!(report.skipped_existing.len(), 1);
+    assert_eq!(report.skipped_existing[0].as_str(), "explore");
 
     let marker = store
         .get_bootstrap_metadata(
@@ -1218,6 +1226,24 @@ async fn seed_default_profiles_restore_missing_recreates_deleted_without_overwri
     .unwrap();
     assert!(report.marker_written);
 
+    // Modify the explore profile before deleting plan, to verify restore
+    // does not overwrite the modified profile.
+    let modified_payload = json!({
+        "name": "Explore",
+        "provider": "RuntimeDefault",
+        "tools": "Inherit",
+        "skills": "Inherit",
+        "approval": "AutoApprove"
+    });
+    store
+        .set_profile(&ProfileInput {
+            id: "explore".to_string(),
+            schema_version: PROFILE_SCHEMA_VERSION,
+            payload: modified_payload,
+        })
+        .await
+        .unwrap();
+
     store.delete_profile("plan").await.unwrap();
 
     let report2 = iron_core::profile::seed_default_profiles(
@@ -1231,9 +1257,21 @@ async fn seed_default_profiles_restore_missing_recreates_deleted_without_overwri
     assert!(report2.marker_written);
     assert_eq!(report2.created.len(), 1);
     assert_eq!(report2.skipped_existing.len(), 2);
+    assert_eq!(report2.created[0].as_str(), "plan");
 
     let plan = store.get_profile("plan").await.unwrap();
     assert!(plan.is_some());
+
+    // Verify the modified explore profile was NOT overwritten
+    let explore = store.get_profile("explore").await.unwrap();
+    assert!(explore.is_some());
+    let explore_profile: AgentApproval =
+        serde_json::from_value(explore.unwrap().payload.get("approval").unwrap().clone()).unwrap();
+    assert_eq!(
+        explore_profile,
+        AgentApproval::AutoApprove,
+        "modified explore profile should not be overwritten by seed"
+    );
 }
 
 #[tokio::test]
@@ -1264,7 +1302,7 @@ async fn seed_default_profiles_first_run_with_failure_does_not_write_marker() {
 }
 
 #[tokio::test]
-async fn seed_default_profiles_metadata_apis_work_for_sqlite_and_memory() {
+async fn seed_default_profiles_metadata_apis_work_for_in_memory_store() {
     let store = ConfigStore::open_in_memory().await.unwrap();
 
     let report = iron_core::profile::seed_default_profiles(

@@ -515,12 +515,16 @@ impl IronConnection {
         let sink = AcpPromptSink::new(acp_session_id.clone(), client.clone());
 
         // Apply the selected profile identity layer unless the session already
-        // has explicit instructions.
+        // has explicit instructions. Snapshot profile policy fields so later
+        // edits/deletion of the stored profile do not affect this session.
         let selected_profile = self.selected_profile(session_profile_id)?;
         {
             let mut session = durable.lock();
             if let Some(profile_id) = session_profile_id {
                 session.profile_id = Some(profile_id.clone());
+                // Snapshot tool filter and approval only when a profile is explicitly selected.
+                session.effective_tool_filter = Some(selected_profile.tools.clone());
+                session.effective_approval = Some(selected_profile.approval);
             }
             if session.profile_identity.is_none() {
                 if let Some(ref identity) = selected_profile.identity_prompt {

@@ -146,6 +146,7 @@ pub struct ProviderPromptContext {
     pub model: String,
     /// Optional API key supplied by the client. When present and supported by
     /// the provider, this takes precedence over any stored OAuth credential.
+    #[serde(default, skip_serializing)]
     pub api_key: Option<String>,
 }
 

@@ -67,6 +67,10 @@ pub struct HandoffBundle {
     /// Whether the session was created with a profile that is no longer available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_unavailable: Option<String>,
+    /// Session-effective snapshot of the resolved provider context at setup time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_provider_context:
+        Option<crate::provider_credential::domain::ProviderPromptContext>,
 }
 
 pub struct HandoffExporter;
@@ -157,6 +161,7 @@ impl HandoffExporter {
             effective_approval: session.effective_approval,
             effective_model: session.effective_model.clone(),
             profile_unavailable: session.profile_unavailable.clone(),
+            effective_provider_context: session.effective_provider_context.clone(),
         };
 
         if config.handoff_export.include_portability_notes && !loss_notes.is_empty() {
@@ -225,6 +230,7 @@ impl HandoffImporter {
         target.effective_approval = bundle.effective_approval;
         target.effective_model = bundle.effective_model.clone();
         target.profile_unavailable = bundle.profile_unavailable.clone();
+        target.effective_provider_context = bundle.effective_provider_context.clone();
 
         // Recreate timeline entries from model switch history
         for record in &bundle.model_switch_history {
@@ -293,6 +299,7 @@ impl HandoffImporter {
         session.effective_approval = bundle.effective_approval;
         session.effective_model = bundle.effective_model.clone();
         session.profile_unavailable = bundle.profile_unavailable.clone();
+        session.effective_provider_context = bundle.effective_provider_context.clone();
 
         // Recreate timeline entries from model switch history
         for record in &bundle.model_switch_history {

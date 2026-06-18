@@ -514,15 +514,6 @@ pub async fn seed_default_profiles(
     };
 
     for (id, profile) in shipped_default_profiles() {
-        let existing = store.get_profile(id.as_str()).await?;
-        if existing.is_some() {
-            report.skipped_existing.push(id.clone());
-            report
-                .diagnostics
-                .push(DefaultProfileSeedDiagnostic::SkippedExisting(id));
-            continue;
-        }
-
         let payload = serde_json::to_value(&profile).map_err(|e| {
             crate::config::ConfigError::Serialization(format!(
                 "Failed to serialize shipped default profile {}: {}",
@@ -535,13 +526,12 @@ pub async fn seed_default_profiles(
             schema_version: PROFILE_SCHEMA_VERSION,
             payload,
         };
-        if let Err(e) = store.set_profile(&input).await {
+        let inserted = store.insert_profile_if_missing(&input).await?;
+        if !inserted {
+            report.skipped_existing.push(id.clone());
             report
                 .diagnostics
-                .push(DefaultProfileSeedDiagnostic::StorageFailure {
-                    profile_id: id.clone(),
-                    reason: e.to_string(),
-                });
+                .push(DefaultProfileSeedDiagnostic::SkippedExisting(id));
             continue;
         }
 
@@ -551,17 +541,9 @@ pub async fn seed_default_profiles(
             .push(DefaultProfileSeedDiagnostic::Created(id));
     }
 
-    // Only write the seed marker if all required profiles were created successfully.
-    // If any required profile write failed, do not write the marker so the next
-    // startup will retry the full seed operation.
-    let any_required_failed = report
-        .diagnostics
-        .iter()
-        .any(|d| matches!(d, DefaultProfileSeedDiagnostic::StorageFailure { .. }));
-
-    if !any_required_failed
-        && (matches!(policy, DefaultProfileSeedPolicy::FirstRunOnly) || !report.created.is_empty())
-    {
+    // Write the seed marker so that subsequent startups do not recreate
+    // user-deleted defaults (under FirstRunOnly policy).
+    if matches!(policy, DefaultProfileSeedPolicy::FirstRunOnly) || !report.created.is_empty() {
         let marker_input = BootstrapMetadataInput {
             domain: DEFAULT_PROFILE_SEED_DOMAIN.to_string(),
             key: DEFAULT_PROFILE_SEED_KEY.to_string(),

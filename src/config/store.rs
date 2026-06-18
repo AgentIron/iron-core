@@ -161,6 +161,41 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// Insert a profile record only if one with the same ID does not already exist.
+    ///
+    /// Returns `true` if the row was inserted, `false` if the ID already existed.
+    /// Returns `ConfigError::Validation` if the ID is empty.
+    pub async fn insert_profile_if_missing(
+        &self,
+        input: &ProfileInput,
+    ) -> Result<bool, ConfigError> {
+        if input.id.is_empty() {
+            return Err(ConfigError::Validation(
+                "Profile ID must not be empty".to_string(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        let payload = serde_json::to_string(&input.payload)?;
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO profiles (id, schema_version, payload, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO NOTHING
+            "#,
+        )
+        .bind(&input.id)
+        .bind(input.schema_version)
+        .bind(&payload)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Get a profile by ID.
     pub async fn get_profile(&self, id: &str) -> Result<Option<ProfileRecord>, ConfigError> {
         let row = sqlx::query(
