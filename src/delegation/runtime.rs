@@ -336,6 +336,14 @@ impl IronRuntime {
                     .expect("managed profile always yields a prompt context");
                 PromptRunner::new_managed(self.clone(), provider, context)
             }
+            Ok(crate::profile::ResolvedProfileProvider::Fallback {
+                provider: _,
+                diagnostic,
+            }) => {
+                // Fallback to runtime default; diagnostic is logged by the runtime layer.
+                let _ = diagnostic;
+                PromptRunner::new(self.clone())
+            }
             Err(e) => {
                 self.finish_prompt(child_session_id);
                 self.unregister_child(parent_session_id, child_session_id);

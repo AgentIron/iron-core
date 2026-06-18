@@ -126,6 +126,10 @@ pub enum UnavailableReason {
     McpServerNotEnabled,
     /// MCP server is not connected/healthy.
     McpServerNotHealthy(crate::mcp::server::McpServerHealth),
+    /// Tool name is referenced by a profile filter but does not exist in the catalog.
+    UnknownToolName,
+    /// Tool is denied by the session-effective profile filter.
+    DeniedByProfileFilter,
 }
 
 /// Result of canonical per-tool availability computation.

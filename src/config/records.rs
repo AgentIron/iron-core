@@ -191,9 +191,22 @@ pub struct RuntimeSettingsSnapshot {
     pub skill_settings: SkillSettingsRecord,
 }
 
-// ============================================================================
-// Saved Handoff Records (Issue #69)
-// ============================================================================
+/// A stored bootstrap metadata record.
+#[derive(Debug, Clone)]
+pub struct BootstrapMetadataRecord {
+    pub domain: String,
+    pub key: String,
+    pub value: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Input for creating or updating bootstrap metadata.
+#[derive(Debug, Clone)]
+pub struct BootstrapMetadataInput {
+    pub domain: String,
+    pub key: String,
+    pub value: String,
+}
 
 /// Metadata for a saved handoff bundle.
 #[derive(Debug, Clone)]

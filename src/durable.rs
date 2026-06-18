@@ -417,6 +417,25 @@ pub struct DurableSession {
     /// Rendered in `## 1. Identity` instead of client/session injection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_identity: Option<String>,
+    /// Session-effective snapshot of the profile's tool filter at setup time.
+    /// `None` means the profile used `Inherit` (or no profile was selected).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_tool_filter: Option<crate::profile::ToolFilter>,
+    /// Session-effective snapshot of the profile's approval posture at setup time.
+    /// `None` means the profile used `PerTool` (or no profile was selected).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_approval: Option<crate::profile::AgentApproval>,
+    /// Session-effective snapshot of the resolved provider context at setup time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_provider_context:
+        Option<crate::provider_credential::domain::ProviderPromptContext>,
+    /// Session-effective snapshot of the resolved model at setup time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
+    /// Whether the session was created with a profile that is no longer available.
+    /// Stored as a diagnostic; the session continues with its snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_unavailable: Option<String>,
     #[serde(skip, default)]
     pub token_tracker: crate::context::SessionTokenTracker,
 }
@@ -448,6 +467,11 @@ impl DurableSession {
             pending_workspace_roots: None,
             profile_id: None,
             profile_identity: None,
+            effective_tool_filter: None,
+            effective_approval: None,
+            effective_provider_context: None,
+            effective_model: None,
+            profile_unavailable: None,
             token_tracker: crate::context::SessionTokenTracker::default(),
         }
     }
@@ -1282,7 +1306,7 @@ impl DurableSession {
     pub fn list_enabled_mcp_servers(&self) -> Vec<String> {
         self.mcp_server_enablement
             .iter()
-            .filter(|(_, &enabled)| enabled)
+            .filter(|&(_, enabled)| *enabled)
             .map(|(id, _)| id.clone())
             .collect()
     }

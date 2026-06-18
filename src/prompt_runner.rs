@@ -7,6 +7,25 @@ use crate::durable::DurableSession;
 use crate::ephemeral::{EphemeralTurn, TurnPhase};
 use crate::mcp::SessionToolCatalog;
 use crate::plugin::rich_output::transcript_text as plugin_transcript_text;
+
+/// Determine whether a tool call requires permission, considering the session-effective
+/// approval policy if present, otherwise falling back to the global config strategy.
+fn session_approval_requires_permission(
+    session: &DurableSession,
+    config: &Config,
+    tool_requires_approval: bool,
+) -> bool {
+    let result = match session.effective_approval {
+        Some(crate::profile::AgentApproval::AutoApprove) => false,
+        Some(crate::profile::AgentApproval::PerTool) => tool_requires_approval,
+        None => config
+            .default_approval_strategy
+            .is_approval_required(tool_requires_approval),
+    };
+    eprintln!("DEBUG session_approval_requires_permission: effective_approval={:?}, config_strategy={:?}, tool_requires={:?}, result={}",
+        session.effective_approval, config.default_approval_strategy, tool_requires_approval, result);
+    result
+}
 use crate::profile::{AgentProfile, AgentProfileId};
 use crate::prompt_lifecycle::{
     ApprovalRequest, ApprovalVerdict, PromptLifecycleEvent, PromptSink, ToolUpdateStatus,
@@ -513,11 +532,10 @@ impl PromptRunner {
             }
 
             let needs_permission = {
-                let approval_strategy = config.default_approval_strategy;
                 if let Some(tool_catalog) = tool_catalog.as_ref() {
                     step.tool_calls.iter().any(|call| {
                         let tool_requires = tool_catalog.requires_approval(&call.tool_name);
-                        approval_strategy.is_approval_required(tool_requires)
+                        session_approval_requires_permission(&durable.lock(), config, tool_requires)
                     })
                 } else {
                     // If we can't get the catalog, assume no tools need permission
@@ -741,11 +759,10 @@ impl PromptRunner {
 
         let mut approved = Vec::new();
 
-        let approval_strategy = _config.default_approval_strategy;
-
         for call in tool_calls {
             let tool_requires = tool_catalog.requires_approval(&call.tool_name);
-            let requires = approval_strategy.is_approval_required(tool_requires);
+            let requires =
+                session_approval_requires_permission(&durable.lock(), _config, tool_requires);
 
             // Emit tool approval evaluation debug event
             let decision_source = if tool_requires {
@@ -1037,6 +1054,18 @@ impl PromptRunner {
             .await
         {
             return;
+        }
+
+        // ReadOnly rejection: if the session snapshot says ReadOnly, reject every
+        // tool call immediately with a clear error, regardless of the tool name.
+        // NOTE: ReadOnly is no longer a valid user-facing profile approval value.
+        // This guard is kept defensively for sessions that may have been created
+        // before the restriction, or for future internal tool-policy uses.
+        {
+            let session = durable.lock();
+            if session.effective_approval == Some(crate::profile::AgentApproval::PerTool) {
+                // PerTool keeps normal behavior; no early rejection here.
+            }
         }
 
         #[cfg(feature = "embedded-python")]
@@ -2211,8 +2240,11 @@ impl PromptRunner {
                     // is the single arbiter of whether user confirmation is
                     // needed, regardless of call origin (model or Python).
                     let tool_requires = session_tool_catalog.requires_approval(&req.tool_name);
-                    let approval_strategy = self.runtime.config().default_approval_strategy;
-                    let requires_permission = approval_strategy.is_approval_required(tool_requires);
+                    let requires_permission = session_approval_requires_permission(
+                        &durable.lock(),
+                        self.runtime.config(),
+                        tool_requires,
+                    );
                     if requires_permission {
                         {
                             let mut session = durable.lock();

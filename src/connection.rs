@@ -147,6 +147,10 @@ impl IronConnection {
         *self.client.borrow_mut() = Some(client);
     }
 
+    pub fn profile_registry(&self) -> &Arc<RwLock<ProfileRegistry>> {
+        &self.profile_registry
+    }
+
     fn selected_profile(
         &self,
         session_profile_id: Option<&AgentProfileId>,
@@ -311,12 +315,16 @@ impl IronConnection {
         let sink = AcpPromptSink::new(acp_session_id.clone(), client.clone());
 
         // Apply the selected profile identity layer unless the session already
-        // has explicit instructions.
+        // has explicit instructions. Snapshot profile policy fields so later
+        // edits/deletion of the stored profile do not affect this session.
         let selected_profile = self.selected_profile(session_profile_id)?;
         {
             let mut session = durable.lock();
             if let Some(profile_id) = session_profile_id {
                 session.profile_id = Some(profile_id.clone());
+                // Snapshot tool filter and approval only when a profile is explicitly selected.
+                session.effective_tool_filter = Some(selected_profile.tools.clone());
+                session.effective_approval = Some(selected_profile.approval);
             }
             if session.profile_identity.is_none() {
                 if let Some(ref identity) = selected_profile.identity_prompt {
@@ -340,6 +348,8 @@ impl IronConnection {
                 })
         };
 
+        // Resolve provider for this turn. If the profile specifies an unavailable
+        // provider/model, warn once and fall back to the runtime default.
         let (runner, stop_reason) = if let Some(ref ctx) = stored_context {
             match self.runtime.resolve_managed_provider(ctx).await {
                 Ok(provider) => {
@@ -381,11 +391,27 @@ impl IronConnection {
                         .await;
                     (Some(runner), stop_reason)
                 }
+                Ok(ResolvedProfileProvider::Fallback {
+                    provider: _,
+                    diagnostic,
+                }) => {
+                    warn!(diagnostic = %diagnostic, "Profile provider fallback to runtime default");
+                    {
+                        let mut session = durable.lock();
+                        session.profile_unavailable = Some(diagnostic.clone());
+                    }
+                    let runner = PromptRunner::new(self.runtime.clone());
+                    let stop_reason = runner
+                        .run(&durable, &ephemeral, &sink, &config, max_iterations)
+                        .await;
+                    (Some(runner), stop_reason)
+                }
                 Err(e) => {
                     warn!(error = %e, "Failed to resolve selected profile provider");
                     {
                         let mut session = durable.lock();
                         session.add_agent_text(format!("[Provider error: {}]", e));
+                        session.profile_unavailable = Some(format!("Provider unavailable: {}", e));
                     }
                     (None, acp::StopReason::EndTurn)
                 }

@@ -1489,6 +1489,73 @@ fn deserialize_mcp_transport(
     }
 }
 
+impl ConfigStore {
+    // ============================================================================
+    // Bootstrap Metadata APIs
+    // ============================================================================
+
+    /// Store or replace bootstrap metadata for a domain-scoped key.
+    pub async fn set_bootstrap_metadata(
+        &self,
+        input: &BootstrapMetadataInput,
+    ) -> Result<(), ConfigError> {
+        if input.domain.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "Bootstrap metadata domain must not be empty".to_string(),
+            ));
+        }
+        if input.key.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "Bootstrap metadata key must not be empty".to_string(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO bootstrap_metadata (domain, key, value, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(domain, key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&input.domain)
+        .bind(&input.key)
+        .bind(&input.value)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+        Ok(())
+    }
+
+    /// Get bootstrap metadata value for a domain-scoped key.
+    pub async fn get_bootstrap_metadata(
+        &self,
+        domain: &str,
+        key: &str,
+    ) -> Result<Option<BootstrapMetadataRecord>, ConfigError> {
+        let row = sqlx::query(
+            "SELECT domain, key, value, updated_at FROM bootstrap_metadata WHERE domain = ? AND key = ?",
+        )
+        .bind(domain)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        match row {
+            Some(row) => Ok(Some(BootstrapMetadataRecord {
+                domain: row.get("domain"),
+                key: row.get("key"),
+                value: row.get("value"),
+                updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+            })),
+            None => Ok(None),
+        }
+    }
+}
+
 // ============================================================================
 // Saved Handoff APIs (Issue #69)
 // ============================================================================

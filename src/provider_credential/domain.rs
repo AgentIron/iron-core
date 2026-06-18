@@ -138,7 +138,7 @@ pub enum ProviderAuthError {
 pub type ProviderAuthResult<T> = Result<T, ProviderAuthError>;
 
 /// Context supplied by the client when resolving credentials for a prompt.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderPromptContext {
     /// Provider slug (e.g. "kimi-code", "codex").
     pub provider_slug: ProviderSlug,

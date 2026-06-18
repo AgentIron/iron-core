@@ -806,6 +806,18 @@ impl IronAgent {
         }
     }
 
+    /// Seed the three shipped default profiles (explore, plan, apply) into the
+    /// given config store according to `policy`.
+    ///
+    /// Delegates to [`crate::profile::seed_default_profiles`].
+    pub async fn seed_default_profiles(
+        &self,
+        store: &ConfigStore,
+        policy: crate::profile::DefaultProfileSeedPolicy,
+    ) -> Result<crate::profile::DefaultProfileSeedReport, crate::config::ConfigError> {
+        crate::profile::seed_default_profiles(store, policy).await
+    }
+
     /// Register or replace an agent profile by stable ID.
     ///
     /// Validates the profile name and rejects reserved `default` IDs/names.
@@ -827,6 +839,17 @@ impl IronAgent {
             .ok_or_else(|| format!("invalid profile name: '{}'", profile.name))?;
         if name.eq_ignore_ascii_case("default") {
             return Err("profile name 'default' is reserved".to_string());
+        }
+
+        // Reject ReadOnly and RequireApproval at the registration boundary.
+        if !matches!(
+            profile.approval,
+            AgentApproval::PerTool | AgentApproval::AutoApprove
+        ) {
+            return Err(format!(
+                "invalid profile approval value: {:?}. Only PerTool and AutoApprove are supported.",
+                profile.approval
+            ));
         }
 
         let mut registry = self.profile_registry.write();
@@ -1241,6 +1264,35 @@ impl AgentConnection {
     ) -> Result<AgentSession, RuntimeError> {
         let connection_id = self.inner.id();
         let (session_id, durable) = self.inner.runtime().create_session(connection_id)?;
+
+        // Resolve the profile immediately and snapshot effective policy into the
+        // DurableSession so later edits/deletion of the stored profile do not
+        // affect this session.
+        let registry = self.inner.profile_registry().read();
+        let selected_profile = registry
+            .get(&profile_id)
+            .cloned()
+            .unwrap_or_else(|| AgentProfile {
+                name: profile_id.as_str().to_string(),
+                provider: AgentProfileProvider::RuntimeDefault,
+                tools: ToolFilter::Inherit,
+                skills: SkillFilter::Inherit,
+                approval: AgentApproval::PerTool,
+                identity_prompt: Some(default_identity_prompt().to_string()),
+            });
+        {
+            let mut session = durable.lock();
+            session.profile_id = Some(profile_id.clone());
+            if let Some(ref identity) = selected_profile.identity_prompt {
+                if !identity.trim().is_empty() {
+                    session.set_profile_identity(identity.clone());
+                }
+            }
+            session.effective_tool_filter = Some(selected_profile.tools.clone());
+            session.effective_approval = Some(selected_profile.approval);
+        }
+        drop(registry);
+
         Ok(AgentSession {
             id: session_id,
             durable,
