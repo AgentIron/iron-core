@@ -157,16 +157,18 @@ impl CredentialResolver {
             })
     }
 
-    /// Merge credential support derived from additional provider profiles.
+    /// Rebuild credential support from built-ins plus the given profiles.
     ///
     /// Called by the runtime after loading persisted custom/override provider
-    /// profiles. Entries for the same slug replace any previous mapping.
+    /// profiles. The support map is rebuilt from V1 built-ins first, then
+    /// the provided profiles are applied on top so that removed profiles
+    /// do not leave stale support entries.
     pub fn merge_support_from_profiles(&self, profiles: &[ProviderProfile]) {
-        let updates = build_support_map_from_profiles(profiles);
-        let mut map = self.support_map.lock();
-        for (slug, support) in updates {
-            map.insert(slug, support);
+        let mut rebuilt = build_v1_support_map();
+        for (slug, support) in build_support_map_from_profiles(profiles) {
+            rebuilt.insert(slug, support);
         }
+        *self.support_map.lock() = rebuilt;
     }
 
     /// Resolve a credential for the given prompt context.

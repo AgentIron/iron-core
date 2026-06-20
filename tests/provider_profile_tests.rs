@@ -426,14 +426,18 @@ async fn effective_registry_other_builtins_preserved_after_override() {
 #[tokio::test]
 async fn effective_registry_invalid_profile_skipped() {
     let store = ConfigStore::open_in_memory().await.unwrap();
-    store
-        .set_provider_profile(&ProviderProfileInput {
-            slug: "bad".to_string(),
-            profile_json: "{invalid}".to_string(),
-            source: None,
-        })
-        .await
-        .unwrap();
+
+    // Insert invalid JSON directly via SQL (bypassing set_provider_profile validation)
+    sqlx::query(
+        "INSERT INTO provider_profiles (slug, profile_json, source, created_at, updated_at) VALUES (?, ?, NULL, ?, ?)",
+    )
+    .bind("bad")
+    .bind("{invalid}")
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(store.pool())
+    .await
+    .unwrap();
 
     let registry = build_effective_registry(&store).await.unwrap();
     assert!(!registry.slugs().contains(&"bad"));
@@ -468,6 +472,7 @@ async fn known_provider_slugs_includes_persisted_profiles() {
 
 #[tokio::test]
 async fn credential_support_derived_from_custom_profile() {
+    use iron_core::provider_credential::domain::{ProviderPromptContext, ProviderSlug};
     use iron_core::provider_credential::store::InMemoryCredentialStore;
     use iron_core::provider_credential::CredentialResolver;
 
@@ -494,10 +499,18 @@ async fn credential_support_derived_from_custom_profile() {
 
     resolver.merge_support_from_profiles(&profiles);
 
-    // Verify the resolver now has the updated support map
-    // We test this indirectly by checking that the resolver accepts the merge without error
-    // and that resolution behavior changes accordingly.
-    // The support_for method is private, so we verify via the resolver's resolve() path.
+    // API-key profile: resolve with API key should succeed
+    let api_only = resolver
+        .resolve(
+            &ProviderPromptContext {
+                provider_slug: ProviderSlug::new("api-only"),
+                model: "test-model".to_string(),
+                api_key: Some("sk-test".to_string()),
+            },
+            Some("sk-test".to_string()),
+        )
+        .await;
+    assert!(api_only.is_ok());
 }
 
 #[tokio::test]

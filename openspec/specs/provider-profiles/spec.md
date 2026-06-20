@@ -1,7 +1,7 @@
 # provider-profiles Specification
 
 ## Purpose
-TBD - created by archiving change store-backed-provider-profiles. Update Purpose after archive.
+Define durable custom/override provider profile storage, effective registry merge semantics, import/export rules, and credential/model-catalog integration for store-backed provider profiles in `iron-core`.
 ## Requirements
 ### Requirement: Core SHALL build an effective provider registry from built-ins plus persisted profiles
 `iron-core` SHALL provide a way to construct an effective provider registry by starting with the built-in `iron-providers` registry and applying persisted custom provider profiles and explicit provider profile overrides from the core config store.

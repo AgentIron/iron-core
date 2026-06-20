@@ -699,9 +699,15 @@ impl ConfigStore {
             slugs.insert(slug.to_string());
         }
 
-        // Persisted custom/override provider profiles
+        // Persisted custom/override provider profiles (only valid ones)
         for record in self.list_provider_profiles().await? {
-            slugs.insert(record.slug);
+            if let Ok(profile) =
+                crate::provider_profile::validation::validate_provider_profile(&record.profile_json)
+            {
+                if profile.slug == record.slug {
+                    slugs.insert(record.slug);
+                }
+            }
         }
 
         // Persisted provider configs
@@ -1813,7 +1819,9 @@ impl ConfigStore {
 
     /// Store or replace a provider profile record.
     ///
-    /// Returns `ConfigError::Validation` if the slug is empty.
+    /// Validates the profile payload and enforces slug consistency.
+    /// Returns `ConfigError::Validation` if the slug is empty, the payload
+    /// is invalid, or the payload slug does not match the record slug.
     pub async fn set_provider_profile(
         &self,
         input: &ProviderProfileInput,
@@ -1822,6 +1830,14 @@ impl ConfigStore {
             return Err(ConfigError::Validation(
                 "Provider profile slug must not be empty".to_string(),
             ));
+        }
+        let profile =
+            crate::provider_profile::validation::validate_provider_profile(&input.profile_json)?;
+        if profile.slug != input.slug {
+            return Err(ConfigError::Validation(format!(
+                "Provider profile slug mismatch: record slug '{}' != payload slug '{}'",
+                input.slug, profile.slug
+            )));
         }
         let now = Utc::now().to_rfc3339();
 

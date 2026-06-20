@@ -25,6 +25,14 @@ pub async fn build_effective_registry(
     for record in records {
         match serde_json::from_str::<ProviderProfile>(&record.profile_json) {
             Ok(profile) => {
+                if profile.slug != record.slug {
+                    tracing::warn!(
+                        row_slug = %record.slug,
+                        payload_slug = %profile.slug,
+                        "Stored provider profile slug mismatch; skipping"
+                    );
+                    continue;
+                }
                 let slug = profile.slug.clone();
                 registry.register(profile);
                 tracing::debug!(slug = %slug, "Applied persisted provider profile to effective registry");
@@ -95,13 +103,17 @@ mod tests {
     async fn invalid_profile_skipped() {
         let store = ConfigStore::open_in_memory().await.unwrap();
 
-        // Insert invalid JSON directly (bypassing validation)
-        let input = crate::config::ProviderProfileInput {
-            slug: "bad-profile".to_string(),
-            profile_json: "{not valid}".to_string(),
-            source: None,
-        };
-        store.set_provider_profile(&input).await.unwrap();
+        // Insert invalid JSON directly via SQL (bypassing set_provider_profile validation)
+        sqlx::query(
+            "INSERT INTO provider_profiles (slug, profile_json, source, created_at, updated_at) VALUES (?, ?, NULL, ?, ?)",
+        )
+        .bind("bad-profile")
+        .bind("{not valid}")
+        .bind("2026-01-01T00:00:00Z")
+        .bind("2026-01-01T00:00:00Z")
+        .execute(store.pool())
+        .await
+        .unwrap();
 
         let registry = build_effective_registry(&store).await.unwrap();
         // Built-ins should still be present
