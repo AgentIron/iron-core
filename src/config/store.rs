@@ -686,7 +686,8 @@ impl ConfigStore {
         Ok(())
     }
 
-    /// Return the union of built-in provider slugs and persisted provider config slugs.
+    /// Return the union of built-in provider slugs, persisted custom/override
+    /// provider profile slugs, and persisted provider config slugs.
     pub async fn known_provider_slugs(
         &self,
     ) -> Result<std::collections::HashSet<String>, ConfigError> {
@@ -696,6 +697,11 @@ impl ConfigStore {
         let registry = iron_providers::ProviderRegistry::default();
         for slug in registry.slugs() {
             slugs.insert(slug.to_string());
+        }
+
+        // Persisted custom/override provider profiles
+        for record in self.list_provider_profiles().await? {
+            slugs.insert(record.slug);
         }
 
         // Persisted provider configs
@@ -1799,6 +1805,103 @@ impl ConfigStore {
             .map_err(ConfigError::from)?;
 
         Ok(())
+    }
+
+    // ============================================================================
+    // Provider Profile APIs
+    // ============================================================================
+
+    /// Store or replace a provider profile record.
+    ///
+    /// Returns `ConfigError::Validation` if the slug is empty.
+    pub async fn set_provider_profile(
+        &self,
+        input: &ProviderProfileInput,
+    ) -> Result<(), ConfigError> {
+        if input.slug.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "Provider profile slug must not be empty".to_string(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            r#"
+            INSERT INTO provider_profiles (slug, profile_json, source, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(slug) DO UPDATE SET
+                profile_json = excluded.profile_json,
+                source = excluded.source,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&input.slug)
+        .bind(&input.profile_json)
+        .bind(&input.source)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        Ok(())
+    }
+
+    /// Get a provider profile record by slug.
+    pub async fn get_provider_profile(
+        &self,
+        slug: &str,
+    ) -> Result<Option<ProviderProfileRecord>, ConfigError> {
+        let row = sqlx::query(
+            "SELECT slug, profile_json, source, created_at, updated_at FROM provider_profiles WHERE slug = ?",
+        )
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        match row {
+            Some(row) => Ok(Some(ProviderProfileRecord {
+                slug: row.get("slug"),
+                profile_json: row.get("profile_json"),
+                source: row.get("source"),
+                created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Delete a provider profile record by slug.
+    pub async fn delete_provider_profile(&self, slug: &str) -> Result<(), ConfigError> {
+        sqlx::query("DELETE FROM provider_profiles WHERE slug = ?")
+            .bind(slug)
+            .execute(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+        Ok(())
+    }
+
+    /// List all stored provider profile records, ordered by slug.
+    pub async fn list_provider_profiles(&self) -> Result<Vec<ProviderProfileRecord>, ConfigError> {
+        let rows = sqlx::query(
+            "SELECT slug, profile_json, source, created_at, updated_at FROM provider_profiles ORDER BY slug ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(ProviderProfileRecord {
+                    slug: row.get("slug"),
+                    profile_json: row.get("profile_json"),
+                    source: row.get("source"),
+                    created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                    updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+                })
+            })
+            .collect()
     }
 }
 

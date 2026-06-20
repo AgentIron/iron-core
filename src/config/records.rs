@@ -236,3 +236,21 @@ pub struct SavedHandoffInput {
     pub name: String,
     pub bundle: crate::context::handoff::HandoffBundle,
 }
+
+/// A stored provider profile record (non-secret provider protocol metadata).
+#[derive(Debug, Clone)]
+pub struct ProviderProfileRecord {
+    pub slug: String,
+    pub profile_json: String,
+    pub source: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Input for creating or updating a stored provider profile.
+#[derive(Debug, Clone)]
+pub struct ProviderProfileInput {
+    pub slug: String,
+    pub profile_json: String,
+    pub source: Option<String>,
+}

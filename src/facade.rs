@@ -22,7 +22,7 @@ use crate::{
     },
     tool::Tool,
 };
-use agent_client_protocol::schema as acp;
+use agent_client_protocol::schema::v1 as acp;
 use futures::Stream;
 use iron_providers::Provider;
 use parking_lot::{Mutex, RwLock};
@@ -816,6 +816,19 @@ impl IronAgent {
         policy: crate::profile::DefaultProfileSeedPolicy,
     ) -> Result<crate::profile::DefaultProfileSeedReport, crate::config::ConfigError> {
         crate::profile::seed_default_profiles(store, policy).await
+    }
+
+    /// Load persisted provider profiles from the config store into the runtime's
+    /// effective provider registry.
+    ///
+    /// Built-in provider profiles are preserved; persisted profiles with the
+    /// same slug override built-ins, and persisted profiles with new slugs are
+    /// added. Credential resolver support maps are also updated.
+    pub async fn load_provider_profiles(
+        &self,
+        store: &ConfigStore,
+    ) -> Result<(), crate::config::ConfigError> {
+        self.runtime.load_provider_profiles(store).await
     }
 
     /// Register or replace an agent profile by stable ID.

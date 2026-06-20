@@ -29,7 +29,7 @@ use crate::prompt_lifecycle::{
 };
 use crate::provider_credential::ProviderPromptContext;
 use crate::runtime::IronRuntime;
-use agent_client_protocol::schema as acp;
+use agent_client_protocol::schema::v1 as acp;
 use futures::StreamExt;
 use iron_providers::{Provider, ProviderError, ProviderEvent};
 use parking_lot::Mutex;
@@ -195,6 +195,8 @@ impl PromptRunner {
                 drop(session);
 
                 let tool_registry = self.runtime.tool_registry();
+                let effective_provider_guidance =
+                    self.runtime.resolve_effective_provider_guidance();
                 let mut snapshot = {
                     let session = durable.lock();
                     crate::context::ActiveContextAccountant::estimate_snapshot(
@@ -264,6 +266,7 @@ impl PromptRunner {
                             workspace_roots: Some(&workspace_roots),
                             effective_model: effective_model.as_deref(),
                             profile_identity: profile_identity.as_deref(),
+                            effective_provider_guidance: effective_provider_guidance.as_deref(),
                         },
                         tool_catalog.definitions(),
                     )
@@ -281,6 +284,7 @@ impl PromptRunner {
                             workspace_roots: Some(&workspace_roots),
                             effective_model: effective_model.as_deref(),
                             profile_identity: profile_identity.as_deref(),
+                            effective_provider_guidance: effective_provider_guidance.as_deref(),
                         },
                         &tool_registry,
                     )

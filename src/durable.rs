@@ -1,4 +1,4 @@
-use agent_client_protocol::schema as acp;
+use agent_client_protocol::schema::v1 as acp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap};

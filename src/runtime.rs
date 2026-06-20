@@ -76,6 +76,9 @@ struct RuntimeInner {
     model_capability_registry: RwLock<crate::context::model_switch::ModelCapabilityRegistry>,
     profile_registry: RwLock<Option<Arc<RwLock<ProfileRegistry>>>>,
     stored_prompt_registry: RwLock<Option<Arc<RwLock<StoredPromptRegistry>>>>,
+    /// Effective provider registry: built-ins plus any persisted custom/override
+    /// provider profiles loaded from the config store.
+    provider_registry: RwLock<iron_providers::ProviderRegistry>,
 }
 
 /// Registry of named agent profiles available for delegation and session creation.
@@ -257,6 +260,7 @@ impl IronRuntime {
             ),
             profile_registry: RwLock::new(None),
             stored_prompt_registry: RwLock::new(None),
+            provider_registry: RwLock::new(iron_providers::ProviderRegistry::default()),
         };
 
         let this = Self {
@@ -374,6 +378,7 @@ impl IronRuntime {
             ),
             profile_registry: RwLock::new(None),
             stored_prompt_registry: RwLock::new(None),
+            provider_registry: RwLock::new(iron_providers::ProviderRegistry::default()),
         };
 
         let this = Self {
@@ -516,6 +521,56 @@ impl IronRuntime {
         self.inner.stored_prompt_registry.read().clone()
     }
 
+    /// Load persisted provider profiles from the config store into the runtime's
+    /// effective provider registry.
+    ///
+    /// Built-in provider profiles are preserved; persisted profiles with the same
+    /// slug override built-ins, and persisted profiles with new slugs are added.
+    /// Credential resolver support maps are updated to reflect any custom/override
+    /// profile credential auth metadata.
+    pub async fn load_provider_profiles(
+        &self,
+        store: &crate::config::ConfigStore,
+    ) -> Result<(), crate::config::ConfigError> {
+        let records = store.list_provider_profiles().await?;
+
+        // Build the effective registry from built-ins plus persisted profiles.
+        let registry = crate::provider_profile::build_effective_registry(store).await?;
+        *self.inner.provider_registry.write() = registry;
+
+        // Update the credential resolver's support map with persisted profiles.
+        if let Some(ref resolver) = self.inner.resolver {
+            let profiles: Vec<iron_providers::ProviderProfile> = records
+                .iter()
+                .filter_map(|r| serde_json::from_str(&r.profile_json).ok())
+                .collect();
+            resolver.merge_support_from_profiles(&profiles);
+        }
+
+        Ok(())
+    }
+
+    /// Resolve provider-specific guidance for the configured provider name
+    /// from the effective provider registry.
+    ///
+    /// Returns `None` if no provider name is configured or the provider is
+    /// unknown to the effective registry.
+    pub(crate) fn resolve_effective_provider_guidance(&self) -> Option<String> {
+        let name = self.inner.config.provider_name.as_ref()?;
+        let registry = self.inner.provider_registry.read();
+        match registry.system_prompt_fragment(name) {
+            Ok(fragment) => Some(fragment.to_string()),
+            Err(_) => None,
+        }
+    }
+
+    /// Borrow the effective provider registry (read guard).
+    pub(crate) fn provider_registry(
+        &self,
+    ) -> parking_lot::RwLockReadGuard<'_, iron_providers::ProviderRegistry> {
+        self.inner.provider_registry.read()
+    }
+
     /// Borrow the validated runtime configuration.
     pub fn config(&self) -> &Config {
         &self.inner.config
@@ -543,7 +598,7 @@ impl IronRuntime {
         let runtime_config =
             iron_providers::RuntimeConfig::from_credential(resolved.provider_credential);
 
-        let registry = iron_providers::ProviderRegistry::default();
+        let registry = self.provider_registry();
         let provider = registry
             .get(context.provider_slug.as_str(), runtime_config)
             .map_err(|_e| ProviderAuthError::UnsupportedCredential {
@@ -665,7 +720,7 @@ impl IronRuntime {
         let runtime_config =
             iron_providers::RuntimeConfig::from_credential(resolved.provider_credential);
 
-        let registry = iron_providers::ProviderRegistry::default();
+        let registry = self.provider_registry();
         let provider = registry
             .get(context.provider_slug.as_str(), runtime_config)
             .map_err(|_e| ProviderAuthError::UnsupportedCredential {

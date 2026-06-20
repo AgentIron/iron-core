@@ -119,16 +119,18 @@ pub enum DelegationOutcome {
     Unknown,
 }
 
-impl From<agent_client_protocol::schema::StopReason> for DelegationOutcome {
-    fn from(reason: agent_client_protocol::schema::StopReason) -> Self {
+impl From<agent_client_protocol::schema::v1::StopReason> for DelegationOutcome {
+    fn from(reason: agent_client_protocol::schema::v1::StopReason) -> Self {
         match reason {
-            agent_client_protocol::schema::StopReason::EndTurn => DelegationOutcome::EndTurn,
-            agent_client_protocol::schema::StopReason::Cancelled => DelegationOutcome::Cancelled,
-            agent_client_protocol::schema::StopReason::MaxTurnRequests => {
+            agent_client_protocol::schema::v1::StopReason::EndTurn => DelegationOutcome::EndTurn,
+            agent_client_protocol::schema::v1::StopReason::Cancelled => {
+                DelegationOutcome::Cancelled
+            }
+            agent_client_protocol::schema::v1::StopReason::MaxTurnRequests => {
                 DelegationOutcome::MaxTurnRequests
             }
-            agent_client_protocol::schema::StopReason::MaxTokens
-            | agent_client_protocol::schema::StopReason::Refusal
+            agent_client_protocol::schema::v1::StopReason::MaxTokens
+            | agent_client_protocol::schema::v1::StopReason::Refusal
             | _ => DelegationOutcome::Unknown,
         }
     }

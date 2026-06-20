@@ -12,7 +12,7 @@ use crate::provider_credential::domain::{
 use crate::provider_credential::durable_store::FallibleCredentialStore;
 use crate::provider_credential::oauth::{refresh_access_token, v1_oauth_metadata};
 use crate::provider_credential::store::DynCredentialStore;
-use iron_providers::ProviderCredential;
+use iron_providers::{CredentialKind, ProviderCredential, ProviderProfile};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,23 +29,12 @@ pub struct CredentialSupport {
     pub oauth_bearer: bool,
 }
 
-/// Resolves provider credentials for a prompt from stored state and optional
-/// client-supplied API keys.
+/// Build the V1 credential support map from known built-in provider profiles.
 ///
-/// When a [`FallibleCredentialStore`] is provided, durable store errors are
-/// surfaced as [`ProviderAuthError::StoreError`] rather than being silently
-/// treated as missing credentials.
-pub struct CredentialResolver {
-    store: DynCredentialStore,
-    fallible_store: Option<Arc<dyn FallibleCredentialStore>>,
-    support_map: HashMap<String, CredentialSupport>,
-    http_client: reqwest::Client,
-    status_overrides: Mutex<HashMap<String, ProviderAuthStatus>>,
-}
-
+/// This reflects the credential support of the built-in profiles registered
+/// by `iron-providers::ProviderRegistry::register_builtins()`.
 fn build_v1_support_map() -> HashMap<String, CredentialSupport> {
     let mut map = HashMap::new();
-    // Hardcoded V1 support based on iron-providers built-in profiles.
     // kimi-code supports both API key (x-api-key) and OAuthBearer.
     map.insert(
         "kimi-code".to_string(),
@@ -81,6 +70,42 @@ fn build_v1_support_map() -> HashMap<String, CredentialSupport> {
     map
 }
 
+/// Resolves provider credentials for a prompt from stored state and optional
+/// client-supplied API keys.
+///
+/// When a [`FallibleCredentialStore`] is provided, durable store errors are
+/// surfaced as [`ProviderAuthError::StoreError`] rather than being silently
+/// treated as missing credentials.
+pub struct CredentialResolver {
+    store: DynCredentialStore,
+    fallible_store: Option<Arc<dyn FallibleCredentialStore>>,
+    support_map: Mutex<HashMap<String, CredentialSupport>>,
+    http_client: reqwest::Client,
+    status_overrides: Mutex<HashMap<String, ProviderAuthStatus>>,
+}
+
+/// Build a credential support map by scanning provider profiles.
+///
+/// For each profile, API-key support is derived from whether any
+/// `credential_auth` entry declares [`CredentialKind::ApiKey`], and OAuth
+/// bearer support is derived from whether any entry declares
+/// [`CredentialKind::OAuthBearer`].
+fn build_support_map_from_profiles(
+    profiles: &[ProviderProfile],
+) -> HashMap<String, CredentialSupport> {
+    let mut map = HashMap::new();
+    for profile in profiles {
+        map.insert(
+            profile.slug.to_lowercase(),
+            CredentialSupport {
+                api_key: profile.supports_credential(CredentialKind::ApiKey),
+                oauth_bearer: profile.supports_credential(CredentialKind::OAuthBearer),
+            },
+        );
+    }
+    map
+}
+
 impl CredentialResolver {
     /// Create a new resolver with the given store.
     ///
@@ -90,7 +115,7 @@ impl CredentialResolver {
         Self {
             store,
             fallible_store: None,
-            support_map: build_v1_support_map(),
+            support_map: Mutex::new(build_v1_support_map()),
             http_client: reqwest::Client::new(),
             status_overrides: Mutex::new(HashMap::new()),
         }
@@ -108,7 +133,7 @@ impl CredentialResolver {
         Self {
             store,
             fallible_store: Some(fallible),
-            support_map: build_v1_support_map(),
+            support_map: Mutex::new(build_v1_support_map()),
             http_client: reqwest::Client::new(),
             status_overrides: Mutex::new(HashMap::new()),
         }
@@ -123,12 +148,25 @@ impl CredentialResolver {
 
     fn support_for(&self, slug: &str) -> CredentialSupport {
         self.support_map
+            .lock()
             .get(&slug.to_lowercase())
             .cloned()
             .unwrap_or(CredentialSupport {
                 api_key: true,
                 oauth_bearer: true,
             })
+    }
+
+    /// Merge credential support derived from additional provider profiles.
+    ///
+    /// Called by the runtime after loading persisted custom/override provider
+    /// profiles. Entries for the same slug replace any previous mapping.
+    pub fn merge_support_from_profiles(&self, profiles: &[ProviderProfile]) {
+        let updates = build_support_map_from_profiles(profiles);
+        let mut map = self.support_map.lock();
+        for (slug, support) in updates {
+            map.insert(slug, support);
+        }
     }
 
     /// Resolve a credential for the given prompt context.

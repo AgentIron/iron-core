@@ -22,6 +22,10 @@ pub struct EffectiveToolRequestContext<'a> {
     /// Selected profile identity prompt for the executing agent profile.
     /// When present and non-empty, this is rendered in `## 1. Identity`.
     pub profile_identity: Option<&'a str>,
+    /// Effective provider guidance resolved from the effective provider
+    /// profile. When present, this overrides the built-in registry lookup
+    /// for `## 7. Provider-Specific Guidance`.
+    pub effective_provider_guidance: Option<&'a str>,
 }
 
 struct ComposedInstructionInputs<'a> {
@@ -32,6 +36,7 @@ struct ComposedInstructionInputs<'a> {
     context_pressure: crate::context::ContextPressure,
     workspace_roots: Option<&'a [std::path::PathBuf]>,
     profile_identity: Option<&'a str>,
+    effective_provider_guidance: Option<&'a str>,
 }
 
 /// Build an inference request using an effective tool view.
@@ -86,6 +91,7 @@ pub fn build_inference_request_with_effective_tools(
             context_pressure: context.context_pressure,
             workspace_roots: context.workspace_roots,
             profile_identity: context.profile_identity,
+            effective_provider_guidance: context.effective_provider_guidance,
         },
     );
     if !composed.is_empty() {
@@ -114,6 +120,7 @@ pub fn build_inference_request(
             workspace_roots: None,
             effective_model: None,
             profile_identity: None,
+            effective_provider_guidance: None,
         },
         tool_registry,
     )
@@ -139,6 +146,7 @@ pub fn build_inference_request_with_context(
             workspace_roots: None,
             effective_model: None,
             profile_identity: None,
+            effective_provider_guidance: None,
         },
         tool_registry,
     )
@@ -164,6 +172,7 @@ pub fn build_inference_request_with_repo(
             workspace_roots: None,
             effective_model: None,
             profile_identity: None,
+            effective_provider_guidance: None,
         },
         tool_registry,
     )
@@ -215,6 +224,7 @@ pub fn build_inference_request_with_context_and_repo(
             context_pressure: context.context_pressure,
             workspace_roots: context.workspace_roots,
             profile_identity: context.profile_identity,
+            effective_provider_guidance: context.effective_provider_guidance,
         },
     );
     if !composed.is_empty() {
@@ -254,7 +264,7 @@ fn build_composed_instructions(config: &Config, inputs: ComposedInstructionInput
         inputs.python_exec_available,
     );
 
-    let provider_guidance = resolve_provider_guidance(config);
+    let provider_guidance = resolve_provider_guidance(config, inputs.effective_provider_guidance);
 
     crate::prompt::SystemPromptRenderer::render(&crate::prompt::SystemPromptInputs {
         baseline,
@@ -272,10 +282,16 @@ fn build_composed_instructions(config: &Config, inputs: ComposedInstructionInput
     })
 }
 
-/// Resolve provider-specific guidance from `iron-providers` when a provider name
-/// is configured, falling back to the manually set `provider_guidance` in
-/// `PromptCompositionConfig`.
-fn resolve_provider_guidance(config: &Config) -> Option<String> {
+/// Resolve provider-specific guidance.
+///
+/// When `effective_guidance` is provided (from the effective provider
+/// registry), it takes precedence. Otherwise falls back to the built-in
+/// registry lookup by provider name, then to the manually set
+/// `provider_guidance` in `PromptCompositionConfig`.
+fn resolve_provider_guidance(config: &Config, effective_guidance: Option<&str>) -> Option<String> {
+    if let Some(guidance) = effective_guidance {
+        return Some(guidance.to_string());
+    }
     if let Some(ref name) = config.provider_name {
         let registry = ProviderRegistry::default();
         match registry.system_prompt_fragment(name) {

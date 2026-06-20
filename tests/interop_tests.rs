@@ -10,7 +10,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
-use agent_client_protocol::schema as acp;
+use agent_client_protocol::schema::{v1 as acp, ProtocolVersion};
 
 #[derive(Clone, Copy)]
 struct TestProvider;
@@ -88,7 +88,7 @@ async fn setup_transport() -> (
 
     let _ = transport
         .client()
-        .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
+        .initialize(acp::InitializeRequest::new(ProtocolVersion::LATEST))
         .await
         .unwrap();
 
@@ -280,12 +280,12 @@ fn inprocess_cross_connection_prompt_rejected() {
 
         let _ = transport1
             .client()
-            .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
+            .initialize(acp::InitializeRequest::new(ProtocolVersion::LATEST))
             .await
             .unwrap();
         let _ = transport2
             .client()
-            .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
+            .initialize(acp::InitializeRequest::new(ProtocolVersion::LATEST))
             .await
             .unwrap();
 
@@ -330,12 +330,12 @@ fn inprocess_cross_connection_close_session_rejected() {
 
         let _ = transport1
             .client()
-            .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
+            .initialize(acp::InitializeRequest::new(ProtocolVersion::LATEST))
             .await
             .unwrap();
         let _ = transport2
             .client()
-            .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
+            .initialize(acp::InitializeRequest::new(ProtocolVersion::LATEST))
             .await
             .unwrap();
 
