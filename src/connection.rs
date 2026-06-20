@@ -7,7 +7,7 @@ use crate::prompt_lifecycle::AcpPromptSink;
 use crate::prompt_runner::PromptRunner;
 use crate::provider_credential::domain::ProviderPromptContext;
 use crate::runtime::{ConnectionId, IronRuntime};
-use agent_client_protocol::schema as acp;
+use agent_client_protocol::schema::v1 as acp;
 use parking_lot::RwLock;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -242,7 +242,10 @@ impl IronConnection {
         info!("ACP initialize from client");
 
         let caps = acp::AgentCapabilities::default();
-        Ok(acp::InitializeResponse::new(acp::ProtocolVersion::V1).agent_capabilities(caps))
+        Ok(
+            acp::InitializeResponse::new(agent_client_protocol::schema::ProtocolVersion::V1)
+                .agent_capabilities(caps),
+        )
     }
 
     pub async fn handle_authenticate(

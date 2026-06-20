@@ -9,7 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Instant;
 
-use agent_client_protocol::schema as acp;
+use agent_client_protocol::schema::{v1 as acp, ProtocolVersion};
 
 #[derive(Clone, Copy)]
 struct TestProvider;
@@ -69,7 +69,7 @@ async fn setup() -> InProcessTransport {
     tokio::task::spawn_local(agent_fut);
     let _ = transport
         .client()
-        .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
+        .initialize(acp::InitializeRequest::new(ProtocolVersion::LATEST))
         .await
         .unwrap();
     transport
@@ -92,7 +92,7 @@ fn bench_initialize_round_trip() {
             let start = Instant::now();
             let _ = transport
                 .client()
-                .initialize(acp::InitializeRequest::new(acp::ProtocolVersion::LATEST))
+                .initialize(acp::InitializeRequest::new(ProtocolVersion::LATEST))
                 .await
                 .unwrap();
             durations.push(start.elapsed());

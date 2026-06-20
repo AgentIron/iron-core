@@ -5,7 +5,7 @@ use crate::delegation::ChildApprovalMode;
 use crate::prompt_lifecycle::{
     ApprovalRequest, ApprovalVerdict, PromptLifecycleEvent, PromptSink, ToolUpdateStatus,
 };
-use agent_client_protocol::schema as acp;
+use agent_client_protocol::schema::v1 as acp;
 use std::pin::Pin;
 
 /// A prompt sink for a delegated child session.

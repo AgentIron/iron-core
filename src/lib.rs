@@ -181,6 +181,7 @@ pub mod prompt_lifecycle;
 pub mod prompt_runner;
 pub mod prompt_turn;
 pub mod provider_credential;
+pub mod provider_profile;
 pub mod request_builder;
 pub mod runtime;
 pub mod schema;

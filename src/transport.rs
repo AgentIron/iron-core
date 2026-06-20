@@ -2,7 +2,7 @@
 
 use crate::connection::{ClientChannel, IronConnection};
 use agent_client_protocol as acp;
-use agent_client_protocol::schema as acp_schema;
+use agent_client_protocol::schema::v1 as acp_schema;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;

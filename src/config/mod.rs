@@ -594,8 +594,8 @@ pub use records::{
     BootstrapMetadataInput, BootstrapMetadataRecord, CredentialRecord, CustomModelInput,
     CustomModelRecord, DefaultModelInput, DefaultModelRecord, McpServerConfigInput,
     McpServerConfigRecord, ProfileInput, ProfileRecord, PromptInput, PromptRecord,
-    ProviderConfigInput, ProviderConfigRecord, RuntimeSettingsSnapshot, SavedHandoffInput,
-    SavedHandoffMetadata, SavedHandoffRecord, ScheduleInput, ScheduleRecord, SkillSettingsInput,
-    SkillSettingsRecord,
+    ProviderConfigInput, ProviderConfigRecord, ProviderProfileInput, ProviderProfileRecord,
+    RuntimeSettingsSnapshot, SavedHandoffInput, SavedHandoffMetadata, SavedHandoffRecord,
+    ScheduleInput, ScheduleRecord, SkillSettingsInput, SkillSettingsRecord,
 };
 pub use store::{default_config_path, ConfigStore, OpenOptions};

@@ -12,7 +12,7 @@ use crate::profile::AgentProfile;
 use crate::prompt_runner::PromptRunner;
 use crate::runtime::IronRuntime;
 use crate::tool::ToolDefinition;
-use agent_client_protocol::schema as acp;
+use agent_client_protocol::schema::v1 as acp;
 use std::collections::{HashMap, HashSet};
 
 use crate::mcp::session_catalog::ToolSource;
