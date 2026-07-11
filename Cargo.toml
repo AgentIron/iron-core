@@ -85,6 +85,10 @@ num-traits = { version = "0.2", optional = true }
 default = []
 embedded-python = ["monty", "num-bigint", "num-traits"]
 
+[[bin]]
+name = "agent-iron"
+path = "src/bin/agent_iron.rs"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"

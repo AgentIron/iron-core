@@ -1063,6 +1063,21 @@ impl IronAgent {
         self.stored_prompt_registry.write().unregister(id.trim())
     }
 
+    /// Delete a stored prompt from both the runtime registry and ConfigStore.
+    ///
+    /// Returns `ConfigError::PromptReferencedByTasks` if one or more
+    /// automation tasks reference this prompt. The prompt is removed from
+    /// the in-memory registry only after the durable deletion succeeds.
+    pub async fn delete_stored_prompt(
+        &self,
+        store: &ConfigStore,
+        id: &str,
+    ) -> Result<(), crate::config::ConfigError> {
+        store.delete_prompt(id).await?;
+        self.stored_prompt_registry.write().unregister(id.trim());
+        Ok(())
+    }
+
     /// List all registered stored prompts with deterministic ordering.
     pub fn list_stored_prompts(&self) -> Vec<StoredPromptEntry> {
         self.stored_prompt_registry.read().list()
@@ -1862,6 +1877,20 @@ impl AgentSession {
     /// Returns the terminal [`PromptOutcome`]. For incremental event access,
     /// use [`prompt_stream`](AgentSession::prompt_stream).
     pub async fn prompt(&self, text: &str) -> PromptOutcome {
+        self.try_prompt(text)
+            .await
+            .unwrap_or(PromptOutcome::EndTurn)
+    }
+
+    /// Send a text prompt and await completion, returning errors instead of
+    /// swallowing them.
+    ///
+    /// Unlike [`prompt`](AgentSession::prompt), this method surfaces
+    /// connection-level errors as `Err`. After the prompt completes, callers
+    /// should also check [`profile_unavailable`](AgentSession::profile_unavailable)
+    /// to detect injected provider/auth errors that the runtime converts to
+    /// successful-lookahead completions with error text.
+    pub async fn try_prompt(&self, text: &str) -> Result<PromptOutcome, String> {
         let acp_session_id = acp::SessionId::new(self.id.to_string());
         let request = acp::PromptRequest::new(
             acp_session_id,
@@ -1872,9 +1901,18 @@ impl AgentSession {
             .handle_prompt(request, self.profile_id.as_ref())
             .await
         {
-            Ok(response) => response.stop_reason.into(),
-            Err(_) => PromptOutcome::EndTurn,
+            Ok(response) => Ok(response.stop_reason.into()),
+            Err(e) => Err(format!("prompt failed: {}", e)),
         }
+    }
+
+    /// Returns the profile-unavailable diagnostic if the runtime injected a
+    /// provider/auth error during the last prompt.
+    ///
+    /// When `Some`, the prompt technically completed but the output contains
+    /// injected error text rather than a genuine model response.
+    pub fn profile_unavailable(&self) -> Option<String> {
+        self.durable.lock().profile_unavailable.clone()
     }
 
     /// Send a multimodal prompt and await completion.

@@ -161,8 +161,10 @@
 //! Sync handlers are automatically routed through `spawn_blocking`. Custom async
 //! [`Tool`] implementations must not block the orchestration runtime.
 
+pub mod automation_task;
 pub mod builtin;
 pub mod capability;
+pub mod cli;
 pub mod config;
 pub mod connection;
 pub mod context;
@@ -172,7 +174,9 @@ pub mod durable;
 pub mod embedded_python;
 pub mod ephemeral;
 pub mod error;
+pub mod execution;
 pub mod facade;
+pub mod headless;
 pub mod mcp;
 pub mod plugin;
 pub mod profile;
@@ -219,9 +223,19 @@ pub use durable::{
 };
 pub use ephemeral::{EphemeralTurn, TurnPhase};
 pub use error::{RuntimeError, RuntimeResult};
+pub use execution::{
+    compose_user_goal, effective_skills, effective_tool_filter, is_headless_safe,
+    resolve_profile_for_prompt, resolve_task_execution, AutomationRunError,
+    AutomationRunErrorCategory, AutomationRunResult, AutomationRunStatus, ResolutionError,
+    ResolvedExecutionInput, AUTOMATION_RUN_SCHEMA_VERSION,
+};
 pub use facade::{
     AgentConnection, AgentSession, IronAgent, PermissionRequest, PermissionVerdict, PromptEvent,
     PromptEvents, PromptHandle, PromptOutcome, PromptStatus, ToolResultStatus,
+};
+pub use headless::{
+    bootstrap_headless, compute_effective_tools, extract_final_text, preflight_headless_safety,
+    run_automation, HeadlessBootstrapError, HeadlessRuntime,
 };
 pub use profile::{
     default_identity_prompt, managed_profile_prompt_context, normalize_profile_name, AgentApproval,
