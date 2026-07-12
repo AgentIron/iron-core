@@ -161,22 +161,68 @@ pub fn create_host_scheduler(
 ) -> Result<Box<dyn HostScheduler>, HostSchedulerError> {
     cfg_if::cfg_if! {
         if #[cfg(target_os = "linux")] {
-            Err(HostSchedulerError::PlatformUnavailable(
-                "Linux cron adapter not yet implemented".to_string(),
-            ))
+            use super::platform::cron_adapter::CronHostScheduler;
+            Ok(Box::new(CronHostScheduler::new(Box::new(ProductionCommandRunner))))
         } else if #[cfg(target_os = "macos")] {
-            Err(HostSchedulerError::PlatformUnavailable(
-                "macOS launchd adapter not yet implemented".to_string(),
-            ))
+            use super::platform::launchd::LaunchdHostScheduler;
+            use std::path::PathBuf;
+            let home = std::env::var("HOME").unwrap_or_default();
+            let dir = PathBuf::from(home).join("Library/LaunchAgents");
+            Ok(Box::new(LaunchdHostScheduler::new(Box::new(ProductionCommandRunner), dir)))
         } else if #[cfg(target_os = "windows")] {
-            Err(HostSchedulerError::PlatformUnavailable(
-                "Windows Task Scheduler adapter not yet implemented".to_string(),
-            ))
+            use super::platform::task_scheduler::TaskSchedulerHostScheduler;
+            Ok(Box::new(TaskSchedulerHostScheduler::new(Box::new(ProductionCommandRunner))))
         } else {
             Err(HostSchedulerError::PlatformUnavailable(
                 "unsupported platform".to_string(),
             ))
         }
+    }
+}
+
+/// Production command runner using `tokio::process::Command`.
+pub struct ProductionCommandRunner;
+
+#[async_trait]
+impl CommandRunner for ProductionCommandRunner {
+    async fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+    ) -> Result<CommandOutput, std::io::Error> {
+        let output = tokio::process::Command::new(program)
+            .args(args)
+            .output()
+            .await?;
+        Ok(CommandOutput {
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    }
+
+    async fn run_with_stdin(
+        &self,
+        program: &str,
+        args: &[&str],
+        stdin: &str,
+    ) -> Result<CommandOutput, std::io::Error> {
+        use tokio::io::AsyncWriteExt;
+        let mut child = tokio::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        if let Some(ref mut stdin_handle) = child.stdin {
+            stdin_handle.write_all(stdin.as_bytes()).await?;
+        }
+        let output = child.wait_with_output().await?;
+        Ok(CommandOutput {
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
     }
 }
 
@@ -192,6 +238,14 @@ pub trait CommandRunner: Send + Sync {
         &self,
         program: &str,
         args: &[&str],
+    ) -> Result<CommandOutput, std::io::Error>;
+
+    /// Run a program with stdin input and return the output.
+    async fn run_with_stdin(
+        &self,
+        program: &str,
+        args: &[&str],
+        stdin: &str,
     ) -> Result<CommandOutput, std::io::Error>;
 }
 
@@ -319,10 +373,16 @@ mod tests {
     }
 
     #[test]
-    fn factory_returns_unavailable_on_all_platforms() {
+    fn factory_returns_scheduler_on_supported_platform() {
         let ctx = test_context();
         let result = create_host_scheduler(ctx);
-        assert!(matches!(result, Err(HostSchedulerError::PlatformUnavailable(_))));
+        cfg_if::cfg_if! {
+            if #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))] {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(HostSchedulerError::PlatformUnavailable(_))));
+            }
+        }
     }
 
     #[tokio::test]

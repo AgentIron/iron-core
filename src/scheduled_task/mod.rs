@@ -8,6 +8,7 @@
 pub mod cron;
 pub mod host;
 pub mod manager;
+pub mod platform;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

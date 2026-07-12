@@ -41,30 +41,30 @@
 
 ## 6. Linux Cron Adapter
 
-- [ ] 6.1 Implement marker-delimited owned-block rendering for enabled and commented disabled tasks
-- [ ] 6.2 Implement user-crontab parsing that preserves non-owned content and reports malformed or duplicate owned blocks
-- [ ] 6.3 Implement cron install, replace, enable, disable, list, inspect, and remove through the command-runner boundary
-- [ ] 6.4 Add mixed crontab fixtures covering unrelated entries, multiple owned blocks, malformed markers, disabled tasks, and exact-target removal
-- [ ] 6.5 Verify Linux schedule compilation preserves common cron occurrence semantics without approximation
+- [x] 6.1 Implement marker-delimited owned-block rendering for enabled and commented disabled tasks
+- [x] 6.2 Implement user-crontab parsing that preserves non-owned content and reports malformed or duplicate owned blocks
+- [x] 6.3 Implement cron install, replace, enable, disable, list, inspect, and remove through the command-runner boundary
+- [x] 6.4 Add mixed crontab fixtures covering unrelated entries, multiple owned blocks, malformed markers, disabled tasks, and exact-target removal
+- [x] 6.5 Verify Linux schedule compilation preserves common cron occurrence semantics without approximation
 
 ## 7. macOS Launchd Adapter
 
-- [ ] 7.1 Define bounded faithful cron-to-StartCalendarInterval expansion and actionable unsupported cases
-- [ ] 7.2 Implement owned user LaunchAgent plist rendering and parsing with `com.agentiron.task.` labels
-- [ ] 7.3 Implement launchd install, replace, enable, disable, list, inspect, and remove through injectable boundaries
-- [ ] 7.4 Add plist and command fixtures for multiple intervals, disabled state, drift, corruption, ownership filtering, and expansion limits
+- [x] 7.1 Define bounded faithful cron-to-StartCalendarInterval expansion and actionable unsupported cases
+- [x] 7.2 Implement owned user LaunchAgent plist rendering and parsing with `com.agentiron.task.` labels
+- [x] 7.3 Implement launchd install, replace, enable, disable, list, inspect, and remove through injectable boundaries
+- [x] 7.4 Add plist and command fixtures for multiple intervals, disabled state, drift, corruption, ownership filtering, and expansion limits
 
 ## 8. Windows Task Scheduler Adapter
 
-- [ ] 8.1 Define bounded faithful cron-to-Task-Scheduler-trigger expansion and actionable unsupported cases
-- [ ] 8.2 Implement owned Task Scheduler XML rendering and parsing under `\AgentIron\Tasks\<id>`
-- [ ] 8.3 Implement `schtasks.exe` create, query, enable, disable, delete, list, and inspect operations through the command-runner boundary
-- [ ] 8.4 Add mocked `schtasks.exe` and XML fixtures for multiple triggers, disabled state, drift, corruption, ownership filtering, and expansion limits
+- [x] 8.1 Define bounded faithful cron-to-Task-Scheduler-trigger expansion and actionable unsupported cases
+- [x] 8.2 Implement owned Task Scheduler XML rendering and parsing under `\AgentIron\Tasks\<id>`
+- [x] 8.3 Implement `schtasks.exe` create, query, enable, disable, delete, list, and inspect operations through the command-runner boundary
+- [x] 8.4 Add mocked `schtasks.exe` and XML fixtures for multiple triggers, disabled state, drift, corruption, ownership filtering, and expansion limits
 
 ## 9. Cross-Platform Verification And Documentation
 
-- [ ] 9.1 Add contract tests shared by all host adapters for ownership isolation, faithful-or-fail compilation, disabled retention, and idempotent reconciliation
-- [ ] 9.2 Document local-system-timezone and native daylight-saving behavior plus platform capability failures
-- [ ] 9.3 Document that scheduling accepts automation tasks only and that create-and-schedule UI flows remain two core operations
-- [ ] 9.4 Run formatting, linting, unit tests, integration tests, and supported platform checks
+- [x] 9.1 Add contract tests shared by all host adapters for ownership isolation, faithful-or-fail compilation, disabled retention, and idempotent reconciliation
+- [x] 9.2 Document local-system-timezone and native daylight-saving behavior plus platform capability failures
+- [x] 9.3 Document that scheduling accepts automation tasks only and that create-and-schedule UI flows remain two core operations
+- [x] 9.4 Run formatting, linting, unit tests, integration tests, and supported platform checks
 - [ ] 9.5 File follow-up issues for durable run history, output retention, normalized host run metadata, missed-run policy, concurrent-run policy, credential-session limitations, and executable relocation repair
