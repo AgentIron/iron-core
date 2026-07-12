@@ -3,7 +3,6 @@ use crate::config::records::PromptInput;
 use crate::config::{ConfigError, ConfigStore};
 use crate::scheduled_task::ScheduledTaskInput;
 use serde_json::json;
-use std::path::PathBuf;
 
 async fn setup_store_with_task() -> ConfigStore {
     let store = ConfigStore::open_in_memory().await.unwrap();
@@ -58,19 +57,11 @@ async fn schedule_crud_create_get_list_delete() {
     assert!(schedule.enabled);
     assert_eq!(schedule.created_at, schedule.updated_at);
 
-    let fetched = store
-        .get_scheduled_task("morning")
-        .await
-        .unwrap()
-        .unwrap();
+    let fetched = store.get_scheduled_task("morning").await.unwrap().unwrap();
     assert_eq!(fetched, schedule);
 
     store.delete_scheduled_task("morning").await.unwrap();
-    assert!(store
-        .get_scheduled_task("morning")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(store.get_scheduled_task("morning").await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -133,11 +124,7 @@ async fn schedule_missing_task_rejected() {
         }
         other => panic!("expected UnknownAutomationTask, got {:?}", other),
     }
-    assert!(store
-        .get_scheduled_task("s1")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(store.get_scheduled_task("s1").await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -207,22 +194,14 @@ async fn task_deletion_blocked_when_schedule_references_it() {
         other => panic!("expected TaskReferencedBySchedules, got {:?}", other),
     }
 
-    assert!(store
-        .get_automation_task("task-1")
-        .await
-        .unwrap()
-        .is_some());
+    assert!(store.get_automation_task("task-1").await.unwrap().is_some());
 }
 
 #[tokio::test]
 async fn task_deletion_allowed_when_no_schedule_references_it() {
     let store = setup_store_with_task().await;
     store.delete_automation_task("task-1").await.unwrap();
-    assert!(store
-        .get_automation_task("task-1")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(store.get_automation_task("task-1").await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -248,11 +227,7 @@ async fn schedule_delete_does_not_affect_task() {
         .await
         .unwrap();
     store.delete_scheduled_task("s1").await.unwrap();
-    assert!(store
-        .get_automation_task("task-1")
-        .await
-        .unwrap()
-        .is_some());
+    assert!(store.get_automation_task("task-1").await.unwrap().is_some());
 }
 
 #[tokio::test]

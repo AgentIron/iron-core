@@ -127,11 +127,9 @@ pub fn normalize_task_name(name: &str) -> String {
         if c.is_ascii_alphanumeric() {
             result.push(c);
             prev_was_hyphen = false;
-        } else if c == '-' || c.is_whitespace() {
-            if !prev_was_hyphen && !result.is_empty() {
-                result.push('-');
-                prev_was_hyphen = true;
-            }
+        } else if (c == '-' || c.is_whitespace()) && !prev_was_hyphen && !result.is_empty() {
+            result.push('-');
+            prev_was_hyphen = true;
         }
     }
 
@@ -188,7 +186,10 @@ mod tests {
 
     #[test]
     fn normalize_strips_apostrophe() {
-        assert_eq!(normalize_task_name("Paul's daily brief"), "pauls-daily-brief");
+        assert_eq!(
+            normalize_task_name("Paul's daily brief"),
+            "pauls-daily-brief"
+        );
     }
 
     #[test]

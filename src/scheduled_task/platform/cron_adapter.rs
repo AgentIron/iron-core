@@ -10,9 +10,8 @@
 
 use async_trait::async_trait;
 
-use crate::scheduled_task::cron::CronExpression;
 use crate::scheduled_task::host::{
-    CommandOutput, CommandRunner, HostInstallRequest, HostScheduler, HostSchedulerError,
+    render_command, CommandRunner, HostInstallRequest, HostScheduler, HostSchedulerError,
     ObservedHostEntry,
 };
 use crate::scheduled_task::platform::crontab::{make_block, CronOwnedBlock, ParsedCrontab};
@@ -36,12 +35,22 @@ impl CronHostScheduler {
             .await
             .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
 
-        // crontab -l returns exit code 1 when no crontab exists.
         if output.exit_code == 0 {
-            Ok(output.stdout)
-        } else {
-            Ok(String::new())
+            return Ok(output.stdout);
         }
+
+        // crontab -l exits 1 with "no crontab" on stderr when the user has no
+        // crontab. Only that case is treated as an empty crontab. Any other
+        // non-zero exit (permission denied, command not found, etc.) is a real
+        // failure and must propagate rather than silently erasing the crontab.
+        if output.exit_code == 1 && output.stderr.contains("no crontab") {
+            return Ok(String::new());
+        }
+
+        Err(HostSchedulerError::Io(format!(
+            "crontab -l failed (exit {}): {}",
+            output.exit_code, output.stderr
+        )))
     }
 
     /// Write the full crontab text via stdin.
@@ -91,10 +100,11 @@ impl HostScheduler for CronHostScheduler {
         let mut parsed = self.parse_current().await?;
 
         // The cron expression maps directly to crontab syntax.
+        let command = render_command(&request.program, &request.args);
         let block = make_block(
             &request.schedule_id,
             request.cron.as_str(),
-            &request.command,
+            &command,
             request.enabled,
         );
 
@@ -153,14 +163,47 @@ impl HostScheduler for CronHostScheduler {
 /// Mock command runner that simulates crontab interactions.
 #[cfg(test)]
 struct MockCrontabRunner {
-    crontab_content: parking_lot::Mutex<Option<String>>,
+    state: parking_lot::Mutex<MockCrontabState>,
 }
+
+/// Simulated crontab state for the mock runner.
+#[cfg(test)]
+#[derive(Clone)]
+enum MockCrontabState {
+    /// Active crontab with content.
+    Content(String),
+    /// No crontab for the user (exit 1, "no crontab").
+    Absent,
+    /// `crontab -l` fails with the given exit code and stderr. Used to
+    /// simulate permission errors and other non-"no crontab" failures.
+    ReadError { exit_code: i32, stderr: String },
+}
+
+#[cfg(test)]
+use crate::scheduled_task::cron::CronExpression;
+#[cfg(test)]
+use crate::scheduled_task::host::CommandOutput;
 
 #[cfg(test)]
 impl MockCrontabRunner {
     fn new(initial: Option<&str>) -> Self {
+        let state = match initial {
+            Some(text) => MockCrontabState::Content(text.to_string()),
+            None => MockCrontabState::Absent,
+        };
         Self {
-            crontab_content: parking_lot::Mutex::new(initial.map(|s| s.to_string())),
+            state: parking_lot::Mutex::new(state),
+        }
+    }
+
+    /// Create a runner where `crontab -l` fails with the given exit code
+    /// and stderr (e.g. a permission error with exit code 2).
+    fn with_read_error(exit_code: i32, stderr: &str) -> Self {
+        Self {
+            state: parking_lot::Mutex::new(MockCrontabState::ReadError {
+                exit_code,
+                stderr: stderr.to_string(),
+            }),
         }
     }
 }
@@ -168,26 +211,27 @@ impl MockCrontabRunner {
 #[cfg(test)]
 #[async_trait]
 impl CommandRunner for MockCrontabRunner {
-    async fn run(
-        &self,
-        program: &str,
-        args: &[&str],
-    ) -> Result<CommandOutput, std::io::Error> {
+    async fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput, std::io::Error> {
         assert_eq!(program, "crontab");
 
         match args {
             ["-l"] => {
-                let content = self.crontab_content.lock();
-                match &*content {
-                    Some(text) => Ok(CommandOutput {
+                let state = self.state.lock().clone();
+                match state {
+                    MockCrontabState::Content(text) => Ok(CommandOutput {
                         exit_code: 0,
-                        stdout: text.clone(),
+                        stdout: text,
                         stderr: String::new(),
                     }),
-                    None => Ok(CommandOutput {
+                    MockCrontabState::Absent => Ok(CommandOutput {
                         exit_code: 1,
                         stdout: String::new(),
-                        stderr: "no crontab".to_string(),
+                        stderr: "no crontab for user".to_string(),
+                    }),
+                    MockCrontabState::ReadError { exit_code, stderr } => Ok(CommandOutput {
+                        exit_code,
+                        stdout: String::new(),
+                        stderr,
                     }),
                 }
             }
@@ -208,7 +252,7 @@ impl CommandRunner for MockCrontabRunner {
         assert_eq!(program, "crontab");
         assert_eq!(args, &["-"]);
 
-        *self.crontab_content.lock() = Some(stdin.to_string());
+        *self.state.lock() = MockCrontabState::Content(stdin.to_string());
 
         Ok(CommandOutput {
             exit_code: 0,
@@ -232,12 +276,14 @@ mod tests {
             runner_executable: std::path::PathBuf::from("/usr/local/bin/agent-iron"),
             config_store_path: std::path::PathBuf::from("/home/user/.config/agentiron/config.db"),
         };
+        let (program, args) = ctx.generate_invocation("task-1");
         HostInstallRequest {
             schedule_id: id.to_string(),
             automation_task_id: "task-1".to_string(),
             cron: CronExpression::parse(cron).unwrap(),
             enabled,
-            command: ctx.generate_command("task-1"),
+            program,
+            args,
         }
     }
 
@@ -254,7 +300,11 @@ mod tests {
         assert_eq!(entry.schedule_id, "s1");
         assert!(entry.enabled);
         assert_eq!(entry.raw_schedule.as_deref(), Some("0 9 * * *"));
-        assert!(entry.observed_command.as_deref().unwrap().contains("run task-1"));
+        assert!(entry
+            .observed_command
+            .as_deref()
+            .unwrap()
+            .contains("run task-1"));
     }
 
     #[tokio::test]
@@ -386,5 +436,17 @@ mod tests {
 
         let entry = scheduler.inspect("s1").await.unwrap().unwrap();
         assert!(entry.enabled);
+    }
+
+    #[tokio::test]
+    async fn read_permission_error_propagates() {
+        // Exit code 2 (e.g. permission denied) must not be treated as an empty
+        // crontab; it must propagate as an error.
+        let runner = MockCrontabRunner::with_read_error(2, "crontab: permission denied");
+        let scheduler = CronHostScheduler::new(Box::new(runner));
+
+        let result = scheduler.list_owned().await;
+        assert!(result.is_err());
+        assert!(matches!(result, Err(HostSchedulerError::Io(_))));
     }
 }

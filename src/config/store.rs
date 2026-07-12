@@ -2105,9 +2105,9 @@ impl ConfigStore {
         match row {
             Some(row) => {
                 let schema_version: i64 = row.get("schema_version");
-                if schema_version != AUTOMATION_TASK_SCHEMA_VERSION {
+                if !(1..=AUTOMATION_TASK_SCHEMA_VERSION).contains(&schema_version) {
                     return Err(ConfigError::Deserialization(format!(
-                        "automation task '{}' has unsupported schema version {} (expected {})",
+                        "automation task '{}' has unsupported schema version {} (supported 1..={})",
                         id, schema_version, AUTOMATION_TASK_SCHEMA_VERSION
                     )));
                 }
@@ -2117,9 +2117,7 @@ impl ConfigStore {
                     normalized_name: row.get("normalized_name"),
                     stored_prompt_id: row.get("stored_prompt_id"),
                     expected_outcome: row.get("expected_outcome"),
-                    project_root: std::path::PathBuf::from(
-                        row.get::<String, _>("project_root"),
-                    ),
+                    project_root: std::path::PathBuf::from(row.get::<String, _>("project_root")),
                     timeout_seconds: row.get::<i64, _>("timeout_seconds") as u64,
                     created_at: parse_datetime(row.get::<String, _>("created_at"))?,
                     updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
@@ -2148,9 +2146,9 @@ impl ConfigStore {
         rows.into_iter()
             .map(|row| {
                 let schema_version: i64 = row.get("schema_version");
-                if schema_version != AUTOMATION_TASK_SCHEMA_VERSION {
+                if !(1..=AUTOMATION_TASK_SCHEMA_VERSION).contains(&schema_version) {
                     return Err(ConfigError::Deserialization(format!(
-                        "automation task '{}' has unsupported schema version {} (expected {})",
+                        "automation task '{}' has unsupported schema version {} (supported 1..={})",
                         row.get::<String, _>("id"),
                         schema_version,
                         AUTOMATION_TASK_SCHEMA_VERSION
@@ -2162,9 +2160,7 @@ impl ConfigStore {
                     normalized_name: row.get("normalized_name"),
                     stored_prompt_id: row.get("stored_prompt_id"),
                     expected_outcome: row.get("expected_outcome"),
-                    project_root: std::path::PathBuf::from(
-                        row.get::<String, _>("project_root"),
-                    ),
+                    project_root: std::path::PathBuf::from(row.get::<String, _>("project_root")),
                     timeout_seconds: row.get::<i64, _>("timeout_seconds") as u64,
                     created_at: parse_datetime(row.get::<String, _>("created_at"))?,
                     updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
@@ -2346,10 +2342,8 @@ impl ConfigStore {
             if schema_version != SCHEDULED_TASK_SCHEMA_VERSION {
                 continue;
             }
-            if let Ok(task) = deserialize_schedule_row(&row) {
-                if let Some(task) = task {
-                    result.push(task);
-                }
+            if let Ok(Some(task)) = deserialize_schedule_row(&row) {
+                result.push(task);
             }
         }
         Ok(result)
@@ -2427,6 +2421,10 @@ where
 }
 
 /// Deserialize a schedule table row into a typed `ScheduledTask`.
+///
+/// Returns `Ok(None)` only if the record's schema version is not a typed
+/// schedule version (i.e. it predates typed schedules). Malformed payloads
+/// with the correct schema version surface as `Err(Deserialization(...))`.
 fn deserialize_schedule_row(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<Option<crate::scheduled_task::ScheduledTask>, ConfigError> {
@@ -2434,27 +2432,28 @@ fn deserialize_schedule_row(
 
     let id: String = row.get("id");
     let payload_str: String = row.get("payload");
-    let payload: serde_json::Value = match serde_json::from_str(&payload_str) {
-        Ok(v) => v,
-        Err(_) => return Ok(None),
-    };
+    let payload: serde_json::Value = serde_json::from_str(&payload_str).map_err(|e| {
+        ConfigError::Deserialization(format!("schedule '{}' has malformed JSON: {}", id, e))
+    })?;
 
     let automation_task_id = payload
         .get("automation_task_id")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .ok_or_else(|| {
+            ConfigError::Deserialization(format!("schedule '{}' missing automation_task_id", id))
+        })?;
+
     let cron_expression = payload
         .get("cron_expression")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .ok_or_else(|| {
+            ConfigError::Deserialization(format!("schedule '{}' missing cron_expression", id))
+        })?;
+
     let enabled = payload
         .get("enabled")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-
-    if automation_task_id.is_empty() || cron_expression.is_empty() {
-        return Ok(None);
-    }
 
     Ok(Some(crate::scheduled_task::ScheduledTask {
         id,

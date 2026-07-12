@@ -8,7 +8,6 @@
 //! tested here. The actual `schtasks.exe` execution requires Windows.
 
 use async_trait::async_trait;
-use std::path::PathBuf;
 
 use crate::scheduled_task::cron::CronExpression;
 use crate::scheduled_task::host::{
@@ -49,8 +48,7 @@ pub fn expand_cron(cron: &CronExpression) -> Result<TaskTrigger, String> {
     // fields are omitted from the XML rendering entirely.
     let dom_in_xml = if doms.len() < 31 { doms.len() } else { 0 };
     let month_in_xml = if months.len() < 12 { months.len() } else { 0 };
-    let total_xml_values =
-        minutes.len() + hours.len() + dom_in_xml + month_in_xml + dows.len();
+    let total_xml_values = minutes.len() + hours.len() + dom_in_xml + month_in_xml + dows.len();
     if total_xml_values > MAX_TRIGGERS {
         return Err(format!(
             "cron expression has too many field values ({}, max {}); \
@@ -73,8 +71,13 @@ pub fn expand_cron(cron: &CronExpression) -> Result<TaskTrigger, String> {
 // ============================================================================
 
 /// Render a complete Task Scheduler XML definition.
+///
+/// Each unique `(minute, hour)` pair becomes its own `<CalendarTrigger>` with
+/// a `<StartBoundary>` encoding the time of day. Day-of-week restrictions are
+/// emitted as `<ScheduleByWeek>`, day-of-month restrictions as
+/// `<ScheduleByMonth>`. When cron restricts **both** DOM and DOW (OR
+/// semantics), two independent triggers are emitted.
 pub fn render_task_xml(
-    schedule_id: &str,
     trigger: &TaskTrigger,
     executable: &str,
     arguments: &str,
@@ -82,44 +85,53 @@ pub fn render_task_xml(
 ) -> String {
     let mut xml = String::new();
     xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n");
-    xml.push_str("<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n");
+    xml.push_str(
+        "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n",
+    );
 
     // Triggers
     xml.push_str("  <Triggers>\n");
-    xml.push_str("    <CalendarTrigger>\n");
 
-    // Schedule by day of month
-    xml.push_str("      <ScheduleByMonth>\n");
+    let dom_restricted = !trigger.days_of_month.is_empty() && trigger.days_of_month.len() < 31;
+    let dow_restricted = !trigger.days_of_week.is_empty() && trigger.days_of_week.len() < 7;
+    let months_restricted = !trigger.months.is_empty() && trigger.months.len() < 12;
 
-    // Days of month
-    if trigger.days_of_month.len() < 31 {
-        xml.push_str("        <DaysOfMonth>\n");
-        for &d in &trigger.days_of_month {
-            xml.push_str(&format!("          <Day>{}</Day>\n", d));
+    for &hour in &trigger.hours {
+        for &minute in &trigger.minutes {
+            let boundary = format!("2024-01-01T{:02}:{:02}:00", hour, minute);
+
+            if dom_restricted {
+                let body = render_schedule_by_month(
+                    &trigger.days_of_month,
+                    months_restricted,
+                    &trigger.months,
+                );
+                xml.push_str(&render_calendar_trigger(&boundary, &body));
+            }
+            if dow_restricted {
+                let body = render_schedule_by_week(
+                    &trigger.days_of_week,
+                    months_restricted,
+                    &trigger.months,
+                );
+                xml.push_str(&render_calendar_trigger(&boundary, &body));
+            }
+            // No day-of-week or day-of-month restriction: a plain daily
+            // trigger that fires at the given StartBoundary.
+            if !dom_restricted && !dow_restricted {
+                xml.push_str(&render_calendar_trigger(&boundary, ""));
+            }
         }
-        xml.push_str("        </DaysOfMonth>\n");
     }
 
-    // Months
-    if trigger.months.len() < 12 {
-        xml.push_str("        <Months>\n");
-        for &m in &trigger.months {
-            let month_name = month_name(m);
-            xml.push_str(&format!("          <{}/>\n", month_name));
-        }
-        xml.push_str("        </Months>\n");
-    }
-
-    xml.push_str("      </ScheduleByMonth>\n");
-    xml.push_str("    </CalendarTrigger>\n");
     xml.push_str("  </Triggers>\n");
 
     // Settings
     xml.push_str("  <Settings>\n");
-    if !enabled {
-        xml.push_str("    <Enabled>false</Enabled>\n");
-    } else {
+    if enabled {
         xml.push_str("    <Enabled>true</Enabled>\n");
+    } else {
+        xml.push_str("    <Enabled>false</Enabled>\n");
     }
     xml.push_str("    <AllowStartIfOnBatteries>true</AllowStartIfOnBatteries>\n");
     xml.push_str("    <DontStopIfGoingOnBatteries>true</DontStopIfGoingOnBatteries>\n");
@@ -129,13 +141,80 @@ pub fn render_task_xml(
     // Actions
     xml.push_str("  <Actions Context=\"Author\">\n");
     xml.push_str("    <Exec>\n");
-    xml.push_str(&format!("      <Command>{}</Command>\n", escape_xml(executable)));
-    xml.push_str(&format!("      <Arguments>{}</Arguments>\n", escape_xml(arguments)));
+    xml.push_str(&format!(
+        "      <Command>{}</Command>\n",
+        escape_xml(executable)
+    ));
+    xml.push_str(&format!(
+        "      <Arguments>{}</Arguments>\n",
+        escape_xml(arguments)
+    ));
     xml.push_str("    </Exec>\n");
     xml.push_str("  </Actions>\n");
 
     xml.push_str("</Task>\n");
     xml
+}
+
+/// Render a single `<CalendarTrigger>` with the given start boundary and
+/// optional schedule body.
+fn render_calendar_trigger(boundary: &str, schedule_body: &str) -> String {
+    let mut s = String::new();
+    s.push_str("    <CalendarTrigger>\n");
+    s.push_str(&format!(
+        "      <StartBoundary>{}</StartBoundary>\n",
+        boundary
+    ));
+    if !schedule_body.is_empty() {
+        s.push_str(schedule_body);
+    }
+    s.push_str("    </CalendarTrigger>\n");
+    s
+}
+
+/// Render a `<ScheduleByMonth>` body containing days of month and optional
+/// months.
+fn render_schedule_by_month(doms: &[u32], include_months: bool, months: &[u32]) -> String {
+    let mut s = String::new();
+    s.push_str("      <ScheduleByMonth>\n");
+    s.push_str("        <DaysOfMonth>\n");
+    for &d in doms {
+        s.push_str(&format!("          <Day>{}</Day>\n", d));
+    }
+    s.push_str("        </DaysOfMonth>\n");
+    if include_months {
+        s.push_str(&render_months(months));
+    }
+    s.push_str("      </ScheduleByMonth>\n");
+    s
+}
+
+/// Render a `<ScheduleByWeek>` body containing days of week and optional
+/// months. Cron day-of-week values use 0=Sunday through 6=Saturday.
+fn render_schedule_by_week(dows: &[u32], include_months: bool, months: &[u32]) -> String {
+    let mut s = String::new();
+    s.push_str("      <ScheduleByWeek>\n");
+    s.push_str("        <DaysOfWeek>\n");
+    for &d in dows {
+        s.push_str(&format!("          <{}/>\n", weekday_name(d)));
+    }
+    s.push_str("        </DaysOfWeek>\n");
+    if include_months {
+        s.push_str(&render_months(months));
+    }
+    s.push_str("      </ScheduleByWeek>\n");
+    s
+}
+
+/// Render a `<Months>` block from month numbers (1-12).
+fn render_months(months: &[u32]) -> String {
+    let mut s = String::new();
+    s.push_str("        <Months>\n");
+    for &m in months {
+        s.push_str(&format!("          <{}/>\n", month_name(m)));
+    }
+    s.push_str("        </Months>\n");
+    s
 }
 
 fn month_name(m: u32) -> &'static str {
@@ -153,6 +232,21 @@ fn month_name(m: u32) -> &'static str {
         11 => "November",
         12 => "December",
         _ => "January",
+    }
+}
+
+/// Map a cron day-of-week value to the Task Scheduler weekday element name.
+/// Cron uses 0=Sunday through 6=Saturday.
+fn weekday_name(dow: u32) -> &'static str {
+    match dow {
+        0 => "Sunday",
+        1 => "Monday",
+        2 => "Tuesday",
+        3 => "Wednesday",
+        4 => "Thursday",
+        5 => "Friday",
+        6 => "Saturday",
+        _ => "Sunday",
     }
 }
 
@@ -180,13 +274,6 @@ impl TaskSchedulerHostScheduler {
     pub fn new(runner: Box<dyn CommandRunner>) -> Self {
         Self { runner }
     }
-
-    fn split_command(command: &str) -> (&str, String) {
-        let mut parts = command.splitn(2, ' ');
-        let exe = parts.next().unwrap_or(command);
-        let args = parts.next().unwrap_or("");
-        (exe, args.to_string())
-    }
 }
 
 #[async_trait]
@@ -203,12 +290,11 @@ impl HostScheduler for TaskSchedulerHostScheduler {
             }
         })?;
 
-        let (exe, args) = Self::split_command(&request.command);
+        let arguments = request.args.join(" ");
         let xml = render_task_xml(
-            &request.schedule_id,
             &trigger,
-            exe,
-            &args,
+            &request.program.display().to_string(),
+            &arguments,
             request.enabled,
         );
 
@@ -265,7 +351,10 @@ impl HostScheduler for TaskSchedulerHostScheduler {
     async fn list_owned(&self) -> Result<Vec<ObservedHostEntry>, HostSchedulerError> {
         let output = self
             .runner
-            .run("schtasks.exe", &["/Query", "/TN", TASK_FOLDER, "/FO", "CSV"])
+            .run(
+                "schtasks.exe",
+                &["/Query", "/TN", TASK_FOLDER, "/FO", "CSV"],
+            )
             .await
             .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
 
@@ -346,15 +435,15 @@ mod tests {
 
     #[test]
     fn render_xml_basic() {
+        // Daily at 9:00 with no weekday or day-of-month restriction.
         let trigger = TaskTrigger {
             minutes: vec![0],
             hours: vec![9],
-            days_of_month: vec![1],
-            months: vec![1],
+            days_of_month: vec![],
+            months: vec![],
             days_of_week: vec![],
         };
         let xml = render_task_xml(
-            "s1",
             &trigger,
             r"C:\agent-iron.exe",
             "run task-1 --config C:\\config.db",
@@ -362,10 +451,88 @@ mod tests {
         );
         assert!(xml.contains("<Task"));
         assert!(xml.contains("<CalendarTrigger>"));
-        assert!(xml.contains("<Day>1</Day>"));
-        assert!(xml.contains("<January/>"));
+        assert!(xml.contains("<StartBoundary>2024-01-01T09:00:00</StartBoundary>"));
+        // No day restriction: neither schedule element should be emitted.
+        assert!(!xml.contains("<ScheduleByMonth>"));
+        assert!(!xml.contains("<ScheduleByWeek>"));
         assert!(xml.contains("<Enabled>true</Enabled>"));
         assert!(xml.contains(r"C:\agent-iron.exe"));
+        assert!(xml.contains("run task-1"));
+    }
+
+    #[test]
+    fn render_xml_weekdays() {
+        // `0 9 * * 1-5` — weekdays only at 9:00 AM.
+        let trigger = TaskTrigger {
+            minutes: vec![0],
+            hours: vec![9],
+            days_of_month: vec![],
+            months: vec![],
+            days_of_week: vec![1, 2, 3, 4, 5],
+        };
+        let xml = render_task_xml(&trigger, "agent-iron.exe", "run t1", true);
+        assert!(xml.contains("<StartBoundary>2024-01-01T09:00:00</StartBoundary>"));
+        assert!(xml.contains("<ScheduleByWeek>"));
+        assert!(xml.contains("<DaysOfWeek>"));
+        assert!(xml.contains("<Monday/>"));
+        assert!(xml.contains("<Friday/>"));
+        assert!(!xml.contains("<Sunday/>"));
+        assert!(!xml.contains("<ScheduleByMonth>"));
+    }
+
+    #[test]
+    fn render_xml_dom_and_months() {
+        // Day of month and month restriction, no weekday restriction.
+        let trigger = TaskTrigger {
+            minutes: vec![30],
+            hours: vec![5],
+            days_of_month: vec![1, 15],
+            months: vec![1, 6],
+            days_of_week: vec![],
+        };
+        let xml = render_task_xml(&trigger, "agent-iron.exe", "run t1", true);
+        assert!(xml.contains("<StartBoundary>2024-01-01T05:30:00</StartBoundary>"));
+        assert!(xml.contains("<ScheduleByMonth>"));
+        assert!(xml.contains("<Day>1</Day>"));
+        assert!(xml.contains("<Day>15</Day>"));
+        assert!(xml.contains("<January/>"));
+        assert!(xml.contains("<June/>"));
+        assert!(!xml.contains("<ScheduleByWeek>"));
+    }
+
+    #[test]
+    fn render_xml_dom_and_dow_emits_two_triggers() {
+        // Both DOM and DOW restricted — cron OR semantics produce two triggers.
+        let trigger = TaskTrigger {
+            minutes: vec![0],
+            hours: vec![12],
+            days_of_month: vec![1],
+            months: vec![],
+            days_of_week: vec![1],
+        };
+        let xml = render_task_xml(&trigger, "agent-iron.exe", "run t1", true);
+        // Exactly two CalendarTrigger blocks for the single time pair.
+        let trigger_count = xml.matches("<CalendarTrigger>").count();
+        assert_eq!(trigger_count, 2);
+        assert!(xml.contains("<ScheduleByMonth>"));
+        assert!(xml.contains("<ScheduleByWeek>"));
+        assert!(xml.contains("<Monday/>"));
+        assert!(xml.contains("<Day>1</Day>"));
+    }
+
+    #[test]
+    fn render_xml_multiple_times() {
+        // Two times expand to two triggers.
+        let trigger = TaskTrigger {
+            minutes: vec![0, 30],
+            hours: vec![9],
+            days_of_month: vec![],
+            months: vec![],
+            days_of_week: vec![],
+        };
+        let xml = render_task_xml(&trigger, "agent-iron.exe", "run t1", true);
+        assert!(xml.contains("<StartBoundary>2024-01-01T09:00:00</StartBoundary>"));
+        assert!(xml.contains("<StartBoundary>2024-01-01T09:30:00</StartBoundary>"));
     }
 
     #[test]
@@ -377,7 +544,7 @@ mod tests {
             months: vec![],
             days_of_week: vec![],
         };
-        let xml = render_task_xml("s1", &trigger, "agent-iron.exe", "run t1", false);
+        let xml = render_task_xml(&trigger, "agent-iron.exe", "run t1", false);
         assert!(xml.contains("<Enabled>false</Enabled>"));
     }
 
@@ -390,7 +557,7 @@ mod tests {
             months: vec![],
             days_of_week: vec![],
         };
-        let xml = render_task_xml("s1", &trigger, "normal", "arg <test> & stuff", true);
+        let xml = render_task_xml(&trigger, "normal", "arg <test> & stuff", true);
         assert!(xml.contains("&lt;test&gt;"));
         assert!(xml.contains("&amp; stuff"));
     }

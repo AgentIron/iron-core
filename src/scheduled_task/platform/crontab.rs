@@ -55,11 +55,7 @@ impl CronOwnedBlock {
         } else {
             format!(
                 "{}\n{}{}:disabled\n# {}\n{}\n",
-                begin,
-                MARKER_PREFIX,
-                self.schedule_id,
-                cron_line,
-                end
+                begin, MARKER_PREFIX, self.schedule_id, cron_line, end
             )
         }
     }
@@ -100,10 +96,7 @@ pub enum CrontabSegment {
     /// Non-owned lines, preserved as-is.
     Other(String),
     /// A malformed owned block (unbalanced or duplicate markers).
-    Malformed {
-        schedule_id: String,
-        raw: String,
-    },
+    Malformed { schedule_id: String, raw: String },
 }
 
 impl ParsedCrontab {
@@ -131,12 +124,7 @@ impl ParsedCrontab {
                     Some(ei) => {
                         let is_duplicate = !seen_ids.insert(sid.clone());
                         let block_lines = &lines[i + 1..ei];
-                        let raw_block: String = lines[i..=ei]
-                            .iter()
-                            .copied()
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                            + "\n";
+                        let raw_block: String = lines[i..=ei].to_vec().join("\n") + "\n";
 
                         if is_duplicate {
                             segments.push(CrontabSegment::Malformed {
@@ -155,12 +143,7 @@ impl ParsedCrontab {
                     }
                     None => {
                         // No end marker — everything from here to EOF is malformed.
-                        let raw_block: String = lines[i..]
-                            .iter()
-                            .copied()
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                            + "\n";
+                        let raw_block: String = lines[i..].to_vec().join("\n") + "\n";
                         segments.push(CrontabSegment::Malformed {
                             schedule_id: sid,
                             raw: raw_block,
@@ -208,12 +191,18 @@ impl ParsedCrontab {
     pub fn contains_id(&self, schedule_id: &str) -> bool {
         self.segments.iter().any(|s| match s {
             CrontabSegment::Owned(b) => b.schedule_id == schedule_id,
-            CrontabSegment::Malformed { schedule_id: sid, .. } => sid == schedule_id,
+            CrontabSegment::Malformed {
+                schedule_id: sid, ..
+            } => sid == schedule_id,
             _ => false,
         })
     }
 
     /// Insert or replace an owned block, preserving non-owned content.
+    ///
+    /// Only matching `Owned` segments are replaced in place. `Malformed`
+    /// segments are never replaced: their content may include unrelated
+    /// text, so a new `Owned` block is appended instead.
     pub fn upsert(&mut self, block: CronOwnedBlock) {
         let mut new_segments = Vec::new();
         let mut inserted = false;
@@ -222,13 +211,6 @@ impl ParsedCrontab {
             match &seg {
                 CrontabSegment::Owned(existing) if existing.schedule_id == block.schedule_id => {
                     // Replace in place.
-                    new_segments.push(CrontabSegment::Owned(block.clone()));
-                    inserted = true;
-                }
-                CrontabSegment::Malformed {
-                    schedule_id: sid, ..
-                } if sid == &block.schedule_id => {
-                    // Replace malformed block too.
                     new_segments.push(CrontabSegment::Owned(block.clone()));
                     inserted = true;
                 }
@@ -247,13 +229,14 @@ impl ParsedCrontab {
 
     /// Remove an owned block by schedule ID. Returns true if something was
     /// removed.
+    ///
+    /// Only `Owned` segments are removed. `Malformed` segments are preserved
+    /// because their content may include unrelated text that we cannot
+    /// safely delete.
     pub fn remove(&mut self, schedule_id: &str) -> bool {
         let before = self.segments.len();
         self.segments.retain(|s| match s {
             CrontabSegment::Owned(b) => b.schedule_id != schedule_id,
-            CrontabSegment::Malformed {
-                schedule_id: sid, ..
-            } => sid != schedule_id,
             _ => true,
         });
         self.segments.len() < before
@@ -275,9 +258,7 @@ impl ParsedCrontab {
         self.segments
             .iter()
             .filter_map(|s| match s {
-                CrontabSegment::Malformed { schedule_id, raw } => {
-                    Some((schedule_id, raw))
-                }
+                CrontabSegment::Malformed { schedule_id, raw } => Some((schedule_id, raw)),
                 _ => None,
             })
             .collect()

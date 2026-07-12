@@ -55,12 +55,9 @@ pub struct ScheduledTaskInput {
 /// Trims the ID and automation-task ID, parses and validates the cron
 /// expression, and returns `Ok` with normalized values or `Err` with a
 /// human-readable message.
-pub fn validate_schedule_input(
-    input: &ScheduledTaskInput,
-) -> Result<ScheduledTaskInput, String> {
+pub fn validate_schedule_input(input: &ScheduledTaskInput) -> Result<ScheduledTaskInput, String> {
     let id = trim_non_empty(&input.id, "Schedule ID")?;
-    let automation_task_id =
-        trim_non_empty(&input.automation_task_id, "Automation task ID")?;
+    let automation_task_id = trim_non_empty(&input.automation_task_id, "Automation task ID")?;
     let cron_expression = input.cron_expression.trim().to_string();
     if cron_expression.is_empty() {
         return Err("Cron expression must not be empty".to_string());

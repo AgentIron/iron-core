@@ -77,7 +77,9 @@ pub enum ConfigError {
     },
 
     /// Automation task normalized name collides with an existing task.
-    #[error("Task normalized name '{normalized_name}' collides with existing task '{existing_id}'")]
+    #[error(
+        "Task normalized name '{normalized_name}' collides with existing task '{existing_id}'"
+    )]
     TaskNameConflict {
         /// The normalized name that collided.
         normalized_name: String,

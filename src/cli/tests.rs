@@ -257,11 +257,7 @@ fn resolve_workspace_uses_cli() {
         "/nonexistent-env".to_string(),
     )];
     let env_ref: Vec<(String, String)> = env;
-    let w = resolve_workspace(
-        Some("."),
-        env_get(&env_ref, "AGENTIRON_WORKSPACE"),
-        None,
-    );
+    let w = resolve_workspace(Some("."), env_get(&env_ref, "AGENTIRON_WORKSPACE"), None);
     assert!(w.is_ok());
     assert!(w.unwrap().is_absolute());
 }
@@ -293,8 +289,7 @@ fn resolve_workspace_missing_without_fallback() {
 
 #[test]
 fn resolve_workspace_rejects_nonexistent() {
-    let err =
-        resolve_workspace(Some("/nonexistent/path/xyz"), None, None).unwrap_err();
+    let err = resolve_workspace(Some("/nonexistent/path/xyz"), None, None).unwrap_err();
     assert!(err.contains("does not exist"));
 }
 

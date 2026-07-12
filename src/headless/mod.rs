@@ -946,9 +946,14 @@ mod tests {
         let store = setup_complete_store().await;
         let workspace = std::env::temp_dir();
 
-        let runtime = bootstrap_headless(store, "daily-report", workspace.clone(), std::time::Duration::from_secs(300))
-            .await
-            .expect("bootstrap should succeed");
+        let runtime = bootstrap_headless(
+            store,
+            "daily-report",
+            workspace.clone(),
+            std::time::Duration::from_secs(300),
+        )
+        .await
+        .expect("bootstrap should succeed");
 
         assert_eq!(runtime.provider_slug, "openai");
         assert_eq!(runtime.model, "gpt-4o");
@@ -970,7 +975,13 @@ mod tests {
     async fn bootstrap_missing_default_provider() {
         let store = ConfigStore::open_in_memory().await.unwrap();
 
-        let result = bootstrap_headless(store, "any-task", std::env::temp_dir(), std::time::Duration::from_secs(300)).await;
+        let result = bootstrap_headless(
+            store,
+            "any-task",
+            std::env::temp_dir(),
+            std::time::Duration::from_secs(300),
+        )
+        .await;
         assert!(matches!(
             result,
             Err(HeadlessBootstrapError::MissingDefaultProvider)
@@ -988,7 +999,13 @@ mod tests {
             .await
             .unwrap();
 
-        let result = bootstrap_headless(store, "any-task", std::env::temp_dir(), std::time::Duration::from_secs(300)).await;
+        let result = bootstrap_headless(
+            store,
+            "any-task",
+            std::env::temp_dir(),
+            std::time::Duration::from_secs(300),
+        )
+        .await;
         assert!(matches!(
             result,
             Err(HeadlessBootstrapError::CredentialFailure { .. })
@@ -1017,7 +1034,13 @@ mod tests {
             .await
             .unwrap();
 
-        let result = bootstrap_headless(store, "daily-report", std::env::temp_dir(), std::time::Duration::from_secs(300)).await;
+        let result = bootstrap_headless(
+            store,
+            "daily-report",
+            std::env::temp_dir(),
+            std::time::Duration::from_secs(300),
+        )
+        .await;
         assert!(matches!(
             result,
             Err(HeadlessBootstrapError::UnsafePolicy(_))
@@ -1072,7 +1095,13 @@ mod tests {
             .await
             .unwrap();
 
-        let result = bootstrap_headless(store, "t1", std::env::temp_dir(), std::time::Duration::from_secs(300)).await;
+        let result = bootstrap_headless(
+            store,
+            "t1",
+            std::env::temp_dir(),
+            std::time::Duration::from_secs(300),
+        )
+        .await;
         assert!(matches!(
             result,
             Err(HeadlessBootstrapError::UnsafePolicy(_))
@@ -1082,7 +1111,13 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_task_not_found() {
         let store = setup_complete_store().await;
-        let result = bootstrap_headless(store, "nonexistent", std::env::temp_dir(), std::time::Duration::from_secs(300)).await;
+        let result = bootstrap_headless(
+            store,
+            "nonexistent",
+            std::env::temp_dir(),
+            std::time::Duration::from_secs(300),
+        )
+        .await;
         assert!(matches!(
             result,
             Err(HeadlessBootstrapError::Resolution(
@@ -1117,9 +1152,14 @@ mod tests {
             .unwrap();
 
         // Bootstrap succeeds — tool check is deferred to run_automation.
-        let runtime = bootstrap_headless(store, "daily-report", std::env::temp_dir(), std::time::Duration::from_secs(300))
-            .await
-            .expect("bootstrap should succeed (tool check deferred)");
+        let runtime = bootstrap_headless(
+            store,
+            "daily-report",
+            std::env::temp_dir(),
+            std::time::Duration::from_secs(300),
+        )
+        .await
+        .expect("bootstrap should succeed (tool check deferred)");
 
         let result = run_automation(
             runtime,
@@ -1156,9 +1196,14 @@ mod tests {
             .await
             .unwrap();
 
-        let runtime = bootstrap_headless(store, "daily-report", std::env::temp_dir(), std::time::Duration::from_secs(300))
-            .await
-            .expect("bootstrap should succeed with MCP");
+        let runtime = bootstrap_headless(
+            store,
+            "daily-report",
+            std::env::temp_dir(),
+            std::time::Duration::from_secs(300),
+        )
+        .await
+        .expect("bootstrap should succeed with MCP");
 
         // MCP server is registered in the runtime.
         let mcp_registry = runtime.agent.mcp_registry();
@@ -1181,9 +1226,14 @@ mod tests {
             .await
             .unwrap();
 
-        let runtime = bootstrap_headless(store, "daily-report", std::env::temp_dir(), std::time::Duration::from_secs(300))
-            .await
-            .expect("bootstrap should succeed");
+        let runtime = bootstrap_headless(
+            store,
+            "daily-report",
+            std::env::temp_dir(),
+            std::time::Duration::from_secs(300),
+        )
+        .await
+        .expect("bootstrap should succeed");
 
         // Verify skill catalog was refreshed with workspace roots (not empty
         // would be fine too, just verify it didn't crash).
@@ -1215,9 +1265,14 @@ mod tests {
             .await
             .unwrap();
 
-        let runtime = bootstrap_headless(store, "daily-report", std::env::temp_dir(), std::time::Duration::from_secs(300))
-            .await
-            .expect("bootstrap should succeed");
+        let runtime = bootstrap_headless(
+            store,
+            "daily-report",
+            std::env::temp_dir(),
+            std::time::Duration::from_secs(300),
+        )
+        .await
+        .expect("bootstrap should succeed");
 
         // Provider/model must come from the Managed profile, not the saved default.
         assert_eq!(runtime.provider_slug, "openai");
@@ -1227,9 +1282,14 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_plugin_exclusion_no_plugin_tools() {
         let store = setup_complete_store().await;
-        let runtime = bootstrap_headless(store, "daily-report", std::env::temp_dir(), std::time::Duration::from_secs(300))
-            .await
-            .expect("bootstrap should succeed");
+        let runtime = bootstrap_headless(
+            store,
+            "daily-report",
+            std::env::temp_dir(),
+            std::time::Duration::from_secs(300),
+        )
+        .await
+        .expect("bootstrap should succeed");
 
         // Verify no plugin namespaced tools are in the base tool registry.
         // Plugins are never registered during headless bootstrap.
@@ -1416,9 +1476,15 @@ mod tests {
             .into_iter()
             .map(|e| (e.id, e.profile))
             .collect();
-        let resolved = resolve_task_execution(&store, &profiles, "test-task", workspace, std::time::Duration::from_secs(300))
-            .await
-            .unwrap();
+        let resolved = resolve_task_execution(
+            &store,
+            &profiles,
+            "test-task",
+            workspace,
+            std::time::Duration::from_secs(300),
+        )
+        .await
+        .unwrap();
 
         let tool_names: Vec<String> = agent
             .runtime()

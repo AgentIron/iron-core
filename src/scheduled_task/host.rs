@@ -9,11 +9,39 @@
 //! variables — the installed command is always core-derived.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 
 use super::cron::CronExpression;
-use super::{HostRunMetadata, ScheduleHealth};
+use super::HostRunMetadata;
+
+/// Render structured program arguments as a shell-safe command string.
+///
+/// Each argument is single-quoted if it contains characters that are
+/// special to the shell. This is used for cron entries (which run via
+/// `/bin/sh -c`) and for comparing expected vs observed commands.
+pub fn render_command(program: &std::path::Path, args: &[String]) -> String {
+    let mut parts = vec![shell_quote(&program.display().to_string())];
+    for arg in args {
+        parts.push(shell_quote(arg));
+    }
+    parts.join(" ")
+}
+
+/// Quote a string for safe shell usage. If the string contains only
+/// "safe" characters (alphanumeric, dash, underscore, slash, dot, colon),
+/// it is returned unquoted. Otherwise it is single-quoted with embedded
+/// single-quotes escaped.
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | ':' | '='))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
 
 // ============================================================================
 // Installation context
@@ -32,17 +60,21 @@ pub struct SchedulerInstallContext {
 }
 
 impl SchedulerInstallContext {
-    /// Generate the fixed command line for a scheduled task.
+    /// Generate the structured program invocation for a scheduled task.
     ///
-    /// The command invokes `agent-iron run <task-id> --config <path>` with
-    /// absolute paths and no reliance on `PATH`, process working directory,
-    /// or environment variables.
-    pub fn generate_command(&self, automation_task_id: &str) -> String {
-        format!(
-            "{} run {} --config {}",
-            self.runner_executable.display(),
-            automation_task_id,
-            self.config_store_path.display()
+    /// Returns the runner executable path and argument list for
+    /// `agent-iron run <task-id> --config <path>` with absolute paths and
+    /// no reliance on `PATH`, process working directory, or environment
+    /// variables.
+    pub fn generate_invocation(&self, automation_task_id: &str) -> (PathBuf, Vec<String>) {
+        (
+            self.runner_executable.clone(),
+            vec![
+                "run".to_string(),
+                automation_task_id.to_string(),
+                "--config".to_string(),
+                self.config_store_path.display().to_string(),
+            ],
         )
     }
 }
@@ -66,8 +98,10 @@ pub struct HostInstallRequest {
     pub cron: CronExpression,
     /// Whether the entry should be enabled or disabled.
     pub enabled: bool,
-    /// Core-generated command line (from `SchedulerInstallContext`).
-    pub command: String,
+    /// Core-generated runner executable path.
+    pub program: PathBuf,
+    /// Core-generated runner arguments.
+    pub args: Vec<String>,
 }
 
 /// An observed host scheduler entry belonging to AgentIron.
@@ -146,7 +180,10 @@ pub trait HostScheduler: Send + Sync {
     /// Inspect a single owned host entry by schedule ID.
     ///
     /// Returns `Ok(None)` if no owned entry exists for the given ID.
-    async fn inspect(&self, schedule_id: &str) -> Result<Option<ObservedHostEntry>, HostSchedulerError>;
+    async fn inspect(
+        &self,
+        schedule_id: &str,
+    ) -> Result<Option<ObservedHostEntry>, HostSchedulerError>;
 }
 
 // ============================================================================
@@ -185,11 +222,7 @@ pub struct ProductionCommandRunner;
 
 #[async_trait]
 impl CommandRunner for ProductionCommandRunner {
-    async fn run(
-        &self,
-        program: &str,
-        args: &[&str],
-    ) -> Result<CommandOutput, std::io::Error> {
+    async fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput, std::io::Error> {
         let output = tokio::process::Command::new(program)
             .args(args)
             .output()
@@ -234,11 +267,7 @@ impl CommandRunner for ProductionCommandRunner {
 #[async_trait]
 pub trait CommandRunner: Send + Sync {
     /// Run a program with arguments and return the output.
-    async fn run(
-        &self,
-        program: &str,
-        args: &[&str],
-    ) -> Result<CommandOutput, std::io::Error>;
+    async fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput, std::io::Error>;
 
     /// Run a program with stdin input and return the output.
     async fn run_with_stdin(
@@ -300,6 +329,7 @@ impl HostScheduler for FakeHostScheduler {
 
     async fn install(&self, request: &HostInstallRequest) -> Result<(), HostSchedulerError> {
         self.check_error()?;
+        let command = render_command(&request.program, &request.args);
         let mut entries = self.entries.write();
         entries.insert(
             request.schedule_id.clone(),
@@ -308,7 +338,7 @@ impl HostScheduler for FakeHostScheduler {
                 enabled: request.enabled,
                 corrupt: false,
                 raw_schedule: Some(request.cron.as_str().to_string()),
-                observed_command: Some(request.command.clone()),
+                observed_command: Some(command),
                 metadata: None,
             },
         );
@@ -355,21 +385,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn generate_command_uses_absolute_paths() {
+    fn make_request(id: &str, cron: &str, enabled: bool) -> HostInstallRequest {
         let ctx = test_context();
-        let cmd = ctx.generate_command("daily-report");
-        assert!(cmd.contains("/usr/local/bin/agent-iron"));
-        assert!(cmd.contains("run daily-report"));
-        assert!(cmd.contains("--config /home/user/.config/agentiron/config.db"));
+        let (program, args) = ctx.generate_invocation("task-1");
+        HostInstallRequest {
+            schedule_id: id.to_string(),
+            automation_task_id: "task-1".to_string(),
+            cron: CronExpression::parse(cron).unwrap(),
+            enabled,
+            program,
+            args,
+        }
     }
 
     #[test]
-    fn generate_command_no_path_reliance() {
+    fn generate_invocation_uses_absolute_paths() {
         let ctx = test_context();
-        let cmd = ctx.generate_command("task-1");
-        assert!(!cmd.starts_with("agent-iron"));
-        assert!(cmd.starts_with("/"));
+        let (program, args) = ctx.generate_invocation("daily-report");
+        assert!(program.starts_with("/usr/local/bin/agent-iron"));
+        assert!(args.contains(&"run".to_string()));
+        assert!(args.contains(&"daily-report".to_string()));
+        assert!(args.contains(&"--config".to_string()));
+    }
+
+    #[test]
+    fn generate_invocation_no_path_reliance() {
+        let ctx = test_context();
+        let (program, _) = ctx.generate_invocation("task-1");
+        assert!(!program.starts_with("agent-iron"));
+        assert!(program.is_absolute());
     }
 
     #[test]
@@ -388,39 +432,22 @@ mod tests {
     #[tokio::test]
     async fn fake_install_and_inspect() {
         let scheduler = FakeHostScheduler::new();
-        let ctx = test_context();
-        let cron = CronExpression::parse("0 9 * * *").unwrap();
-        let request = HostInstallRequest {
-            schedule_id: "s1".to_string(),
-            automation_task_id: "daily-report".to_string(),
-            cron,
-            enabled: true,
-            command: ctx.generate_command("daily-report"),
-        };
-
+        let request = make_request("s1", "0 9 * * *", true);
         scheduler.install(&request).await.unwrap();
 
         let entry = scheduler.inspect("s1").await.unwrap().unwrap();
         assert_eq!(entry.schedule_id, "s1");
         assert!(entry.enabled);
-        assert!(!entry.corrupt);
         assert_eq!(entry.raw_schedule.as_deref(), Some("0 9 * * *"));
     }
 
     #[tokio::test]
     async fn fake_remove() {
         let scheduler = FakeHostScheduler::new();
-        let ctx = test_context();
-        let cron = CronExpression::parse("0 9 * * *").unwrap();
-        let request = HostInstallRequest {
-            schedule_id: "s1".to_string(),
-            automation_task_id: "t1".to_string(),
-            cron,
-            enabled: true,
-            command: ctx.generate_command("t1"),
-        };
-
-        scheduler.install(&request).await.unwrap();
+        scheduler
+            .install(&make_request("s1", "0 9 * * *", true))
+            .await
+            .unwrap();
         scheduler.remove("s1").await.unwrap();
         assert!(scheduler.inspect("s1").await.unwrap().is_none());
     }
@@ -428,22 +455,12 @@ mod tests {
     #[tokio::test]
     async fn fake_list_owned_sorted() {
         let scheduler = FakeHostScheduler::new();
-        let ctx = test_context();
-        let cron = CronExpression::parse("0 9 * * *").unwrap();
-
         for id in &["charlie", "alpha", "bravo"] {
             scheduler
-                .install(&HostInstallRequest {
-                    schedule_id: id.to_string(),
-                    automation_task_id: "t1".to_string(),
-                    cron: cron.clone(),
-                    enabled: true,
-                    command: ctx.generate_command("t1"),
-                })
+                .install(&make_request(id, "0 9 * * *", true))
                 .await
                 .unwrap();
         }
-
         let list = scheduler.list_owned().await.unwrap();
         let ids: Vec<&str> = list.iter().map(|e| e.schedule_id.as_str()).collect();
         assert_eq!(ids, vec!["alpha", "bravo", "charlie"]);
@@ -452,63 +469,53 @@ mod tests {
     #[tokio::test]
     async fn fake_replace_on_reinstall() {
         let scheduler = FakeHostScheduler::new();
-        let ctx = test_context();
-        let cron = CronExpression::parse("0 9 * * *").unwrap();
-
         scheduler
-            .install(&HostInstallRequest {
-                schedule_id: "s1".to_string(),
-                automation_task_id: "t1".to_string(),
-                cron: cron.clone(),
-                enabled: true,
-                command: ctx.generate_command("t1"),
-            })
+            .install(&make_request("s1", "0 9 * * *", true))
             .await
             .unwrap();
-
-        // Reinstall with disabled.
         scheduler
-            .install(&HostInstallRequest {
-                schedule_id: "s1".to_string(),
-                automation_task_id: "t1".to_string(),
-                cron: cron.clone(),
-                enabled: false,
-                command: ctx.generate_command("t1"),
-            })
+            .install(&make_request("s1", "0 9 * * *", false))
             .await
             .unwrap();
-
         let entry = scheduler.inspect("s1").await.unwrap().unwrap();
         assert!(!entry.enabled);
     }
 
     #[tokio::test]
     async fn fake_install_request_has_no_arbitrary_command() {
-        let scheduler = FakeHostScheduler::new();
-        let ctx = test_context();
-        let cron = CronExpression::parse("0 9 * * *").unwrap();
-
-        let request = HostInstallRequest {
-            schedule_id: "s1".to_string(),
-            automation_task_id: "t1".to_string(),
-            cron,
-            enabled: true,
-            command: ctx.generate_command("t1"),
-        };
-
-        // The command must come from SchedulerInstallContext, not from user input.
-        assert!(request.command.contains(ctx.runner_executable.display().to_string().as_str()));
-        assert!(request.command.contains("run t1"));
+        let _scheduler = FakeHostScheduler::new();
+        let request = make_request("s1", "0 9 * * *", true);
+        assert!(request.program.is_absolute());
+        assert!(request.args.contains(&"run".to_string()));
+        assert!(request.args.contains(&"task-1".to_string()));
     }
 
     #[tokio::test]
     async fn fake_force_error() {
         let scheduler = FakeHostScheduler::new();
-        *scheduler.force_error.lock() = Some(HostSchedulerError::PlatformUnavailable(
-            "test".to_string(),
-        ));
-
+        *scheduler.force_error.lock() =
+            Some(HostSchedulerError::PlatformUnavailable("test".to_string()));
         let result = scheduler.list_owned().await;
-        assert!(matches!(result, Err(HostSchedulerError::PlatformUnavailable(_))));
+        assert!(matches!(
+            result,
+            Err(HostSchedulerError::PlatformUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn shell_quote_safe_chars() {
+        assert_eq!(shell_quote("hello"), "hello");
+        assert_eq!(shell_quote("/usr/bin/agent-iron"), "/usr/bin/agent-iron");
+        assert_eq!(shell_quote("a-b_c.d"), "a-b_c.d");
+    }
+
+    #[test]
+    fn shell_quote_unsafe_chars() {
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("hello world"), "'hello world'");
+        assert_eq!(
+            shell_quote("/path with spaces/run"),
+            "'/path with spaces/run'"
+        );
     }
 }

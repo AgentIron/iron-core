@@ -436,8 +436,8 @@ pub fn effective_tool_filter(input: &ResolvedExecutionInput) -> ToolFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automation_task::AutomationTaskInput;
     use crate::automation_task::normalize_task_name;
+    use crate::automation_task::AutomationTaskInput;
     use crate::config::ConfigStore;
     use crate::profile::{AgentApproval, AgentProfile, SkillFilter};
     use crate::stored_prompt::StoredPrompt;
@@ -848,9 +848,14 @@ mod tests {
         let store = setup_store_with_task_and_prompt().await;
         let reg: HashMap<AgentProfileId, AgentProfile> = HashMap::new();
 
-        let result =
-            resolve_task_execution(&store, &reg, "daily-report", PathBuf::from("/w"), TEST_TIMEOUT)
-                .await;
+        let result = resolve_task_execution(
+            &store,
+            &reg,
+            "daily-report",
+            PathBuf::from("/w"),
+            TEST_TIMEOUT,
+        )
+        .await;
         assert!(matches!(result, Err(ResolutionError::ProfileNotFound(_))));
     }
 

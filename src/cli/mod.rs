@@ -302,8 +302,13 @@ pub fn resolve_workspace(
         return Err(format!("workspace is not a directory: {}", path.display()));
     }
 
-    path.canonicalize()
-        .map_err(|e| format!("failed to canonicalize workspace '{}': {}", path.display(), e))
+    path.canonicalize().map_err(|e| {
+        format!(
+            "failed to canonicalize workspace '{}': {}",
+            path.display(),
+            e
+        )
+    })
 }
 
 /// Resolve the ConfigStore database path from CLI, environment, or default.
@@ -659,13 +664,14 @@ pub async fn execute_run_with_streams(
         let _ = writeln!(stderr, "bootstrapping headless runtime...");
     }
 
-    let headless = match bootstrap_headless(store, &parsed.task_id, workspace.clone(), timeout).await {
-        Ok(h) => h,
-        Err(e) => {
-            let code = exit_code_for_bootstrap_error(&e);
-            emit_failure!(bootstrap_error_category(&e), e.to_string(), code, workspace);
-        }
-    };
+    let headless =
+        match bootstrap_headless(store, &parsed.task_id, workspace.clone(), timeout).await {
+            Ok(h) => h,
+            Err(e) => {
+                let code = exit_code_for_bootstrap_error(&e);
+                emit_failure!(bootstrap_error_category(&e), e.to_string(), code, workspace);
+            }
+        };
 
     if !quiet {
         let _ = writeln!(

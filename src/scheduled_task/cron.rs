@@ -183,17 +183,23 @@ fn parse_field(input: &str, bounds: &FieldBounds) -> Result<Vec<u32>, String> {
 /// Parse a single comma-separated item (e.g., `*`, `5`, `1-5`, `*/15`, `1-10/2`).
 fn parse_item(input: &str, bounds: &FieldBounds) -> Result<Vec<u32>, String> {
     if input.is_empty() {
-        return Err(format!("cron {} field contains an empty list item", bounds.label));
+        return Err(format!(
+            "cron {} field contains an empty list item",
+            bounds.label
+        ));
     }
 
     let (base, step) = match input.find('/') {
         Some(pos) => {
             let step_str = &input[pos + 1..];
-            let step: u32 = step_str
-                .parse()
-                .map_err(|_| format!("cron {} step '{}' is not a number", bounds.label, step_str))?;
+            let step: u32 = step_str.parse().map_err(|_| {
+                format!("cron {} step '{}' is not a number", bounds.label, step_str)
+            })?;
             if step == 0 {
-                return Err(format!("cron {} step must be greater than zero", bounds.label));
+                return Err(format!(
+                    "cron {} step must be greater than zero",
+                    bounds.label
+                ));
             }
             (&input[..pos], Some(step))
         }
@@ -223,12 +229,18 @@ fn parse_base(base: &str, bounds: &FieldBounds) -> Result<Vec<u32>, String> {
     if let Some(dash_pos) = base.find('-') {
         let lo_str = &base[..dash_pos];
         let hi_str = &base[dash_pos + 1..];
-        let lo: u32 = lo_str
-            .parse()
-            .map_err(|_| format!("cron {} range lower bound '{}' is not a number", bounds.label, lo_str))?;
-        let hi: u32 = hi_str
-            .parse()
-            .map_err(|_| format!("cron {} range upper bound '{}' is not a number", bounds.label, hi_str))?;
+        let lo: u32 = lo_str.parse().map_err(|_| {
+            format!(
+                "cron {} range lower bound '{}' is not a number",
+                bounds.label, lo_str
+            )
+        })?;
+        let hi: u32 = hi_str.parse().map_err(|_| {
+            format!(
+                "cron {} range upper bound '{}' is not a number",
+                bounds.label, hi_str
+            )
+        })?;
 
         if lo < bounds.min || lo > bounds.max {
             return Err(format!(

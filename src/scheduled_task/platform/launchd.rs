@@ -174,7 +174,10 @@ pub fn render_plist(
     xml.push_str("<plist version=\"1.0\">\n");
     xml.push_str("<dict>\n");
 
-    xml.push_str(&format!("    <key>Label</key>\n    <string>{}</string>\n", label));
+    xml.push_str(&format!(
+        "    <key>Label</key>\n    <string>{}</string>\n",
+        label
+    ));
 
     if disabled {
         xml.push_str("    <key>Disabled</key>\n    <true/>\n");
@@ -208,16 +211,28 @@ pub fn render_plist(
 
 fn push_interval_keys(xml: &mut String, interval: &CalendarInterval, indent: &str) {
     if let Some(m) = interval.minute {
-        xml.push_str(&format!("{}<key>Minute</key>\n{}<integer>{}</integer>\n", indent, indent, m));
+        xml.push_str(&format!(
+            "{}<key>Minute</key>\n{}<integer>{}</integer>\n",
+            indent, indent, m
+        ));
     }
     if let Some(h) = interval.hour {
-        xml.push_str(&format!("{}<key>Hour</key>\n{}<integer>{}</integer>\n", indent, indent, h));
+        xml.push_str(&format!(
+            "{}<key>Hour</key>\n{}<integer>{}</integer>\n",
+            indent, indent, h
+        ));
     }
     if let Some(d) = interval.day_of_month {
-        xml.push_str(&format!("{}<key>Day</key>\n{}<integer>{}</integer>\n", indent, indent, d));
+        xml.push_str(&format!(
+            "{}<key>Day</key>\n{}<integer>{}</integer>\n",
+            indent, indent, d
+        ));
     }
     if let Some(mo) = interval.month {
-        xml.push_str(&format!("{}<key>Month</key>\n{}<integer>{}</integer>\n", indent, indent, mo));
+        xml.push_str(&format!(
+            "{}<key>Month</key>\n{}<integer>{}</integer>\n",
+            indent, indent, mo
+        ));
     }
     if let Some(dow) = interval.day_of_week {
         xml.push_str(&format!(
@@ -265,8 +280,9 @@ impl HostScheduler for LaunchdHostScheduler {
             }
         })?;
 
-        // Split command into program arguments.
-        let program_args: Vec<String> = request.command.split_whitespace().map(String::from).collect();
+        // Build ProgramArguments from the structured request.
+        let mut program_args = vec![request.program.display().to_string()];
+        program_args.extend(request.args.iter().cloned());
 
         let plist_content = render_plist(
             &request.schedule_id,
@@ -299,10 +315,7 @@ impl HostScheduler for LaunchdHostScheduler {
         let plist_path = self.plist_path(schedule_id);
         let path_str = plist_path.to_string_lossy().to_string();
 
-        let _ = self
-            .runner
-            .run("rm", &["-f", &path_str])
-            .await;
+        let _ = self.runner.run("rm", &["-f", &path_str]).await;
 
         Ok(())
     }
@@ -339,9 +352,7 @@ impl HostScheduler for LaunchdHostScheduler {
         schedule_id: &str,
     ) -> Result<Option<ObservedHostEntry>, HostSchedulerError> {
         let list = self.list_owned().await?;
-        Ok(list
-            .into_iter()
-            .find(|e| e.schedule_id == schedule_id))
+        Ok(list.into_iter().find(|e| e.schedule_id == schedule_id))
     }
 }
 

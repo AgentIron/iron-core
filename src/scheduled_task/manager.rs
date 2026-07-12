@@ -5,16 +5,13 @@
 //! host scheduler for observed state, and returns compositional status
 //! reports. Inspection is read-only; reconciliation mutates host entries.
 
-use std::path::PathBuf;
-
 use crate::config::ConfigStore;
 use crate::scheduled_task::cron::CronExpression;
 use crate::scheduled_task::host::{
-    HostInstallRequest, HostScheduler, HostSchedulerError, ObservedHostEntry,
-    SchedulerInstallContext,
+    HostInstallRequest, HostScheduler, ObservedHostEntry, SchedulerInstallContext,
 };
 use crate::scheduled_task::{
-    DesiredState, ExecutionState, HostRunMetadata, HostState, ReferenceState, ScheduleDiagnostic,
+    DesiredState, ExecutionState, HostState, ReferenceState, ScheduleDiagnostic,
     ScheduleDiagnosticKind, ScheduleHealth, ScheduleStatus, ScheduledTask,
 };
 
@@ -57,7 +54,12 @@ impl<'a> ScheduleManager<'a> {
     /// mutating either. Reports orphans (host entry without desired state)
     /// and drift (mismatched schedule or enabled state).
     pub async fn inspect(&self, schedule_id: &str) -> ScheduleStatus {
-        let desired = self.store.get_scheduled_task(schedule_id).await.ok().flatten();
+        let desired = self
+            .store
+            .get_scheduled_task(schedule_id)
+            .await
+            .ok()
+            .flatten();
         let observed = self.host.inspect(schedule_id).await.ok().flatten();
 
         self.synthesize_status(schedule_id, desired, observed)
@@ -93,7 +95,18 @@ impl<'a> ScheduleManager<'a> {
     /// Installs, replaces, enables, disables, or removes the host entry to
     /// match desired ConfigStore state. Returns the resulting status.
     pub async fn reconcile(&self, schedule_id: &str) -> ScheduleStatus {
-        let desired = self.store.get_scheduled_task(schedule_id).await.ok().flatten();
+        let desired = match self.store.get_scheduled_task(schedule_id).await {
+            Ok(opt) => opt,
+            Err(e) => {
+                return self.error_status(
+                    schedule_id,
+                    DesiredState::Present,
+                    HostState::Unknown,
+                    ScheduleDiagnosticKind::InstallationFailed,
+                    format!("config store error: {}", e),
+                );
+            }
+        };
 
         match desired {
             Some(schedule) => {
@@ -156,10 +169,10 @@ impl<'a> ScheduleManager<'a> {
         let desired_ids: std::collections::HashSet<&str> =
             desired_list.iter().map(|s| s.id.as_str()).collect();
         for observed in &observed_list {
-            if !desired_ids.contains(observed.schedule_id.as_str()) {
-                if orphan_policy == OrphanPolicy::RemoveOrphans {
-                    let _ = self.host.remove(&observed.schedule_id).await;
-                }
+            if !desired_ids.contains(observed.schedule_id.as_str())
+                && orphan_policy == OrphanPolicy::RemoveOrphans
+            {
+                let _ = self.host.remove(&observed.schedule_id).await;
             }
         }
 
@@ -174,16 +187,17 @@ impl<'a> ScheduleManager<'a> {
         let cron = CronExpression::parse(&schedule.cron_expression)
             .map_err(|e| format!("schedule cron invalid: {}", e))?;
 
-        let command = self
+        let (program, args) = self
             .context
-            .generate_command(&schedule.automation_task_id);
+            .generate_invocation(&schedule.automation_task_id);
 
         Ok(HostInstallRequest {
             schedule_id: schedule.id.clone(),
             automation_task_id: schedule.automation_task_id.clone(),
             cron,
             enabled: schedule.enabled,
-            command,
+            program,
+            args,
         })
     }
 
@@ -254,19 +268,28 @@ impl<'a> ScheduleManager<'a> {
                 host_state = HostState::Disabled;
                 diagnostics.push(ScheduleDiagnostic {
                     kind: ScheduleDiagnosticKind::ScheduleDrift,
-                    message: format!("host entry '{}' is disabled but desired is enabled", schedule_id),
+                    message: format!(
+                        "host entry '{}' is disabled but desired is enabled",
+                        schedule_id
+                    ),
                 });
             } else if entry.enabled && !desired.as_ref().map(|d| d.enabled).unwrap_or(true) {
                 host_state = HostState::Drifted;
                 diagnostics.push(ScheduleDiagnostic {
                     kind: ScheduleDiagnosticKind::ScheduleDrift,
-                    message: format!("host entry '{}' is enabled but desired is disabled", schedule_id),
+                    message: format!(
+                        "host entry '{}' is enabled but desired is disabled",
+                        schedule_id
+                    ),
                 });
             } else if self.check_drift(&desired, entry) {
                 host_state = HostState::Drifted;
                 diagnostics.push(ScheduleDiagnostic {
                     kind: ScheduleDiagnosticKind::ScheduleDrift,
-                    message: format!("host entry '{}' schedule or command differs from desired", schedule_id),
+                    message: format!(
+                        "host entry '{}' schedule or command differs from desired",
+                        schedule_id
+                    ),
                 });
             } else {
                 host_state = if entry.enabled {
@@ -285,9 +308,10 @@ impl<'a> ScheduleManager<'a> {
 
         // Check runner-path drift if we have both desired and observed.
         if let (Some(ref schedule), Some(ref entry)) = (&desired, &observed) {
-            let expected_cmd = self
+            let (program, args) = self
                 .context
-                .generate_command(&schedule.automation_task_id);
+                .generate_invocation(&schedule.automation_task_id);
+            let expected_cmd = crate::scheduled_task::host::render_command(&program, &args);
             if let Some(ref observed_cmd) = entry.observed_command {
                 if *observed_cmd != expected_cmd {
                     if host_state != HostState::Corrupt {
@@ -295,7 +319,7 @@ impl<'a> ScheduleManager<'a> {
                     }
                     diagnostics.push(ScheduleDiagnostic {
                         kind: ScheduleDiagnosticKind::RunnerPathDrift,
-                        message: format!("host entry command differs from installation context"),
+                        message: "host entry command differs from installation context".to_string(),
                     });
                 }
             }
@@ -382,6 +406,7 @@ impl<'a> ScheduleManager<'a> {
 
 /// Internal reference-check result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum ReferenceCheckResult {
     Valid,
     Missing,
@@ -393,9 +418,10 @@ mod tests {
     use super::*;
     use crate::automation_task::AutomationTaskInput;
     use crate::config::records::PromptInput;
-    use crate::scheduled_task::host::FakeHostScheduler;
+    use crate::scheduled_task::host::{FakeHostScheduler, HostSchedulerError};
     use crate::scheduled_task::ScheduledTaskInput;
     use serde_json::json;
+    use std::path::PathBuf;
 
     async fn setup_store() -> ConfigStore {
         let store = ConfigStore::open_in_memory().await.unwrap();
@@ -469,7 +495,11 @@ mod tests {
 
         let entry = host.inspect("sched-1").await.unwrap().unwrap();
         assert!(entry.enabled);
-        assert!(entry.observed_command.as_deref().unwrap().contains("run task-1"));
+        assert!(entry
+            .observed_command
+            .as_deref()
+            .unwrap()
+            .contains("run task-1"));
     }
 
     #[tokio::test]
@@ -533,12 +563,14 @@ mod tests {
         let mgr = ScheduleManager::new(&store, &host, ctx.clone());
 
         let cron = CronExpression::parse("0 6 * * *").unwrap();
+        let (program, args) = ctx.generate_invocation("task-1");
         host.install(&HostInstallRequest {
             schedule_id: "orphan".to_string(),
             automation_task_id: "task-1".to_string(),
             cron,
             enabled: true,
-            command: ctx.generate_command("task-1"),
+            program,
+            args,
         })
         .await
         .unwrap();
@@ -560,12 +592,14 @@ mod tests {
         let mgr = ScheduleManager::new(&store, &host, ctx.clone());
 
         let cron = CronExpression::parse("0 6 * * *").unwrap();
+        let (program, args) = ctx.generate_invocation("task-1");
         host.install(&HostInstallRequest {
             schedule_id: "orphan".to_string(),
             automation_task_id: "task-1".to_string(),
             cron,
             enabled: true,
-            command: ctx.generate_command("task-1"),
+            program,
+            args,
         })
         .await
         .unwrap();
@@ -582,12 +616,14 @@ mod tests {
         let mgr = ScheduleManager::new(&store, &host, ctx.clone());
 
         let cron = CronExpression::parse("0 6 * * *").unwrap();
+        let (program, args) = ctx.generate_invocation("task-1");
         host.install(&HostInstallRequest {
             schedule_id: "orphan".to_string(),
             automation_task_id: "task-1".to_string(),
             cron,
             enabled: true,
-            command: ctx.generate_command("task-1"),
+            program,
+            args,
         })
         .await
         .unwrap();
@@ -670,7 +706,8 @@ mod tests {
     async fn host_error_during_reconcile_reports_degraded() {
         let store = setup_store().await;
         let host = FakeHostScheduler::new();
-        *host.force_error.lock() = Some(HostSchedulerError::PlatformUnavailable("test".to_string()));
+        *host.force_error.lock() =
+            Some(HostSchedulerError::PlatformUnavailable("test".to_string()));
         let ctx = test_context();
         let mgr = ScheduleManager::new(&store, &host, ctx);
 
