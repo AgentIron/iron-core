@@ -16,6 +16,14 @@ use crate::scheduled_task::host::{
     CommandRunner, HostInstallRequest, HostScheduler, HostSchedulerError, ObservedHostEntry,
 };
 
+/// Escape XML special characters.
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 /// Label prefix for AgentIron launchd entries.
 pub const LABEL_PREFIX: &str = "com.agentiron.task.";
 
@@ -166,7 +174,7 @@ pub fn render_plist(
     program_args: &[String],
     disabled: bool,
 ) -> String {
-    let label = format!("{}{}", LABEL_PREFIX, schedule_id);
+    let label = format!("{}{}", LABEL_PREFIX, escape_xml(schedule_id));
 
     let mut xml = String::new();
     xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -185,7 +193,7 @@ pub fn render_plist(
 
     xml.push_str("    <key>ProgramArguments</key>\n    <array>\n");
     for arg in program_args {
-        xml.push_str(&format!("        <string>{}</string>\n", arg));
+        xml.push_str(&format!("        <string>{}</string>\n", escape_xml(arg)));
     }
     xml.push_str("    </array>\n");
 
@@ -250,13 +258,16 @@ fn push_interval_keys(xml: &mut String, interval: &CalendarInterval, indent: &st
 pub struct LaunchdHostScheduler {
     runner: Box<dyn CommandRunner>,
     launchagents_dir: PathBuf,
+    uid: u32,
 }
 
 impl LaunchdHostScheduler {
     pub fn new(runner: Box<dyn CommandRunner>, launchagents_dir: PathBuf) -> Self {
+        let uid = extern_uid();
         Self {
             runner,
             launchagents_dir,
+            uid,
         }
     }
 
@@ -264,6 +275,50 @@ impl LaunchdHostScheduler {
         self.launchagents_dir
             .join(format!("{}{}.plist", LABEL_PREFIX, schedule_id))
     }
+
+    fn domain_target(&self) -> String {
+        format!("gui/{}", self.uid)
+    }
+
+    fn service_target(&self, schedule_id: &str) -> String {
+        format!("{}/{}{}", self.domain_target(), LABEL_PREFIX, schedule_id)
+    }
+
+    /// Bootout (unload) the agent if currently loaded.
+    async fn bootout_if_loaded(&self, schedule_id: &str) {
+        let target = self.service_target(schedule_id);
+        let _ = self.runner.run("launchctl", &["bootout", &target]).await;
+    }
+
+    /// Bootstrap (load) the agent from its plist.
+    async fn bootstrap(&self, schedule_id: &str) -> Result<(), HostSchedulerError> {
+        let plist_path = self.plist_path(schedule_id);
+        let path_str = plist_path.to_string_lossy().to_string();
+        let domain = self.domain_target();
+
+        let output = self
+            .runner
+            .run("launchctl", &["bootstrap", &domain, &path_str])
+            .await
+            .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
+
+        if output.exit_code != 0 && !output.stderr.contains("already") {
+            return Err(HostSchedulerError::Io(format!(
+                "launchctl bootstrap failed: {}",
+                output.stderr
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+/// Get the current process UID without external crate dependencies.
+fn extern_uid() -> u32 {
+    extern "C" {
+        fn getuid() -> u32;
+    }
+    unsafe { getuid() }
 }
 
 #[async_trait]
@@ -280,7 +335,6 @@ impl HostScheduler for LaunchdHostScheduler {
             }
         })?;
 
-        // Build ProgramArguments from the structured request.
         let mut program_args = vec![request.program.display().to_string()];
         program_args.extend(request.args.iter().cloned());
 
@@ -291,7 +345,7 @@ impl HostScheduler for LaunchdHostScheduler {
             !request.enabled,
         );
 
-        // Write plist via launchctl bootstrap or direct file write.
+        // Write plist file.
         let plist_path = self.plist_path(&request.schedule_id);
         let path_str = plist_path.to_string_lossy().to_string();
 
@@ -308,14 +362,39 @@ impl HostScheduler for LaunchdHostScheduler {
             )));
         }
 
+        // Reload: bootout if loaded, then bootstrap.
+        self.bootout_if_loaded(&request.schedule_id).await;
+        self.bootstrap(&request.schedule_id).await?;
+
+        // Apply enabled/disabled state via launchctl.
+        if !request.enabled {
+            let target = self.service_target(&request.schedule_id);
+            let _ = self.runner.run("launchctl", &["disable", &target]).await;
+        }
+
         Ok(())
     }
 
     async fn remove(&self, schedule_id: &str) -> Result<(), HostSchedulerError> {
+        // Unload the agent first.
+        self.bootout_if_loaded(schedule_id).await;
+
+        // Then delete the plist file.
         let plist_path = self.plist_path(schedule_id);
         let path_str = plist_path.to_string_lossy().to_string();
 
-        let _ = self.runner.run("rm", &["-f", &path_str]).await;
+        let output = self
+            .runner
+            .run("rm", &["-f", &path_str])
+            .await
+            .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
+
+        if output.exit_code != 0 {
+            return Err(HostSchedulerError::Io(format!(
+                "failed to remove plist: {}",
+                output.stderr
+            )));
+        }
 
         Ok(())
     }
