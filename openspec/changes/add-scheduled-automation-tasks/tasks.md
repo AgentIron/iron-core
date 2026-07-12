@@ -67,4 +67,4 @@
 - [x] 9.2 Document local-system-timezone and native daylight-saving behavior plus platform capability failures
 - [x] 9.3 Document that scheduling accepts automation tasks only and that create-and-schedule UI flows remain two core operations
 - [x] 9.4 Run formatting, linting, unit tests, integration tests, and supported platform checks
-- [ ] 9.5 File follow-up issues for durable run history, output retention, normalized host run metadata, missed-run policy, concurrent-run policy, credential-session limitations, and executable relocation repair
+- [x] 9.5 File follow-up issues for durable run history, output retention, normalized host run metadata, missed-run policy, concurrent-run policy, credential-session limitations, and executable relocation repair
