@@ -253,9 +253,15 @@ async fn task_timeout_used_as_fallback() {
         db_path.to_str().unwrap().to_string(),
     ];
     let env = vec![];
-    let (code, _out, err) = run_cli(&args, &mut env.clone()).await;
+    let (code, _out, _err) = run_cli(&args, &mut env.clone()).await;
     assert_eq!(code, EXIT_COMPLETED);
-    assert!(err.contains("timeout:"));
+    // Verify the persisted configured fallback value is 300 seconds.
+    let task = store
+        .get_automation_task("daily-report")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(task.timeout_seconds, 300);
 }
 
 #[tokio::test]

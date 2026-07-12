@@ -1963,6 +1963,34 @@ impl ConfigStore {
         let normalized = validate_task_input(input).map_err(ConfigError::Validation)?;
         let normalized_name = normalize_task_name(&normalized.display_name);
 
+        // Canonicalize project root — must be an existing directory.
+        // Performed before opening the write transaction so slow filesystem
+        // I/O does not extend the transaction's lifetime.
+        let canonical_root = tokio::fs::canonicalize(&normalized.project_root)
+            .await
+            .map_err(|e| {
+                ConfigError::Validation(format!(
+                    "Project root '{}' is not accessible: {}",
+                    normalized.project_root.display(),
+                    e
+                ))
+            })?;
+
+        let metadata = tokio::fs::metadata(&canonical_root).await.map_err(|e| {
+            ConfigError::Validation(format!(
+                "Project root '{}' cannot be read: {}",
+                canonical_root.display(),
+                e
+            ))
+        })?;
+
+        if !metadata.is_dir() {
+            return Err(ConfigError::Validation(format!(
+                "Project root '{}' is not a directory",
+                canonical_root.display()
+            )));
+        }
+
         let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
 
         // Require the referenced prompt to exist.
@@ -1992,32 +2020,6 @@ impl ConfigStore {
                 normalized_name,
                 existing_id,
             });
-        }
-
-        // Canonicalize project root — must be an existing directory.
-        let canonical_root = tokio::fs::canonicalize(&normalized.project_root)
-            .await
-            .map_err(|e| {
-                ConfigError::Validation(format!(
-                    "Project root '{}' is not accessible: {}",
-                    normalized.project_root.display(),
-                    e
-                ))
-            })?;
-
-        let metadata = tokio::fs::metadata(&canonical_root).await.map_err(|e| {
-            ConfigError::Validation(format!(
-                "Project root '{}' cannot be read: {}",
-                canonical_root.display(),
-                e
-            ))
-        })?;
-
-        if !metadata.is_dir() {
-            return Err(ConfigError::Validation(format!(
-                "Project root '{}' is not a directory",
-                canonical_root.display()
-            )));
         }
 
         let now = Utc::now().to_rfc3339();

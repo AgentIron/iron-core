@@ -21,6 +21,8 @@
 
 use std::collections::HashSet;
 
+use crate::scheduled_task::cron::CronExpression;
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -48,7 +50,11 @@ impl CronOwnedBlock {
     pub fn render(&self) -> String {
         let begin = format!("{}{}:begin", MARKER_PREFIX, self.schedule_id);
         let end = format!("{}{}:end", MARKER_PREFIX, self.schedule_id);
-        let cron_line = format!("{} {}", self.cron_schedule, self.command);
+        let cron_line = format!(
+            "{} {}",
+            self.cron_schedule,
+            escape_cron_percent(&self.command)
+        );
 
         if self.enabled {
             format!("{}\n{}\n{}\n", begin, cron_line, end)
@@ -101,8 +107,12 @@ pub enum CrontabSegment {
 
 impl ParsedCrontab {
     /// Parse raw crontab text into segments.
+    ///
+    /// Original line endings (LF or CRLF) and trailing-newline state are
+    /// preserved for non-owned content so rewrites only modify managed
+    /// entries.
     pub fn parse(raw: &str) -> Self {
-        let lines: Vec<&str> = raw.lines().collect();
+        let lines: Vec<&str> = raw.split_inclusive('\n').collect();
         let mut segments = Vec::new();
         let mut other_buf = String::new();
         let mut seen_ids: HashSet<String> = HashSet::new();
@@ -123,27 +133,29 @@ impl ParsedCrontab {
                 match end_idx {
                     Some(ei) => {
                         let is_duplicate = !seen_ids.insert(sid.clone());
-                        let block_lines = &lines[i + 1..ei];
-                        let raw_block: String = lines[i..=ei].to_vec().join("\n") + "\n";
+                        let raw_block: String = lines[i..=ei].concat();
 
                         if is_duplicate {
                             segments.push(CrontabSegment::Malformed {
                                 schedule_id: sid,
                                 raw: raw_block,
                             });
-                        } else if let Some(block) = parse_block_body(&sid, block_lines) {
-                            segments.push(CrontabSegment::Owned(block));
                         } else {
-                            segments.push(CrontabSegment::Malformed {
-                                schedule_id: sid,
-                                raw: raw_block,
-                            });
+                            let block_lines: Vec<&str> = lines[i + 1..ei].to_vec();
+                            if let Some(block) = parse_block_body(&sid, &block_lines) {
+                                segments.push(CrontabSegment::Owned(block));
+                            } else {
+                                segments.push(CrontabSegment::Malformed {
+                                    schedule_id: sid,
+                                    raw: raw_block,
+                                });
+                            }
                         }
                         i = ei + 1;
                     }
                     None => {
                         // No end marker — everything from here to EOF is malformed.
-                        let raw_block: String = lines[i..].to_vec().join("\n") + "\n";
+                        let raw_block: String = lines[i..].concat();
                         segments.push(CrontabSegment::Malformed {
                             schedule_id: sid,
                             raw: raw_block,
@@ -152,9 +164,8 @@ impl ParsedCrontab {
                     }
                 }
             } else {
-                // Non-owned line.
+                // Non-owned line — preserve original text including line ending.
                 other_buf.push_str(line);
-                other_buf.push('\n');
                 i += 1;
             }
         }
@@ -292,11 +303,10 @@ fn find_end_marker(lines: &[&str], from: usize, id: &str) -> Option<usize> {
         if line.trim() == end_marker {
             return Some(idx);
         }
-        // Detect nested begin of the same ID (malformed).
-        if let Some(nested_id) = parse_begin_marker(line) {
-            if nested_id == id {
-                return None;
-            }
+        // Reject any nested begin marker, regardless of ID — nested
+        // ownership blocks are malformed and must not be silently consumed.
+        if parse_begin_marker(line).is_some() {
+            return None;
         }
     }
     None
@@ -346,13 +356,14 @@ fn parse_block_body(schedule_id: &str, body_lines: &[&str]) -> Option<CronOwnedB
 
     let cron_line = cron_line?;
 
-    // Split into schedule fields and command.
-    let parts: Vec<&str> = cron_line.splitn(6, ' ').collect();
+    // Split into schedule fields and command using whitespace-aware parsing
+    // that handles tabs and repeated spaces consistently with looks_like_cron_line.
+    let parts: Vec<&str> = cron_line.split_whitespace().collect();
     if parts.len() < 6 {
         return None;
     }
     let cron_schedule = parts[..5].join(" ");
-    let command = parts[5].to_string();
+    let command = unescape_cron_percent(&parts[5..].join(" "));
 
     Some(CronOwnedBlock {
         schedule_id: schedule_id.to_string(),
@@ -362,10 +373,27 @@ fn parse_block_body(schedule_id: &str, body_lines: &[&str]) -> Option<CronOwnedB
     })
 }
 
+/// Escape `%` as `\%` for cron (cron treats unescaped `%` as newline).
+fn escape_cron_percent(s: &str) -> String {
+    s.replace('%', "\\%")
+}
+
+/// Reverse the cron `%` escaping applied by [`escape_cron_percent`].
+fn unescape_cron_percent(s: &str) -> String {
+    s.replace("\\%", "%")
+}
+
 /// Heuristic: does a line look like a cron schedule entry?
+///
+/// Validates that the first five whitespace-separated tokens form a valid
+/// five-field cron expression and that at least one command token follows.
 fn looks_like_cron_line(line: &str) -> bool {
     let parts: Vec<&str> = line.split_whitespace().collect();
-    parts.len() >= 6
+    if parts.len() < 6 {
+        return false;
+    }
+    let schedule = parts[..5].join(" ");
+    CronExpression::parse(&schedule).is_ok()
 }
 
 // ============================================================================

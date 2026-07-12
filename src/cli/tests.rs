@@ -295,17 +295,9 @@ fn resolve_workspace_rejects_nonexistent() {
 
 #[test]
 fn resolve_workspace_rejects_file() {
-    let err = resolve_workspace(Some("/etc/hostname"), None, None);
-    match err {
-        Ok(path) => {
-            if path.exists() && !path.is_dir() {
-                panic!("expected error for file as workspace");
-            }
-        }
-        Err(e) => {
-            assert!(e.contains("not a directory") || e.contains("does not exist"));
-        }
-    }
+    let file = std::env::current_exe().unwrap();
+    let err = resolve_workspace(file.to_str(), None, None).unwrap_err();
+    assert!(err.contains("not a directory"));
 }
 
 // ============================================================================

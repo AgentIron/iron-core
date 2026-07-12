@@ -27,6 +27,16 @@ pub fn render_command(program: &std::path::Path, args: &[String]) -> String {
     parts.join(" ")
 }
 
+/// Render a command string for cron entries, escaping the `%` metacharacter.
+///
+/// Cron processes unescaped `%` as a newline **before** invoking `/bin/sh`,
+/// so single-quote protection alone is insufficient. The `\%` escape is
+/// recognised by cron (which strips the backslash) regardless of shell
+/// quoting context, so it is safe both inside and outside single quotes.
+pub fn render_cron_command(program: &std::path::Path, args: &[String]) -> String {
+    render_command(program, args).replace('%', "\\%")
+}
+
 /// Quote a string for safe shell usage. If the string contains only
 /// "safe" characters (alphanumeric, dash, underscore, slash, dot, colon),
 /// it is returned unquoted. Otherwise it is single-quoted with embedded
@@ -203,8 +213,21 @@ pub fn create_host_scheduler(
         } else if #[cfg(target_os = "macos")] {
             use super::platform::launchd::LaunchdHostScheduler;
             use std::path::PathBuf;
-            let home = std::env::var("HOME").unwrap_or_default();
-            let dir = PathBuf::from(home).join("Library/LaunchAgents");
+            let home = std::env::var("HOME")
+                .map_err(|_| HostSchedulerError::PlatformUnavailable(
+                    "HOME environment variable is not set; cannot locate LaunchAgents directory".to_string(),
+                ))?;
+            if home.is_empty() {
+                return Err(HostSchedulerError::PlatformUnavailable(
+                    "HOME environment variable is empty; cannot locate LaunchAgents directory".to_string(),
+                ));
+            }
+            let dir = PathBuf::from(&home).join("Library/LaunchAgents");
+            if !dir.is_absolute() {
+                return Err(HostSchedulerError::PlatformUnavailable(
+                    format!("resolved LaunchAgents path is not absolute: {}", dir.display()),
+                ));
+            }
             Ok(Box::new(LaunchdHostScheduler::new(Box::new(ProductionCommandRunner), dir)))
         } else if #[cfg(target_os = "windows")] {
             use super::platform::task_scheduler::TaskSchedulerHostScheduler;
@@ -220,18 +243,34 @@ pub fn create_host_scheduler(
 /// Production command runner using `tokio::process::Command`.
 pub struct ProductionCommandRunner;
 
+/// Default timeout for host scheduler commands (30 seconds).
+const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[async_trait]
 impl CommandRunner for ProductionCommandRunner {
     async fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput, std::io::Error> {
-        let output = tokio::process::Command::new(program)
-            .args(args)
-            .output()
-            .await?;
-        Ok(CommandOutput {
-            exit_code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        })
+        let fut = async {
+            let output = tokio::process::Command::new(program)
+                .args(args)
+                .output()
+                .await?;
+            Ok(CommandOutput {
+                exit_code: output.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        };
+        match tokio::time::timeout(COMMAND_TIMEOUT, fut).await {
+            Ok(result) => result,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "command '{}' timed out after {}s",
+                    program,
+                    COMMAND_TIMEOUT.as_secs()
+                ),
+            )),
+        }
     }
 
     async fn run_with_stdin(
@@ -241,21 +280,35 @@ impl CommandRunner for ProductionCommandRunner {
         stdin: &str,
     ) -> Result<CommandOutput, std::io::Error> {
         use tokio::io::AsyncWriteExt;
-        let mut child = tokio::process::Command::new(program)
-            .args(args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-        if let Some(ref mut stdin_handle) = child.stdin {
-            stdin_handle.write_all(stdin.as_bytes()).await?;
+        let stdin_bytes = stdin.as_bytes().to_vec();
+        let fut = async {
+            let mut child = tokio::process::Command::new(program)
+                .args(args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+            if let Some(ref mut stdin_handle) = child.stdin {
+                stdin_handle.write_all(&stdin_bytes).await?;
+            }
+            let output = child.wait_with_output().await?;
+            Ok(CommandOutput {
+                exit_code: output.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        };
+        match tokio::time::timeout(COMMAND_TIMEOUT, fut).await {
+            Ok(result) => result,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "command '{}' timed out after {}s",
+                    program,
+                    COMMAND_TIMEOUT.as_secs()
+                ),
+            )),
         }
-        let output = child.wait_with_output().await?;
-        Ok(CommandOutput {
-            exit_code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        })
     }
 }
 

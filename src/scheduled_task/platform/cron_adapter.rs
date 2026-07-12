@@ -9,9 +9,10 @@
 //! as-is.
 
 use async_trait::async_trait;
+use tokio::sync::Mutex;
 
 use crate::scheduled_task::host::{
-    render_command, CommandRunner, HostInstallRequest, HostScheduler, HostSchedulerError,
+    render_cron_command, CommandRunner, HostInstallRequest, HostScheduler, HostSchedulerError,
     ObservedHostEntry,
 };
 use crate::scheduled_task::platform::crontab::{make_block, CronOwnedBlock, ParsedCrontab};
@@ -19,12 +20,16 @@ use crate::scheduled_task::platform::crontab::{make_block, CronOwnedBlock, Parse
 /// Linux crontab host scheduler.
 pub struct CronHostScheduler {
     runner: Box<dyn CommandRunner>,
+    lock: Mutex<()>,
 }
 
 impl CronHostScheduler {
     /// Create a new cron adapter with the given command runner.
     pub fn new(runner: Box<dyn CommandRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            lock: Mutex::new(()),
+        }
     }
 
     /// Read the current crontab text. Returns empty string if no crontab.
@@ -97,10 +102,12 @@ impl HostScheduler for CronHostScheduler {
     }
 
     async fn install(&self, request: &HostInstallRequest) -> Result<(), HostSchedulerError> {
+        let _guard = self.lock.lock().await;
         let mut parsed = self.parse_current().await?;
 
-        // The cron expression maps directly to crontab syntax.
-        let command = render_command(&request.program, &request.args);
+        // The cron expression maps directly to crontab syntax. Escape `%`
+        // for cron's metacharacter handling.
+        let command = render_cron_command(&request.program, &request.args);
         let block = make_block(
             &request.schedule_id,
             request.cron.as_str(),
@@ -115,6 +122,7 @@ impl HostScheduler for CronHostScheduler {
     }
 
     async fn remove(&self, schedule_id: &str) -> Result<(), HostSchedulerError> {
+        let _guard = self.lock.lock().await;
         let mut parsed = self.parse_current().await?;
         parsed.remove(schedule_id);
         let rendered = parsed.render();
@@ -123,11 +131,24 @@ impl HostScheduler for CronHostScheduler {
 
     async fn list_owned(&self) -> Result<Vec<ObservedHostEntry>, HostSchedulerError> {
         let parsed = self.parse_current().await?;
-        Ok(parsed
+        let mut entries: Vec<ObservedHostEntry> = parsed
             .owned_blocks()
             .iter()
             .map(|b| Self::block_to_observed(b))
-            .collect())
+            .collect();
+        // Expose malformed owned blocks so reconciliation can discover
+        // corrupted AgentIron entries.
+        for (schedule_id, _raw) in parsed.malformed_blocks() {
+            entries.push(ObservedHostEntry {
+                schedule_id: schedule_id.clone(),
+                enabled: false,
+                corrupt: true,
+                raw_schedule: None,
+                observed_command: None,
+                metadata: None,
+            });
+        }
+        Ok(entries)
     }
 
     async fn inspect(

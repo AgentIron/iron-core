@@ -609,7 +609,14 @@ pub async fn execute_run_with_streams(
     let task_defaults = match store.get_automation_task(&parsed.task_id).await {
         Ok(Some(t)) => Some(t),
         Ok(None) => None,
-        Err(_) => None,
+        Err(e) => {
+            emit_failure!(
+                AutomationRunErrorCategory::Config,
+                format!("failed to load task '{}': {}", parsed.task_id, e),
+                EXIT_CONFIG,
+                PathBuf::from(parsed.workspace.as_deref().unwrap_or("."))
+            );
+        }
     };
 
     let workspace_fallback = task_defaults

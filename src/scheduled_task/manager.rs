@@ -91,12 +91,27 @@ impl<'a> ScheduleManager<'a> {
     }
 
     /// Read-only inspection of all known schedules and owned host entries.
+    ///
+    /// Returns a vector with a single error status if the ConfigStore read
+    /// fails, so callers are never misled into thinking there are zero
+    /// schedules. Host-list failures are surfaced as per-schedule diagnostics.
     pub async fn inspect_all(&self) -> Vec<ScheduleStatus> {
         let desired_list = match self.store.list_scheduled_tasks().await {
             Ok(list) => list,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                return vec![self.error_status(
+                    "",
+                    DesiredState::Missing,
+                    HostState::Unknown,
+                    ScheduleDiagnosticKind::PlatformUnavailable,
+                    format!("config store error: {}", e),
+                )];
+            }
         };
-        let observed_list = self.host.list_owned().await.unwrap_or_default();
+        let (observed_list, host_error) = match self.host.list_owned().await {
+            Ok(list) => (list, None),
+            Err(e) => (Vec::new(), Some(format!("host error: {}", e))),
+        };
 
         let mut ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for d in &desired_list {
@@ -132,7 +147,7 @@ impl<'a> ScheduleManager<'a> {
                 desired,
                 observed,
                 None,
-                None,
+                host_error.clone(),
                 reference_state,
             ));
         }
@@ -230,17 +245,39 @@ impl<'a> ScheduleManager<'a> {
 
     /// Reconcile all desired schedules and optionally remove orphans.
     ///
-    /// Returns status for every schedule and orphan processed.
+    /// Returns status for every schedule and orphan processed. Aborts
+    /// before any host mutation if the desired-state read fails, so a
+    /// transient ConfigStore error can never cause host-entry removal.
     pub async fn reconcile_all(&self, orphan_policy: OrphanPolicy) -> Vec<ScheduleStatus> {
-        let desired_list = self.store.list_scheduled_tasks().await.unwrap_or_default();
-        let observed_list = self.host.list_owned().await.unwrap_or_default();
-
-        // Reconcile all desired schedules.
-        for schedule in &desired_list {
-            let request = self.build_install_request(schedule);
-            if let Ok(req) = request {
-                let _ = self.host.install(&req).await;
+        let desired_list = match self.store.list_scheduled_tasks().await {
+            Ok(list) => list,
+            Err(e) => {
+                return vec![self.error_status(
+                    "",
+                    DesiredState::Missing,
+                    HostState::Unknown,
+                    ScheduleDiagnosticKind::PlatformUnavailable,
+                    format!("config store error: {}", e),
+                )];
             }
+        };
+        let observed_list = match self.host.list_owned().await {
+            Ok(list) => list,
+            Err(e) => {
+                return vec![self.error_status(
+                    "",
+                    DesiredState::Missing,
+                    HostState::Unknown,
+                    ScheduleDiagnosticKind::PlatformUnavailable,
+                    format!("host error: {}", e),
+                )];
+            }
+        };
+
+        // Reconcile all desired schedules via per-schedule reconcile so each
+        // entry goes through the inspect-before-mutate path.
+        for schedule in &desired_list {
+            let _ = self.reconcile(&schedule.id).await;
         }
 
         // Handle orphans.
@@ -291,7 +328,14 @@ impl<'a> ScheduleManager<'a> {
         reference_state: ReferenceState,
     ) -> ScheduleStatus {
         let mut diagnostics = Vec::new();
-        let execution_state = ExecutionState::Unknown; // Cannot verify headless safety without profile registry.
+        let execution_state = if desired.is_some() && store_error.is_none() {
+            match reference_state {
+                ReferenceState::Valid => ExecutionState::Ready,
+                ReferenceState::Missing | ReferenceState::Invalid => ExecutionState::Unknown,
+            }
+        } else {
+            ExecutionState::Unknown
+        };
         let mut host_state = HostState::Missing;
 
         // Surface store errors.
@@ -421,7 +465,12 @@ impl<'a> ScheduleManager<'a> {
         let health = if store_error.is_some() || host_error.is_some() {
             ScheduleHealth::Unavailable
         } else {
-            self.compute_health(&desired_state, &reference_state, &host_state)
+            self.compute_health(
+                &desired_state,
+                &reference_state,
+                &execution_state,
+                &host_state,
+            )
         };
 
         ScheduleStatus {
@@ -440,18 +489,21 @@ impl<'a> ScheduleManager<'a> {
         &self,
         desired: &DesiredState,
         reference: &ReferenceState,
+        execution: &ExecutionState,
         host: &HostState,
     ) -> ScheduleHealth {
         if *reference == ReferenceState::Missing || *reference == ReferenceState::Invalid {
             return ScheduleHealth::Degraded;
         }
 
-        match (*desired, *host) {
-            (DesiredState::Missing, HostState::Missing) => ScheduleHealth::Healthy,
-            (DesiredState::Missing, _) => ScheduleHealth::Degraded,
-            (DesiredState::Present, HostState::Installed)
-            | (DesiredState::Present, HostState::Disabled) => ScheduleHealth::Healthy,
-            (DesiredState::Present, _) => ScheduleHealth::Degraded,
+        match (*desired, *execution, *host) {
+            (DesiredState::Missing, _, HostState::Missing) => ScheduleHealth::Healthy,
+            (DesiredState::Missing, _, _) => ScheduleHealth::Degraded,
+            (DesiredState::Present, ExecutionState::Ready, HostState::Installed)
+            | (DesiredState::Present, ExecutionState::Ready, HostState::Disabled) => {
+                ScheduleHealth::Healthy
+            }
+            (DesiredState::Present, _, _) => ScheduleHealth::Degraded,
         }
     }
 

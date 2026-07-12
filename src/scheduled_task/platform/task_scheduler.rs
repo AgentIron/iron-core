@@ -358,19 +358,15 @@ impl HostScheduler for TaskSchedulerHostScheduler {
             request.schedule_id
         );
 
-        // Write XML to temp file.
-        let write_output = self
-            .runner
-            .run_with_stdin("cmd", &["/c", "tee", &temp_file], &xml)
+        // Write XML as UTF-16LE with BOM (required by schtasks.exe).
+        let mut xml_bytes = Vec::with_capacity(xml.len() * 2 + 2);
+        xml_bytes.extend_from_slice(&[0xFF, 0xFE]); // UTF-16LE BOM
+        for unit in xml.encode_utf16() {
+            xml_bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        tokio::fs::write(&temp_file, &xml_bytes)
             .await
             .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
-
-        if write_output.exit_code != 0 {
-            return Err(HostSchedulerError::Io(format!(
-                "failed to write XML: {}",
-                write_output.stderr
-            )));
-        }
 
         // Register task from XML.
         let output = self

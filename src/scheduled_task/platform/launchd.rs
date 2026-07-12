@@ -24,6 +24,14 @@ fn escape_xml(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Reverse the entity escaping applied by [`escape_xml`].
+fn unescape_xml(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+}
+
 /// Label prefix for AgentIron launchd entries.
 pub const LABEL_PREFIX: &str = "com.agentiron.task.";
 
@@ -79,6 +87,20 @@ pub fn expand_cron(cron: &CronExpression) -> Result<Vec<CalendarInterval>, Strin
 
     let mut intervals = Vec::new();
 
+    /// Push an interval, aborting early if MAX_INTERVALS would be exceeded.
+    macro_rules! push_interval {
+        ($intervals:expr, $val:expr) => {
+            if $intervals.len() >= MAX_INTERVALS {
+                return Err(format!(
+                    "cron expression expands to more than {} launchd intervals; \
+                     use a simpler expression",
+                    MAX_INTERVALS
+                ));
+            }
+            $intervals.push($val);
+        };
+    }
+
     if dom_restricted && dow_restricted {
         // Cron DOM-or-DOW: fire when either matches.
         // Set 1: specific DOM, DOW wildcard.
@@ -86,13 +108,16 @@ pub fn expand_cron(cron: &CronExpression) -> Result<Vec<CalendarInterval>, Strin
             for &h_val in &hour_vals {
                 for &dom in doms {
                     for &mo in &month_vals {
-                        intervals.push(CalendarInterval {
-                            minute: m_val,
-                            hour: h_val,
-                            day_of_month: Some(dom),
-                            month: mo,
-                            day_of_week: None,
-                        });
+                        push_interval!(
+                            intervals,
+                            CalendarInterval {
+                                minute: m_val,
+                                hour: h_val,
+                                day_of_month: Some(dom),
+                                month: mo,
+                                day_of_week: None,
+                            }
+                        );
                     }
                 }
             }
@@ -102,13 +127,16 @@ pub fn expand_cron(cron: &CronExpression) -> Result<Vec<CalendarInterval>, Strin
             for &h_val in &hour_vals {
                 for &dow in dows {
                     for &mo in &month_vals {
-                        intervals.push(CalendarInterval {
-                            minute: m_val,
-                            hour: h_val,
-                            day_of_month: None,
-                            month: mo,
-                            day_of_week: Some(if dow == 0 { 7 } else { dow }),
-                        });
+                        push_interval!(
+                            intervals,
+                            CalendarInterval {
+                                minute: m_val,
+                                hour: h_val,
+                                day_of_month: None,
+                                month: mo,
+                                day_of_week: Some(if dow == 0 { 7 } else { dow }),
+                            }
+                        );
                     }
                 }
             }
@@ -134,13 +162,16 @@ pub fn expand_cron(cron: &CronExpression) -> Result<Vec<CalendarInterval>, Strin
                 for &dom in &dom_vals {
                     for &mo in &month_vals {
                         for &dow in &dow_vals {
-                            intervals.push(CalendarInterval {
-                                minute: m_val,
-                                hour: h_val,
-                                day_of_month: dom,
-                                month: mo,
-                                day_of_week: dow,
-                            });
+                            push_interval!(
+                                intervals,
+                                CalendarInterval {
+                                    minute: m_val,
+                                    hour: h_val,
+                                    day_of_month: dom,
+                                    month: mo,
+                                    day_of_week: dow,
+                                }
+                            );
                         }
                     }
                 }
@@ -253,6 +284,8 @@ fn push_interval_keys(xml: &mut String, interval: &CalendarInterval, indent: &st
 /// Extract the `<string>` values inside a plist's `ProgramArguments` array.
 ///
 /// Returns an empty vector if the key or array cannot be located.
+/// String values are XML-decoded so escaped paths and arguments match
+/// their actual values.
 fn parse_program_arguments(text: &str) -> Vec<String> {
     let key = "<key>ProgramArguments</key>";
     let key_pos = match text.find(key) {
@@ -279,7 +312,7 @@ fn parse_program_arguments(text: &str) -> Vec<String> {
             Some(p) => p,
             None => break,
         };
-        args.push(rest[..close].to_string());
+        args.push(unescape_xml(&rest[..close]));
         cursor = &rest[close + "</string>".len()..];
     }
     args
@@ -320,12 +353,39 @@ impl LaunchdHostScheduler {
     }
 
     /// Bootout (unload) the agent if currently loaded.
-    async fn bootout_if_loaded(&self, schedule_id: &str) {
+    ///
+    /// Returns `Ok(())` if the agent was successfully unloaded or was not
+    /// loaded to begin with. Other failures are propagated.
+    async fn bootout_if_loaded(&self, schedule_id: &str) -> Result<(), HostSchedulerError> {
         let target = self.service_target(schedule_id);
-        let _ = self.runner.run("launchctl", &["bootout", &target]).await;
+        let output = self
+            .runner
+            .run("launchctl", &["bootout", &target])
+            .await
+            .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
+
+        if output.exit_code == 0 {
+            return Ok(());
+        }
+
+        let stderr = output.stderr.to_lowercase();
+        if stderr.contains("not loaded")
+            || stderr.contains("could not find")
+            || stderr.contains("no such process")
+        {
+            return Ok(());
+        }
+
+        Err(HostSchedulerError::Io(format!(
+            "launchctl bootout failed (exit {}): {}",
+            output.exit_code, output.stderr
+        )))
     }
 
     /// Bootstrap (load) the agent from its plist.
+    ///
+    /// Returns `Ok(())` if the agent was successfully loaded or was already
+    /// loaded. Other failures are propagated.
     async fn bootstrap(&self, schedule_id: &str) -> Result<(), HostSchedulerError> {
         let plist_path = self.plist_path(schedule_id);
         let path_str = plist_path.to_string_lossy().to_string();
@@ -337,37 +397,90 @@ impl LaunchdHostScheduler {
             .await
             .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
 
-        if output.exit_code != 0 && !output.stderr.contains("already") {
-            return Err(HostSchedulerError::Io(format!(
-                "launchctl bootstrap failed: {}",
-                output.stderr
-            )));
+        if output.exit_code == 0 {
+            return Ok(());
         }
 
-        Ok(())
+        let stderr = output.stderr.to_lowercase();
+        if stderr.contains("already loaded") || stderr.contains("already bootstrapped") {
+            return Ok(());
+        }
+
+        Err(HostSchedulerError::Io(format!(
+            "launchctl bootstrap failed: {}",
+            output.stderr
+        )))
     }
 
     /// Read and parse a schedule's plist file into an observed entry.
     ///
-    /// Returns `None` if the file cannot be read or reports a non-zero exit.
-    /// The XML text is parsed to determine enabled/disabled state, extract the
-    /// program command, and flag corruption.
-    async fn read_plist_entry(&self, schedule_id: &str) -> Option<ObservedHostEntry> {
+    /// Returns `Ok(None)` if the plist file is confirmed absent. Returns
+    /// `Ok(Some(entry))` with `corrupt: true` if the file exists but is
+    /// malformed. Returns `Err` for command execution failures or
+    /// non-"not found" errors so reconciliation does not treat
+    /// inaccessible state as absence.
+    async fn read_plist_entry(
+        &self,
+        schedule_id: &str,
+    ) -> Result<Option<ObservedHostEntry>, HostSchedulerError> {
         let plist_path = self.plist_path(schedule_id);
         let path_str = plist_path.to_string_lossy().to_string();
 
-        let output = self.runner.run("cat", &[&path_str]).await.ok()?;
+        let output = self
+            .runner
+            .run("cat", &[&path_str])
+            .await
+            .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
+
         if output.exit_code != 0 {
-            return None;
+            let stderr = output.stderr.to_lowercase();
+            if stderr.contains("no such file") || stderr.contains("not found") {
+                return Ok(None);
+            }
+            return Err(HostSchedulerError::Io(format!(
+                "cat failed (exit {}): {}",
+                output.exit_code, output.stderr
+            )));
         }
 
         let text = &output.stdout;
+        let expected_label = format!("{}{}", LABEL_PREFIX, schedule_id);
 
-        // A valid launchd plist has a <plist> root and a Label key.
-        let corrupt = !text.contains("<plist") || !text.contains("<key>Label</key>");
+        // Structural validation: require well-formed plist structure.
+        let has_plist_open = text.contains("<plist");
+        let has_plist_close = text.contains("</plist>");
+        let has_dict = text.contains("<dict>") && text.contains("</dict>");
 
-        // Disabled is true when <true/> is the value following the Disabled key,
-        // i.e. it appears before the next sibling <key>.
+        if !has_plist_open || !has_plist_close || !has_dict {
+            return Ok(Some(ObservedHostEntry {
+                schedule_id: schedule_id.to_string(),
+                enabled: false,
+                corrupt: true,
+                raw_schedule: None,
+                observed_command: None,
+                metadata: None,
+            }));
+        }
+
+        // Validate Label matches expected schedule ID (XML-decoded).
+        let label_key = "<key>Label</key>";
+        let label_ok = text.find(label_key).is_some_and(|pos| {
+            let after = &text[pos + label_key.len()..];
+            after.contains(&format!("<string>{}</string>", escape_xml(&expected_label)))
+        });
+
+        if !label_ok {
+            return Ok(Some(ObservedHostEntry {
+                schedule_id: schedule_id.to_string(),
+                enabled: false,
+                corrupt: true,
+                raw_schedule: None,
+                observed_command: None,
+                metadata: None,
+            }));
+        }
+
+        // Disabled is true when <true/> is the value following the Disabled key.
         let disabled = text.find("<key>Disabled</key>").map(|pos| {
             let after = &text[pos + "<key>Disabled</key>".len()..];
             match (after.find("<true/>"), after.find("<key>")) {
@@ -377,16 +490,29 @@ impl LaunchdHostScheduler {
             }
         });
 
+        // Validate ProgramArguments exists and has at least one string value.
         let command = parse_program_arguments(text).join(" ");
+        let has_program_args = text.contains("<key>ProgramArguments</key>") && !command.is_empty();
 
-        Some(ObservedHostEntry {
+        if !has_program_args {
+            return Ok(Some(ObservedHostEntry {
+                schedule_id: schedule_id.to_string(),
+                enabled: !disabled.unwrap_or(false),
+                corrupt: true,
+                raw_schedule: None,
+                observed_command: None,
+                metadata: None,
+            }));
+        }
+
+        Ok(Some(ObservedHostEntry {
             schedule_id: schedule_id.to_string(),
             enabled: !disabled.unwrap_or(false),
-            corrupt,
+            corrupt: false,
             raw_schedule: None,
             observed_command: Some(command),
             metadata: None,
-        })
+        }))
     }
 }
 
@@ -440,13 +566,35 @@ impl HostScheduler for LaunchdHostScheduler {
         }
 
         // Reload: bootout if loaded, then bootstrap.
-        self.bootout_if_loaded(&request.schedule_id).await;
+        self.bootout_if_loaded(&request.schedule_id).await?;
         self.bootstrap(&request.schedule_id).await?;
 
         // Apply enabled/disabled state via launchctl.
-        if !request.enabled {
-            let target = self.service_target(&request.schedule_id);
-            let _ = self.runner.run("launchctl", &["disable", &target]).await;
+        let target = self.service_target(&request.schedule_id);
+        if request.enabled {
+            let output = self
+                .runner
+                .run("launchctl", &["enable", &target])
+                .await
+                .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
+            if output.exit_code != 0 {
+                return Err(HostSchedulerError::Io(format!(
+                    "launchctl enable failed: {}",
+                    output.stderr
+                )));
+            }
+        } else {
+            let output = self
+                .runner
+                .run("launchctl", &["disable", &target])
+                .await
+                .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
+            if output.exit_code != 0 {
+                return Err(HostSchedulerError::Io(format!(
+                    "launchctl disable failed: {}",
+                    output.stderr
+                )));
+            }
         }
 
         Ok(())
@@ -454,7 +602,7 @@ impl HostScheduler for LaunchdHostScheduler {
 
     async fn remove(&self, schedule_id: &str) -> Result<(), HostSchedulerError> {
         // Unload the agent first.
-        self.bootout_if_loaded(schedule_id).await;
+        self.bootout_if_loaded(schedule_id).await?;
 
         // Then delete the plist file.
         let plist_path = self.plist_path(schedule_id);
@@ -484,13 +632,20 @@ impl HostScheduler for LaunchdHostScheduler {
             .await
             .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
 
+        if output.exit_code != 0 {
+            return Err(HostSchedulerError::Io(format!(
+                "ls failed (exit {}): {}",
+                output.exit_code, output.stderr
+            )));
+        }
+
         let mut entries = Vec::new();
         for line in output.stdout.lines() {
             if let Some(schedule_id) = line
                 .strip_prefix(&format!("{}{}", LABEL_PREFIX, ""))
                 .and_then(|s| s.strip_suffix(".plist"))
             {
-                if let Some(entry) = self.read_plist_entry(schedule_id).await {
+                if let Some(entry) = self.read_plist_entry(schedule_id).await? {
                     entries.push(entry);
                 }
             }
@@ -502,7 +657,7 @@ impl HostScheduler for LaunchdHostScheduler {
         &self,
         schedule_id: &str,
     ) -> Result<Option<ObservedHostEntry>, HostSchedulerError> {
-        Ok(self.read_plist_entry(schedule_id).await)
+        self.read_plist_entry(schedule_id).await
     }
 }
 
