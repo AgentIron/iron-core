@@ -18,6 +18,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Schema version for automation-run result payloads.
 pub const AUTOMATION_RUN_SCHEMA_VERSION: i64 = 1;
@@ -51,6 +52,8 @@ pub struct ResolvedExecutionInput {
     pub effective_skills: Vec<String>,
     /// Canonical workspace directory for the run.
     pub workspace: PathBuf,
+    /// Execution timeout for the run.
+    pub timeout: Duration,
     /// When this snapshot was resolved.
     pub resolved_at: DateTime<Utc>,
 }
@@ -176,7 +179,7 @@ impl AutomationRunResult {
             schema_version: AUTOMATION_RUN_SCHEMA_VERSION,
             run_id: uuid::Uuid::new_v4().to_string(),
             task_id: task.id.clone(),
-            task_name: task.name.clone(),
+            task_name: task.display_name.clone(),
             status: AutomationRunStatus::Failed,
             output: String::new(),
             expected_outcome: task.expected_outcome.clone(),
@@ -346,6 +349,7 @@ pub async fn resolve_task_execution(
     profiles: &HashMap<AgentProfileId, AgentProfile>,
     task_id: &str,
     workspace: PathBuf,
+    timeout: Duration,
 ) -> Result<ResolvedExecutionInput, ResolutionError> {
     let task = store
         .get_automation_task(task_id)
@@ -377,6 +381,7 @@ pub async fn resolve_task_execution(
         user_goal,
         effective_skills: skills,
         workspace,
+        timeout,
         resolved_at: Utc::now(),
     })
 }
@@ -431,10 +436,30 @@ pub fn effective_tool_filter(input: &ResolvedExecutionInput) -> ToolFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::automation_task::normalize_task_name;
     use crate::automation_task::AutomationTaskInput;
     use crate::config::ConfigStore;
     use crate::profile::{AgentApproval, AgentProfile, SkillFilter};
     use crate::stored_prompt::StoredPrompt;
+
+    // ---- test helpers ----
+
+    fn test_task(id: &str, display_name: &str) -> AutomationTask {
+        let now = Utc::now();
+        AutomationTask {
+            id: id.to_string(),
+            display_name: display_name.to_string(),
+            normalized_name: normalize_task_name(display_name),
+            stored_prompt_id: "p1".to_string(),
+            expected_outcome: "done".to_string(),
+            project_root: PathBuf::from("/tmp"),
+            timeout_seconds: 60,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(300);
 
     // ---- compose_user_goal ----
 
@@ -517,14 +542,7 @@ mod tests {
     #[test]
     fn effective_skills_inherit() {
         let now = Utc::now();
-        let task = AutomationTask {
-            id: "t1".to_string(),
-            name: "T".to_string(),
-            stored_prompt_id: "p1".to_string(),
-            expected_outcome: "done".to_string(),
-            created_at: now,
-            updated_at: now,
-        };
+        let task = test_task("t1", "T");
         let prompt = StoredPrompt {
             instructions: "do thing".to_string(),
             skills: vec!["s1".to_string(), "s2".to_string()],
@@ -542,6 +560,7 @@ mod tests {
             user_goal: "do thing\n\ndone".to_string(),
             effective_skills: vec!["s1".to_string(), "s2".to_string()],
             workspace: PathBuf::from("/tmp"),
+            timeout: TEST_TIMEOUT,
             resolved_at: now,
         };
         let skills = effective_skills(&input);
@@ -561,20 +580,14 @@ mod tests {
             ..AgentProfile::with_name("default")
         };
         let input = ResolvedExecutionInput {
-            task: AutomationTask {
-                id: "t".to_string(),
-                name: "T".to_string(),
-                stored_prompt_id: "p".to_string(),
-                expected_outcome: "o".to_string(),
-                created_at: now,
-                updated_at: now,
-            },
+            task: test_task("t", "T"),
             prompt,
             profile_id: AgentProfileId::from("default"),
             profile,
             user_goal: "do\n\no".to_string(),
             effective_skills: Vec::new(),
             workspace: PathBuf::from("/tmp"),
+            timeout: TEST_TIMEOUT,
             resolved_at: now,
         };
         assert!(effective_skills(&input).is_empty());
@@ -593,20 +606,14 @@ mod tests {
             ..AgentProfile::with_name("default")
         };
         let input = ResolvedExecutionInput {
-            task: AutomationTask {
-                id: "t".to_string(),
-                name: "T".to_string(),
-                stored_prompt_id: "p".to_string(),
-                expected_outcome: "o".to_string(),
-                created_at: now,
-                updated_at: now,
-            },
+            task: test_task("t", "T"),
             prompt,
             profile_id: AgentProfileId::from("default"),
             profile,
             user_goal: "do\n\no".to_string(),
             effective_skills: vec!["s1".to_string(), "s3".to_string()],
             workspace: PathBuf::from("/tmp"),
+            timeout: TEST_TIMEOUT,
             resolved_at: now,
         };
         let skills = effective_skills(&input);
@@ -617,34 +624,18 @@ mod tests {
 
     #[test]
     fn run_result_started_has_task_identity() {
-        let now = Utc::now();
-        let task = AutomationTask {
-            id: "daily".to_string(),
-            name: "Daily".to_string(),
-            stored_prompt_id: "p".to_string(),
-            expected_outcome: "report".to_string(),
-            created_at: now,
-            updated_at: now,
-        };
+        let task = test_task("daily", "Daily");
         let result = AutomationRunResult::started(&task, PathBuf::from("/work"));
         assert_eq!(result.task_id, "daily");
         assert_eq!(result.task_name, "Daily");
-        assert_eq!(result.expected_outcome, "report");
+        assert_eq!(result.expected_outcome, "done");
         assert_eq!(result.workspace, PathBuf::from("/work"));
         assert!(!result.run_id.is_empty());
     }
 
     #[test]
     fn run_result_complete() {
-        let now = Utc::now();
-        let task = AutomationTask {
-            id: "t".to_string(),
-            name: "T".to_string(),
-            stored_prompt_id: "p".to_string(),
-            expected_outcome: "o".to_string(),
-            created_at: now,
-            updated_at: now,
-        };
+        let task = test_task("t", "T");
         let mut result = AutomationRunResult::started(&task, PathBuf::from("/w"));
         result.complete("final output".to_string());
         assert_eq!(result.status, AutomationRunStatus::Completed);
@@ -654,15 +645,7 @@ mod tests {
 
     #[test]
     fn run_result_fail_sets_error() {
-        let now = Utc::now();
-        let task = AutomationTask {
-            id: "t".to_string(),
-            name: "T".to_string(),
-            stored_prompt_id: "p".to_string(),
-            expected_outcome: "o".to_string(),
-            created_at: now,
-            updated_at: now,
-        };
+        let task = test_task("t", "T");
         let mut result = AutomationRunResult::started(&task, PathBuf::from("/w"));
         result.fail(
             AutomationRunErrorCategory::Execution,
@@ -677,15 +660,7 @@ mod tests {
 
     #[test]
     fn run_result_cancel_and_timeout() {
-        let now = Utc::now();
-        let task = AutomationTask {
-            id: "t".to_string(),
-            name: "T".to_string(),
-            stored_prompt_id: "p".to_string(),
-            expected_outcome: "o".to_string(),
-            created_at: now,
-            updated_at: now,
-        };
+        let task = test_task("t", "T");
 
         let mut r1 = AutomationRunResult::started(&task, PathBuf::from("/w"));
         r1.cancel("SIGINT".to_string());
@@ -706,15 +681,7 @@ mod tests {
 
     #[test]
     fn run_result_serializes_to_json() {
-        let now = Utc::now();
-        let task = AutomationTask {
-            id: "t".to_string(),
-            name: "T".to_string(),
-            stored_prompt_id: "p".to_string(),
-            expected_outcome: "o".to_string(),
-            created_at: now,
-            updated_at: now,
-        };
+        let task = test_task("t", "T");
         let mut result = AutomationRunResult::started(&task, PathBuf::from("/w"));
         result.complete("done".to_string());
         result.set_resolved_metadata(
@@ -746,7 +713,6 @@ mod tests {
             "task not found".to_string(),
         );
         let json = serde_json::to_string(&result).unwrap();
-        // provider, model, and error must be present (not omitted) even when null
         assert!(
             json.contains("\"provider\":null"),
             "provider should be null, got: {}",
@@ -761,15 +727,7 @@ mod tests {
 
     #[test]
     fn json_includes_null_error_for_completed_run() {
-        let now = Utc::now();
-        let task = AutomationTask {
-            id: "t".to_string(),
-            name: "T".to_string(),
-            stored_prompt_id: "p".to_string(),
-            expected_outcome: "o".to_string(),
-            created_at: now,
-            updated_at: now,
-        };
+        let task = test_task("t", "T");
         let mut result = AutomationRunResult::started(&task, PathBuf::from("/w"));
         result.complete("done".to_string());
         let json = serde_json::to_string(&result).unwrap();
@@ -784,8 +742,8 @@ mod tests {
 
     async fn setup_store_with_task_and_prompt() -> ConfigStore {
         let store = ConfigStore::open_in_memory().await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
 
-        // Register a prompt.
         let prompt = StoredPrompt {
             instructions: "Generate a daily report".to_string(),
             skills: Vec::new(),
@@ -801,13 +759,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Register a task referencing the prompt.
         store
             .set_automation_task(&AutomationTaskInput {
                 id: "daily-report".to_string(),
-                name: "Daily Report".to_string(),
+                display_name: "Daily Report".to_string(),
                 stored_prompt_id: "report-prompt".to_string(),
                 expected_outcome: "A summary of today's activity".to_string(),
+                project_root: temp.path().to_path_buf(),
+                timeout_seconds: 300,
             })
             .await
             .unwrap();
@@ -829,10 +788,15 @@ mod tests {
         let store = setup_store_with_task_and_prompt().await;
         let reg = default_registry();
 
-        let input =
-            resolve_task_execution(&store, &reg, "daily-report", PathBuf::from("/workspace"))
-                .await
-                .unwrap();
+        let input = resolve_task_execution(
+            &store,
+            &reg,
+            "daily-report",
+            PathBuf::from("/workspace"),
+            TEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(input.task.id, "daily-report");
         assert_eq!(input.task.expected_outcome, "A summary of today's activity");
@@ -843,6 +807,7 @@ mod tests {
             "Generate a daily report\n\nA summary of today's activity"
         );
         assert_eq!(input.workspace, PathBuf::from("/workspace"));
+        assert_eq!(input.timeout, TEST_TIMEOUT);
     }
 
     #[tokio::test]
@@ -850,7 +815,9 @@ mod tests {
         let store = setup_store_with_task_and_prompt().await;
         let reg = default_registry();
 
-        let result = resolve_task_execution(&store, &reg, "missing", PathBuf::from("/w")).await;
+        let result =
+            resolve_task_execution(&store, &reg, "missing", PathBuf::from("/w"), TEST_TIMEOUT)
+                .await;
         assert!(matches!(result, Err(ResolutionError::TaskNotFound(_))));
     }
 
@@ -858,15 +825,14 @@ mod tests {
     async fn resolve_task_execution_prompt_not_found() {
         let store = ConfigStore::open_in_memory().await.unwrap();
 
-        // Creating a task referencing a nonexistent prompt is rejected at
-        // write time, so the resolver's PromptNotFound can only occur from
-        // manual DB tampering. Verify the write-time guard works.
         let result = store
             .set_automation_task(&AutomationTaskInput {
                 id: "orphan-task".to_string(),
-                name: "Orphan".to_string(),
+                display_name: "Orphan".to_string(),
                 stored_prompt_id: "nonexistent".to_string(),
                 expected_outcome: "nothing".to_string(),
+                project_root: std::env::temp_dir(),
+                timeout_seconds: 300,
             })
             .await;
 
@@ -882,8 +848,14 @@ mod tests {
         let store = setup_store_with_task_and_prompt().await;
         let reg: HashMap<AgentProfileId, AgentProfile> = HashMap::new();
 
-        let result =
-            resolve_task_execution(&store, &reg, "daily-report", PathBuf::from("/w")).await;
+        let result = resolve_task_execution(
+            &store,
+            &reg,
+            "daily-report",
+            PathBuf::from("/w"),
+            TEST_TIMEOUT,
+        )
+        .await;
         assert!(matches!(result, Err(ResolutionError::ProfileNotFound(_))));
     }
 
@@ -892,40 +864,51 @@ mod tests {
         let store = setup_store_with_task_and_prompt().await;
         let reg = default_registry();
 
-        // Resolve.
-        let input1 = resolve_task_execution(&store, &reg, "daily-report", PathBuf::from("/w"))
-            .await
-            .unwrap();
+        let input1 = resolve_task_execution(
+            &store,
+            &reg,
+            "daily-report",
+            PathBuf::from("/w"),
+            TEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
 
-        // Update the task's expected outcome.
+        let temp = tempfile::tempdir().unwrap();
         store
             .set_automation_task(&AutomationTaskInput {
                 id: "daily-report".to_string(),
-                name: "Daily Report".to_string(),
+                display_name: "Daily Report".to_string(),
                 stored_prompt_id: "report-prompt".to_string(),
                 expected_outcome: "Updated outcome".to_string(),
+                project_root: temp.path().to_path_buf(),
+                timeout_seconds: 300,
             })
             .await
             .unwrap();
 
-        // Original snapshot is unchanged.
         assert_eq!(
             input1.task.expected_outcome,
             "A summary of today's activity"
         );
 
-        // New resolution sees the update.
-        let input2 = resolve_task_execution(&store, &reg, "daily-report", PathBuf::from("/w"))
-            .await
-            .unwrap();
+        let input2 = resolve_task_execution(
+            &store,
+            &reg,
+            "daily-report",
+            PathBuf::from("/w"),
+            TEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert_eq!(input2.task.expected_outcome, "Updated outcome");
     }
 
     #[tokio::test]
     async fn resolve_task_execution_with_explicit_profile() {
         let store = ConfigStore::open_in_memory().await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
 
-        // Register a prompt with an explicit profile.
         let prompt = StoredPrompt {
             instructions: "Do work".to_string(),
             skills: Vec::new(),
@@ -944,9 +927,11 @@ mod tests {
         store
             .set_automation_task(&AutomationTaskInput {
                 id: "work-task".to_string(),
-                name: "Work".to_string(),
+                display_name: "Work".to_string(),
                 stored_prompt_id: "work-prompt".to_string(),
                 expected_outcome: "Work done".to_string(),
+                project_root: temp.path().to_path_buf(),
+                timeout_seconds: 300,
             })
             .await
             .unwrap();
@@ -961,9 +946,10 @@ mod tests {
             },
         );
 
-        let input = resolve_task_execution(&store, &reg, "work-task", PathBuf::from("/w"))
-            .await
-            .unwrap();
+        let input =
+            resolve_task_execution(&store, &reg, "work-task", PathBuf::from("/w"), TEST_TIMEOUT)
+                .await
+                .unwrap();
 
         assert_eq!(input.profile_id, AgentProfileId::from("automation"));
         assert_eq!(input.profile.approval, AgentApproval::AutoApprove);

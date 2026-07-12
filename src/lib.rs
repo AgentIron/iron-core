@@ -188,6 +188,7 @@ pub mod provider_credential;
 pub mod provider_profile;
 pub mod request_builder;
 pub mod runtime;
+pub mod scheduled_task;
 pub mod schema;
 pub mod skill;
 pub mod stored_prompt;

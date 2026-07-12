@@ -185,11 +185,27 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
             INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 7);
             "#,
     ),
+    (
+        8,
+        r#"
+            ALTER TABLE automation_tasks ADD COLUMN normalized_name TEXT NOT NULL DEFAULT '';
+            ALTER TABLE automation_tasks ADD COLUMN project_root TEXT NOT NULL DEFAULT '';
+            ALTER TABLE automation_tasks ADD COLUMN timeout_seconds INTEGER NOT NULL DEFAULT 0;
+
+            -- Backfill normalized_name from existing name. Legacy tasks keep
+            -- schema_version 1 so they remain distinguishable from complete v2
+            -- records with valid project_root and timeout_seconds.
+            UPDATE automation_tasks
+                SET normalized_name = lower(trim(name));
+
+            INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 8);
+            "#,
+    ),
 ];
 
 /// The current schema version.
 #[allow(dead_code)]
-pub const CURRENT_SCHEMA_VERSION: i64 = 7;
+pub const CURRENT_SCHEMA_VERSION: i64 = 8;
 
 /// Apply all pending migrations to the database.
 pub async fn apply_migrations(pool: &sqlx::SqlitePool) -> Result<(), super::error::ConfigError> {

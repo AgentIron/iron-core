@@ -3,10 +3,10 @@ use crate::config::records::PromptInput;
 use crate::config::{ConfigError, ConfigStore};
 use serde_json::json;
 use sqlx::Row;
+use std::path::PathBuf;
 
 async fn setup_store() -> ConfigStore {
     let store = ConfigStore::open_in_memory().await.unwrap();
-    // Seed a prompt so tasks can reference it.
     store
         .set_prompt(&PromptInput {
             id: "prompt-1".to_string(),
@@ -24,9 +24,11 @@ async fn setup_store() -> ConfigStore {
 fn task_input(id: &str, prompt_id: &str) -> AutomationTaskInput {
     AutomationTaskInput {
         id: id.to_string(),
-        name: format!("Task {}", id),
+        display_name: format!("Task {}", id),
         stored_prompt_id: prompt_id.to_string(),
         expected_outcome: "Done".to_string(),
+        project_root: std::env::temp_dir(),
+        timeout_seconds: 300,
     }
 }
 
@@ -34,18 +36,16 @@ fn task_input(id: &str, prompt_id: &str) -> AutomationTaskInput {
 async fn task_crud_create_get_list_delete() {
     let store = setup_store().await;
 
-    // Create
     let task = store
         .set_automation_task(&task_input("daily-report", "prompt-1"))
         .await
         .unwrap();
     assert_eq!(task.id, "daily-report");
-    assert_eq!(task.name, "Task daily-report");
+    assert_eq!(task.display_name, "Task daily-report");
     assert_eq!(task.stored_prompt_id, "prompt-1");
     assert_eq!(task.expected_outcome, "Done");
     assert_eq!(task.created_at, task.updated_at);
 
-    // Get
     let fetched = store
         .get_automation_task("daily-report")
         .await
@@ -53,7 +53,6 @@ async fn task_crud_create_get_list_delete() {
         .unwrap();
     assert_eq!(fetched, task);
 
-    // Delete
     store.delete_automation_task("daily-report").await.unwrap();
     assert!(store
         .get_automation_task("daily-report")
@@ -61,7 +60,6 @@ async fn task_crud_create_get_list_delete() {
         .unwrap()
         .is_none());
 
-    // Prompt remains
     assert!(store.get_prompt("prompt-1").await.unwrap().is_some());
 }
 
@@ -85,7 +83,6 @@ async fn task_list_is_deterministic_by_id() {
     let ids: Vec<&str> = list.iter().map(|t| t.id.as_str()).collect();
     assert_eq!(ids, vec!["alpha", "bravo", "charlie"]);
 
-    // Repeat — same order.
     let list2 = store.list_automation_tasks().await.unwrap();
     let ids2: Vec<&str> = list2.iter().map(|t| t.id.as_str()).collect();
     assert_eq!(ids, ids2);
@@ -99,21 +96,22 @@ async fn task_replacement_preserves_created_at_and_advances_updated_at() {
         .await
         .unwrap();
 
-    // Small delay so timestamps differ.
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
 
     let updated_input = AutomationTaskInput {
         id: "t1".to_string(),
-        name: "Updated Name".to_string(),
+        display_name: "Updated Name".to_string(),
         stored_prompt_id: "prompt-1".to_string(),
         expected_outcome: "New outcome".to_string(),
+        project_root: std::env::temp_dir(),
+        timeout_seconds: 600,
     };
     let updated = store.set_automation_task(&updated_input).await.unwrap();
 
     assert_eq!(updated.created_at, original.created_at);
     assert_ne!(updated.updated_at, original.updated_at);
     assert!(updated.updated_at > original.updated_at);
-    assert_eq!(updated.name, "Updated Name");
+    assert_eq!(updated.display_name, "Updated Name");
     assert_eq!(updated.expected_outcome, "New outcome");
 }
 
@@ -131,7 +129,6 @@ async fn task_missing_prompt_rejected() {
         other => panic!("expected UnknownStoredPrompt, got {:?}", other),
     }
 
-    // Task was not persisted.
     assert!(store.get_automation_task("t1").await.unwrap().is_none());
 }
 
@@ -141,9 +138,11 @@ async fn task_validation_rejects_empty_fields() {
 
     let bad_input = AutomationTaskInput {
         id: "  ".to_string(),
-        name: "Name".to_string(),
+        display_name: "Name".to_string(),
         stored_prompt_id: "prompt-1".to_string(),
         expected_outcome: "Done".to_string(),
+        project_root: std::env::temp_dir(),
+        timeout_seconds: 300,
     };
     let result = store.set_automation_task(&bad_input).await;
     assert!(matches!(result, Err(ConfigError::Validation(_))));
@@ -185,7 +184,6 @@ async fn prompt_deletion_blocked_when_task_references_it() {
         other => panic!("expected PromptReferencedByTasks, got {:?}", other),
     }
 
-    // Prompt and tasks remain.
     assert!(store.get_prompt("prompt-1").await.unwrap().is_some());
     assert!(store.get_automation_task("t1").await.unwrap().is_some());
     assert!(store.get_automation_task("t2").await.unwrap().is_some());
@@ -218,13 +216,15 @@ async fn task_input_is_trimmed_on_store() {
     let store = setup_store().await;
     let input = AutomationTaskInput {
         id: "  spaced-id  ".to_string(),
-        name: "  Spaced  ".to_string(),
+        display_name: "  Spaced  ".to_string(),
         stored_prompt_id: "  prompt-1  ".to_string(),
         expected_outcome: "  Outcome  ".to_string(),
+        project_root: std::env::temp_dir(),
+        timeout_seconds: 300,
     };
     let task = store.set_automation_task(&input).await.unwrap();
     assert_eq!(task.id, "spaced-id");
-    assert_eq!(task.name, "Spaced");
+    assert_eq!(task.display_name, "Spaced");
     assert_eq!(task.stored_prompt_id, "prompt-1");
     assert_eq!(task.expected_outcome, "Outcome");
 }
@@ -237,7 +237,6 @@ async fn schema_version_is_stored() {
         .await
         .unwrap();
 
-    // Verify the schema_version column directly.
     let row = sqlx::query("SELECT schema_version FROM automation_tasks WHERE id = ?")
         .bind("t1")
         .fetch_one(store.pool())
@@ -255,7 +254,6 @@ async fn get_rejects_unsupported_schema_version() {
         .await
         .unwrap();
 
-    // Tamper: set an unsupported schema version.
     sqlx::query("UPDATE automation_tasks SET schema_version = ? WHERE id = ?")
         .bind(999)
         .bind("t1")
@@ -275,7 +273,6 @@ async fn list_rejects_unsupported_schema_version() {
         .await
         .unwrap();
 
-    // Tamper: set an unsupported schema version.
     sqlx::query("UPDATE automation_tasks SET schema_version = ? WHERE id = ?")
         .bind(999)
         .bind("t1")
@@ -285,4 +282,87 @@ async fn list_rejects_unsupported_schema_version() {
 
     let result = store.list_automation_tasks().await;
     assert!(matches!(result, Err(ConfigError::Deserialization(_))));
+}
+
+#[tokio::test]
+async fn normalized_name_collision_rejected() {
+    let store = setup_store().await;
+    store
+        .set_automation_task(&task_input("task-a", "prompt-1"))
+        .await
+        .unwrap();
+
+    let colliding = AutomationTaskInput {
+        id: "task-b".to_string(),
+        display_name: "Task Task-a".to_string(),
+        stored_prompt_id: "prompt-1".to_string(),
+        expected_outcome: "Done".to_string(),
+        project_root: std::env::temp_dir(),
+        timeout_seconds: 300,
+    };
+    let result = store.set_automation_task(&colliding).await;
+    assert!(matches!(result, Err(ConfigError::TaskNameConflict { .. })));
+    assert!(store.get_automation_task("task-b").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn normalized_name_case_insensitive_collision() {
+    let store = setup_store().await;
+    let input_a = AutomationTaskInput {
+        id: "a".to_string(),
+        display_name: "Daily Report".to_string(),
+        stored_prompt_id: "prompt-1".to_string(),
+        expected_outcome: "Done".to_string(),
+        project_root: std::env::temp_dir(),
+        timeout_seconds: 300,
+    };
+    store.set_automation_task(&input_a).await.unwrap();
+
+    let input_b = AutomationTaskInput {
+        id: "b".to_string(),
+        display_name: "DAILY REPORT".to_string(),
+        stored_prompt_id: "prompt-1".to_string(),
+        expected_outcome: "Done".to_string(),
+        project_root: std::env::temp_dir(),
+        timeout_seconds: 300,
+    };
+    let result = store.set_automation_task(&input_b).await;
+    assert!(matches!(result, Err(ConfigError::TaskNameConflict { .. })));
+}
+
+#[tokio::test]
+async fn rename_preserves_id_and_updates_normalized_name() {
+    let store = setup_store().await;
+    store
+        .set_automation_task(&task_input("t1", "prompt-1"))
+        .await
+        .unwrap();
+
+    let renamed = AutomationTaskInput {
+        id: "t1".to_string(),
+        display_name: "New Name".to_string(),
+        stored_prompt_id: "prompt-1".to_string(),
+        expected_outcome: "Done".to_string(),
+        project_root: std::env::temp_dir(),
+        timeout_seconds: 300,
+    };
+    let task = store.set_automation_task(&renamed).await.unwrap();
+    assert_eq!(task.id, "t1");
+    assert_eq!(task.display_name, "New Name");
+    assert_eq!(task.normalized_name, "new-name");
+}
+
+#[tokio::test]
+async fn nonexistent_project_root_rejected() {
+    let store = setup_store().await;
+    let input = AutomationTaskInput {
+        id: "bad".to_string(),
+        display_name: "Bad Root".to_string(),
+        stored_prompt_id: "prompt-1".to_string(),
+        expected_outcome: "Done".to_string(),
+        project_root: PathBuf::from("/nonexistent/path/that/does/not/exist"),
+        timeout_seconds: 300,
+    };
+    let result = store.set_automation_task(&input).await;
+    assert!(matches!(result, Err(ConfigError::Validation(_))));
 }

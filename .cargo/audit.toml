@@ -1,2 +1,8 @@
 [advisories]
-ignore = []
+ignore = [
+    # pyo3 0.28.x is pulled transitively via monty -> jiter 0.15.0.
+    # jiter 0.16.0 uses pyo3 0.29, but monty 0.0.19-beta.4 caps jiter at ^0.15.0.
+    # Remove these ignores once monty bumps its jiter dependency.
+    "RUSTSEC-2026-0176", # OOB read in PyList/PyTuple iterators
+    "RUSTSEC-2026-0177", # Missing Sync bound on PyCFunction closures
+]

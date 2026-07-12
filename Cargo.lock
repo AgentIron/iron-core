@@ -2883,7 +2883,8 @@ dependencies = [
 [[package]]
 name = "monty"
 version = "0.0.19-beta.4"
-source = "git+https://github.com/pydantic/monty?tag=0.0.19-beta.4#c9c17d697e9394dc44cbeac2eb080f5deee4ec5f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "156b9f1b312cb12215f8b138af9703eda771069954e6b51636641ad53faaa3ff"
 dependencies = [
  "ahash",
  "chrono",
@@ -2915,7 +2916,8 @@ dependencies = [
 [[package]]
 name = "monty-macros"
 version = "0.0.19-beta.4"
-source = "git+https://github.com/pydantic/monty?tag=0.0.19-beta.4#c9c17d697e9394dc44cbeac2eb080f5deee4ec5f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccf89141e91b353a7060663c2a8bf3c09f6b6a3cddd046a51cc839c80c159fb3"
 dependencies = [
  "proc-macro2",
  "quote",

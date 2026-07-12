@@ -172,9 +172,11 @@ async fn seed_prompt_and_task(store: &ConfigStore, profile_id: &str) {
     store
         .set_automation_task(&AutomationTaskInput {
             id: "daily-report".to_string(),
-            name: "Daily Report".to_string(),
+            display_name: "Daily Report".to_string(),
             stored_prompt_id: "report-prompt".to_string(),
             expected_outcome: "A summary of today's activity".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
         })
         .await
         .unwrap();
@@ -236,7 +238,7 @@ async fn usage_missing_task_id() {
 }
 
 #[tokio::test]
-async fn usage_missing_timeout() {
+async fn task_timeout_used_as_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("config.db");
     let store = open_store(&db_path).await;
@@ -251,8 +253,14 @@ async fn usage_missing_timeout() {
         db_path.to_str().unwrap().to_string(),
     ];
     let env = vec![];
-    let (code, _out, _err) = run_cli(&args, &mut env.clone()).await;
-    assert_eq!(code, EXIT_USAGE);
+    let (code, _out, err) = run_cli(&args, &mut env.clone()).await;
+    assert_eq!(code, EXIT_COMPLETED);
+    // Verify the execution-boundary timeout resolved from the task-level
+    // fallback (300s), not just the seeded store value.
+    assert!(
+        err.contains("timeout: 300s"),
+        "expected execution timeout of 300s in stderr, got: {err}"
+    );
 }
 
 #[tokio::test]

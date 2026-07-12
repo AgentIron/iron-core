@@ -257,9 +257,8 @@ fn resolve_workspace_uses_cli() {
         "/nonexistent-env".to_string(),
     )];
     let env_ref: Vec<(String, String)> = env;
-    let w = resolve_workspace(Some("."), env_get(&env_ref, "AGENTIRON_WORKSPACE"));
+    let w = resolve_workspace(Some("."), env_get(&env_ref, "AGENTIRON_WORKSPACE"), None);
     assert!(w.is_ok());
-    // Should resolve to cwd, not the env value
     assert!(w.unwrap().is_absolute());
 }
 
@@ -270,39 +269,35 @@ fn resolve_workspace_uses_env() {
         .to_string_lossy()
         .to_string();
     let env = vec![("AGENTIRON_WORKSPACE".to_string(), env_val.clone())];
-    let w = resolve_workspace(None, env_get(&env, "AGENTIRON_WORKSPACE"));
+    let w = resolve_workspace(None, env_get(&env, "AGENTIRON_WORKSPACE"), None);
     assert!(w.is_ok());
     assert_eq!(w.unwrap(), PathBuf::from(env_val).canonicalize().unwrap());
 }
 
 #[test]
-fn resolve_workspace_defaults_to_cwd() {
-    let w = resolve_workspace(None, None).unwrap();
-    let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
-    assert_eq!(w, cwd);
+fn resolve_workspace_uses_fallback() {
+    let fallback = std::env::current_dir().unwrap();
+    let w = resolve_workspace(None, None, Some(&fallback)).unwrap();
+    assert_eq!(w, fallback.canonicalize().unwrap());
+}
+
+#[test]
+fn resolve_workspace_missing_without_fallback() {
+    let err = resolve_workspace(None, None, None).unwrap_err();
+    assert!(err.contains("required"));
 }
 
 #[test]
 fn resolve_workspace_rejects_nonexistent() {
-    let err = resolve_workspace(Some("/nonexistent/path/xyz"), None).unwrap_err();
+    let err = resolve_workspace(Some("/nonexistent/path/xyz"), None, None).unwrap_err();
     assert!(err.contains("does not exist"));
 }
 
 #[test]
 fn resolve_workspace_rejects_file() {
-    let err = resolve_workspace(Some("/etc/hostname"), None);
-    match err {
-        Ok(path) => {
-            // On some systems /etc/hostname might not exist; if it does,
-            // it should be rejected.
-            if path.exists() && !path.is_dir() {
-                panic!("expected error for file as workspace");
-            }
-        }
-        Err(e) => {
-            assert!(e.contains("not a directory") || e.contains("does not exist"));
-        }
-    }
+    let file = std::env::current_exe().unwrap();
+    let err = resolve_workspace(file.to_str(), None, None).unwrap_err();
+    assert!(err.contains("not a directory"));
 }
 
 // ============================================================================
@@ -311,25 +306,31 @@ fn resolve_workspace_rejects_file() {
 
 #[test]
 fn resolve_timeout_from_cli() {
-    let t = resolve_timeout(Some("5m"), Some("1h")).unwrap();
+    let t = resolve_timeout(Some("5m"), Some("1h"), None).unwrap();
     assert_eq!(t, Duration::from_secs(300));
 }
 
 #[test]
 fn resolve_timeout_from_env() {
-    let t = resolve_timeout(None, Some("1h")).unwrap();
+    let t = resolve_timeout(None, Some("1h"), None).unwrap();
     assert_eq!(t, Duration::from_secs(3600));
 }
 
 #[test]
+fn resolve_timeout_from_fallback() {
+    let t = resolve_timeout(None, None, Some(Duration::from_secs(120))).unwrap();
+    assert_eq!(t, Duration::from_secs(120));
+}
+
+#[test]
 fn resolve_timeout_missing() {
-    let err = resolve_timeout(None, None).unwrap_err();
+    let err = resolve_timeout(None, None, None).unwrap_err();
     assert!(err.contains("required"));
 }
 
 #[test]
 fn resolve_timeout_invalid_value() {
-    let err = resolve_timeout(Some("0s"), None).unwrap_err();
+    let err = resolve_timeout(Some("0s"), None, None).unwrap_err();
     assert!(err.contains("greater than zero"));
 }
 
@@ -428,9 +429,12 @@ fn exit_code_for_result_failed_unsafe_policy() {
     let mut result = AutomationRunResult::started(
         &crate::automation_task::AutomationTask {
             id: "t".to_string(),
-            name: "T".to_string(),
+            display_name: "T".to_string(),
+            normalized_name: "t".to_string(),
             stored_prompt_id: "p".to_string(),
             expected_outcome: "o".to_string(),
+            project_root: std::path::PathBuf::from("/tmp"),
+            timeout_seconds: 60,
             created_at: now,
             updated_at: now,
         },
@@ -449,9 +453,12 @@ fn exit_code_for_result_failed_execution() {
     let mut result = AutomationRunResult::started(
         &crate::automation_task::AutomationTask {
             id: "t".to_string(),
-            name: "T".to_string(),
+            display_name: "T".to_string(),
+            normalized_name: "t".to_string(),
             stored_prompt_id: "p".to_string(),
             expected_outcome: "o".to_string(),
+            project_root: std::path::PathBuf::from("/tmp"),
+            timeout_seconds: 60,
             created_at: now,
             updated_at: now,
         },
@@ -470,9 +477,12 @@ fn exit_code_for_result_completed() {
     let mut result = AutomationRunResult::started(
         &crate::automation_task::AutomationTask {
             id: "t".to_string(),
-            name: "T".to_string(),
+            display_name: "T".to_string(),
+            normalized_name: "t".to_string(),
             stored_prompt_id: "p".to_string(),
             expected_outcome: "o".to_string(),
+            project_root: std::path::PathBuf::from("/tmp"),
+            timeout_seconds: 60,
             created_at: now,
             updated_at: now,
         },
@@ -488,9 +498,12 @@ fn exit_code_for_result_failed_config() {
     let mut result = AutomationRunResult::started(
         &crate::automation_task::AutomationTask {
             id: "t".to_string(),
-            name: "T".to_string(),
+            display_name: "T".to_string(),
+            normalized_name: "t".to_string(),
             stored_prompt_id: "p".to_string(),
             expected_outcome: "o".to_string(),
+            project_root: std::path::PathBuf::from("/tmp"),
+            timeout_seconds: 60,
             created_at: now,
             updated_at: now,
         },

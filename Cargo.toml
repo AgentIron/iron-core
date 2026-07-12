@@ -68,16 +68,12 @@ cfg-if = "1"
 
 # Embedded Python runtime (Monty)
 #
-# Position B adoption: pinned to a specific upstream commit for reproducibility.
-# crates.io only has a 0.0.0 placeholder, so a git dep is the only viable path.
-# Re-evaluate once Monty publishes a usable semver release.
-# Do NOT fork unless upstream cannot resolve a real Level 3 portability blocker.
+# Sourced from crates.io (0.0.19-beta.4). The transitive dependency
+# pyo3 0.28.x (via jiter 0.15.0) has known advisories suppressed in
+# .cargo/audit.toml until monty bumps jiter to ^0.16.0 (which uses pyo3 0.29).
 #
-# Publication of iron-core to crates.io is deferred until monty is available
-# there, because crates.io rejects manifests containing git dependencies.
-#
-# Bump `rev` deliberately after verifying against the iron-core test suite.
-monty = { git = "https://github.com/pydantic/monty", tag = "0.0.19-beta.4", optional = true }
+# Bump version deliberately after verifying against the iron-core test suite.
+monty = { version = "0.0.19-beta.4", optional = true }
 num-bigint = { version = "0.4", optional = true }
 num-traits = { version = "0.2", optional = true }
 
