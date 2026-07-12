@@ -54,23 +54,48 @@ impl<'a> ScheduleManager<'a> {
     /// mutating either. Reports orphans (host entry without desired state)
     /// and drift (mismatched schedule or enabled state).
     pub async fn inspect(&self, schedule_id: &str) -> ScheduleStatus {
-        let desired = self
-            .store
-            .get_scheduled_task(schedule_id)
-            .await
-            .ok()
-            .flatten();
-        let observed = self.host.inspect(schedule_id).await.ok().flatten();
+        let (desired, store_error) = match self.store.get_scheduled_task(schedule_id).await {
+            Ok(opt) => (opt, None),
+            Err(e) => (None, Some(format!("config store error: {}", e))),
+        };
 
-        self.synthesize_status(schedule_id, desired, observed)
+        let (observed, host_error) = match self.host.inspect(schedule_id).await {
+            Ok(opt) => (opt, None),
+            Err(e) => (None, Some(format!("host error: {}", e))),
+        };
+
+        // Check automation-task reference.
+        let reference_state = match &desired {
+            Some(schedule) => {
+                match self
+                    .store
+                    .get_automation_task(&schedule.automation_task_id)
+                    .await
+                {
+                    Ok(Some(_)) => ReferenceState::Valid,
+                    Ok(None) => ReferenceState::Missing,
+                    Err(_) => ReferenceState::Invalid,
+                }
+            }
+            None => ReferenceState::Valid,
+        };
+
+        self.synthesize_status(
+            schedule_id,
+            desired,
+            observed,
+            store_error,
+            host_error,
+            reference_state,
+        )
     }
 
     /// Read-only inspection of all known schedules and owned host entries.
-    ///
-    /// Combines desired ConfigStore schedules with all owned host entries.
-    /// Orphaned host entries (no desired ConfigStore record) are included.
     pub async fn inspect_all(&self) -> Vec<ScheduleStatus> {
-        let desired_list = self.store.list_scheduled_tasks().await.unwrap_or_default();
+        let desired_list = match self.store.list_scheduled_tasks().await {
+            Ok(list) => list,
+            Err(_) => return Vec::new(),
+        };
         let observed_list = self.host.list_owned().await.unwrap_or_default();
 
         let mut ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -85,7 +110,31 @@ impl<'a> ScheduleManager<'a> {
         for id in ids {
             let desired = desired_list.iter().find(|d| d.id == id).cloned();
             let observed = observed_list.iter().find(|o| o.schedule_id == id).cloned();
-            results.push(self.synthesize_status(&id, desired, observed));
+
+            // Check reference for desired schedules.
+            let reference_state = match &desired {
+                Some(schedule) => {
+                    match self
+                        .store
+                        .get_automation_task(&schedule.automation_task_id)
+                        .await
+                    {
+                        Ok(Some(_)) => ReferenceState::Valid,
+                        Ok(None) => ReferenceState::Missing,
+                        Err(_) => ReferenceState::Invalid,
+                    }
+                }
+                None => ReferenceState::Valid,
+            };
+
+            results.push(self.synthesize_status(
+                &id,
+                desired,
+                observed,
+                None,
+                None,
+                reference_state,
+            ));
         }
         results
     }
@@ -202,24 +251,41 @@ impl<'a> ScheduleManager<'a> {
     }
 
     /// Synthesize a compositional status from desired and observed state.
+    #[allow(clippy::too_many_arguments)]
     fn synthesize_status(
         &self,
         schedule_id: &str,
         desired: Option<ScheduledTask>,
         observed: Option<ObservedHostEntry>,
+        store_error: Option<String>,
+        host_error: Option<String>,
+        reference_state: ReferenceState,
     ) -> ScheduleStatus {
         let mut diagnostics = Vec::new();
-        let mut reference_state = ReferenceState::Valid;
-        let mut execution_state = ExecutionState::Ready;
+        let execution_state = ExecutionState::Unknown; // Cannot verify headless safety without profile registry.
         let mut host_state = HostState::Missing;
 
+        // Surface store errors.
+        if let Some(ref msg) = store_error {
+            diagnostics.push(ScheduleDiagnostic {
+                kind: ScheduleDiagnosticKind::PlatformUnavailable,
+                message: msg.clone(),
+            });
+        }
+
+        // Surface host errors.
+        if let Some(ref msg) = host_error {
+            diagnostics.push(ScheduleDiagnostic {
+                kind: ScheduleDiagnosticKind::PlatformUnavailable,
+                message: msg.clone(),
+            });
+            host_state = HostState::Unknown;
+        }
+
         let desired_state = if let Some(ref schedule) = desired {
-            // Check automation-task reference.
-            let task_valid = self.check_reference(&schedule.automation_task_id);
-            match task_valid {
-                ReferenceCheckResult::Missing => {
-                    reference_state = ReferenceState::Missing;
-                    execution_state = ExecutionState::Unknown;
+            // Add reference diagnostics from pre-checked state.
+            match reference_state {
+                ReferenceState::Missing => {
                     diagnostics.push(ScheduleDiagnostic {
                         kind: ScheduleDiagnosticKind::MissingTask,
                         message: format!(
@@ -228,9 +294,7 @@ impl<'a> ScheduleManager<'a> {
                         ),
                     });
                 }
-                ReferenceCheckResult::Invalid => {
-                    reference_state = ReferenceState::Invalid;
-                    execution_state = ExecutionState::Unknown;
+                ReferenceState::Invalid => {
                     diagnostics.push(ScheduleDiagnostic {
                         kind: ScheduleDiagnosticKind::InvalidTask,
                         message: format!(
@@ -239,7 +303,7 @@ impl<'a> ScheduleManager<'a> {
                         ),
                     });
                 }
-                ReferenceCheckResult::Valid => {}
+                ReferenceState::Valid => {}
             }
 
             DesiredState::Present
@@ -247,63 +311,65 @@ impl<'a> ScheduleManager<'a> {
             DesiredState::Missing
         };
 
-        // Analyze host state.
-        if let Some(ref entry) = observed {
-            if entry.corrupt {
-                host_state = HostState::Corrupt;
-                diagnostics.push(ScheduleDiagnostic {
-                    kind: ScheduleDiagnosticKind::CorruptHostEntry,
-                    message: format!("host entry '{}' is corrupt", schedule_id),
-                });
-            } else if desired.is_none() {
-                host_state = HostState::Installed;
-                diagnostics.push(ScheduleDiagnostic {
-                    kind: ScheduleDiagnosticKind::OrphanedHostEntry,
-                    message: format!(
-                        "host entry '{}' exists but no desired schedule",
-                        schedule_id
-                    ),
-                });
-            } else if !entry.enabled && desired.as_ref().map(|d| d.enabled).unwrap_or(true) {
-                host_state = HostState::Disabled;
-                diagnostics.push(ScheduleDiagnostic {
-                    kind: ScheduleDiagnosticKind::ScheduleDrift,
-                    message: format!(
-                        "host entry '{}' is disabled but desired is enabled",
-                        schedule_id
-                    ),
-                });
-            } else if entry.enabled && !desired.as_ref().map(|d| d.enabled).unwrap_or(true) {
-                host_state = HostState::Drifted;
-                diagnostics.push(ScheduleDiagnostic {
-                    kind: ScheduleDiagnosticKind::ScheduleDrift,
-                    message: format!(
-                        "host entry '{}' is enabled but desired is disabled",
-                        schedule_id
-                    ),
-                });
-            } else if self.check_drift(&desired, entry) {
-                host_state = HostState::Drifted;
-                diagnostics.push(ScheduleDiagnostic {
-                    kind: ScheduleDiagnosticKind::ScheduleDrift,
-                    message: format!(
-                        "host entry '{}' schedule or command differs from desired",
-                        schedule_id
-                    ),
-                });
-            } else {
-                host_state = if entry.enabled {
-                    HostState::Installed
+        // Analyze host state (only if no host error).
+        if host_error.is_none() {
+            if let Some(ref entry) = observed {
+                if entry.corrupt {
+                    host_state = HostState::Corrupt;
+                    diagnostics.push(ScheduleDiagnostic {
+                        kind: ScheduleDiagnosticKind::CorruptHostEntry,
+                        message: format!("host entry '{}' is corrupt", schedule_id),
+                    });
+                } else if desired.is_none() {
+                    host_state = HostState::Installed;
+                    diagnostics.push(ScheduleDiagnostic {
+                        kind: ScheduleDiagnosticKind::OrphanedHostEntry,
+                        message: format!(
+                            "host entry '{}' exists but no desired schedule",
+                            schedule_id
+                        ),
+                    });
+                } else if !entry.enabled && desired.as_ref().map(|d| d.enabled).unwrap_or(true) {
+                    host_state = HostState::Disabled;
+                    diagnostics.push(ScheduleDiagnostic {
+                        kind: ScheduleDiagnosticKind::ScheduleDrift,
+                        message: format!(
+                            "host entry '{}' is disabled but desired is enabled",
+                            schedule_id
+                        ),
+                    });
+                } else if entry.enabled && !desired.as_ref().map(|d| d.enabled).unwrap_or(true) {
+                    host_state = HostState::Drifted;
+                    diagnostics.push(ScheduleDiagnostic {
+                        kind: ScheduleDiagnosticKind::ScheduleDrift,
+                        message: format!(
+                            "host entry '{}' is enabled but desired is disabled",
+                            schedule_id
+                        ),
+                    });
+                } else if self.check_drift(&desired, entry) {
+                    host_state = HostState::Drifted;
+                    diagnostics.push(ScheduleDiagnostic {
+                        kind: ScheduleDiagnosticKind::ScheduleDrift,
+                        message: format!(
+                            "host entry '{}' schedule or command differs from desired",
+                            schedule_id
+                        ),
+                    });
                 } else {
-                    HostState::Disabled
-                };
+                    host_state = if entry.enabled {
+                        HostState::Installed
+                    } else {
+                        HostState::Disabled
+                    };
+                }
+            } else if desired.is_some() {
+                host_state = HostState::Missing;
+                diagnostics.push(ScheduleDiagnostic {
+                    kind: ScheduleDiagnosticKind::NotInstalled,
+                    message: format!("host entry '{}' is not installed", schedule_id),
+                });
             }
-        } else if desired.is_some() {
-            host_state = HostState::Missing;
-            diagnostics.push(ScheduleDiagnostic {
-                kind: ScheduleDiagnosticKind::NotInstalled,
-                message: format!("host entry '{}' is not installed", schedule_id),
-            });
         }
 
         // Check runner-path drift if we have both desired and observed.
@@ -313,10 +379,8 @@ impl<'a> ScheduleManager<'a> {
                 .generate_invocation(&schedule.automation_task_id);
             let expected_cmd = crate::scheduled_task::host::render_command(&program, &args);
             if let Some(ref observed_cmd) = entry.observed_command {
-                if *observed_cmd != expected_cmd {
-                    if host_state != HostState::Corrupt {
-                        host_state = HostState::Drifted;
-                    }
+                if *observed_cmd != expected_cmd && host_state != HostState::Corrupt {
+                    host_state = HostState::Drifted;
                     diagnostics.push(ScheduleDiagnostic {
                         kind: ScheduleDiagnosticKind::RunnerPathDrift,
                         message: "host entry command differs from installation context".to_string(),
@@ -325,7 +389,11 @@ impl<'a> ScheduleManager<'a> {
             }
         }
 
-        let health = self.compute_health(&desired_state, &reference_state, &host_state);
+        let health = if store_error.is_some() || host_error.is_some() {
+            ScheduleHealth::Unavailable
+        } else {
+            self.compute_health(&desired_state, &reference_state, &host_state)
+        };
 
         ScheduleStatus {
             schedule_id: schedule_id.to_string(),
@@ -373,15 +441,6 @@ impl<'a> ScheduleManager<'a> {
         false
     }
 
-    /// Synchronously check automation-task reference validity.
-    /// Since ConfigStore methods are async but synthesize_status is sync,
-    /// we return a best-effort result. A full async version would require
-    /// restructuring. For now, this always returns Valid, and the actual
-    /// reference check is performed during reconcile.
-    fn check_reference(&self, _task_id: &str) -> ReferenceCheckResult {
-        ReferenceCheckResult::Valid
-    }
-
     /// Build an error status for failed operations.
     fn error_status(
         &self,
@@ -402,15 +461,6 @@ impl<'a> ScheduleManager<'a> {
             host_metadata: None,
         }
     }
-}
-
-/// Internal reference-check result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-enum ReferenceCheckResult {
-    Valid,
-    Missing,
-    Invalid,
 }
 
 #[cfg(test)]
