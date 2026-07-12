@@ -2111,6 +2111,13 @@ impl ConfigStore {
                         id, schema_version, AUTOMATION_TASK_SCHEMA_VERSION
                     )));
                 }
+                let timeout_i64: i64 = row.get("timeout_seconds");
+                if timeout_i64 < 0 {
+                    return Err(ConfigError::Deserialization(format!(
+                        "automation task '{}' has negative timeout {}",
+                        id, timeout_i64
+                    )));
+                }
                 Ok(Some(crate::automation_task::AutomationTask {
                     id: row.get("id"),
                     display_name: row.get("name"),
@@ -2118,7 +2125,7 @@ impl ConfigStore {
                     stored_prompt_id: row.get("stored_prompt_id"),
                     expected_outcome: row.get("expected_outcome"),
                     project_root: std::path::PathBuf::from(row.get::<String, _>("project_root")),
-                    timeout_seconds: row.get::<i64, _>("timeout_seconds") as u64,
+                    timeout_seconds: timeout_i64 as u64,
                     created_at: parse_datetime(row.get::<String, _>("created_at"))?,
                     updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
                 }))
@@ -2154,6 +2161,14 @@ impl ConfigStore {
                         AUTOMATION_TASK_SCHEMA_VERSION
                     )));
                 }
+                let timeout_i64: i64 = row.get("timeout_seconds");
+                if timeout_i64 < 0 {
+                    return Err(ConfigError::Deserialization(format!(
+                        "automation task '{}' has negative timeout {}",
+                        row.get::<String, _>("id"),
+                        timeout_i64
+                    )));
+                }
                 Ok(crate::automation_task::AutomationTask {
                     id: row.get("id"),
                     display_name: row.get("name"),
@@ -2161,7 +2176,7 @@ impl ConfigStore {
                     stored_prompt_id: row.get("stored_prompt_id"),
                     expected_outcome: row.get("expected_outcome"),
                     project_root: std::path::PathBuf::from(row.get::<String, _>("project_root")),
-                    timeout_seconds: row.get::<i64, _>("timeout_seconds") as u64,
+                    timeout_seconds: timeout_i64 as u64,
                     created_at: parse_datetime(row.get::<String, _>("created_at"))?,
                     updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
                 })

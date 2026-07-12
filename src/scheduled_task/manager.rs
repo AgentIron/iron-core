@@ -162,14 +162,43 @@ impl<'a> ScheduleManager<'a> {
                 let request = self.build_install_request(&schedule);
                 match request {
                     Ok(req) => {
-                        if let Err(e) = self.host.install(&req).await {
-                            return self.error_status(
-                                schedule_id,
-                                DesiredState::Present,
-                                HostState::Unknown,
-                                ScheduleDiagnosticKind::InstallationFailed,
-                                format!("host install failed: {}", e),
-                            );
+                        // Inspect current host state before mutating.
+                        // Skip install if the entry already matches.
+                        let needs_install = match self.host.inspect(schedule_id).await {
+                            Ok(Some(entry)) => {
+                                !entry.corrupt
+                                    && entry.enabled == req.enabled
+                                    && entry
+                                        .raw_schedule
+                                        .as_deref()
+                                        .map(|s| s == req.cron.as_str())
+                                        .unwrap_or(false)
+                                    && entry
+                                        .observed_command
+                                        .as_deref()
+                                        .map(|c| {
+                                            let expected =
+                                                crate::scheduled_task::host::render_command(
+                                                    &req.program,
+                                                    &req.args,
+                                                );
+                                            c == expected
+                                        })
+                                        .unwrap_or(false)
+                            }
+                            _ => true, // Missing, corrupt, or error → needs install
+                        };
+
+                        if needs_install {
+                            if let Err(e) = self.host.install(&req).await {
+                                return self.error_status(
+                                    schedule_id,
+                                    DesiredState::Present,
+                                    HostState::Unknown,
+                                    ScheduleDiagnosticKind::InstallationFailed,
+                                    format!("host install failed: {}", e),
+                                );
+                            }
                         }
                     }
                     Err(diagnostic) => {

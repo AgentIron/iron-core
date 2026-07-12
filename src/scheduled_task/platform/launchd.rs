@@ -250,6 +250,41 @@ fn push_interval_keys(xml: &mut String, interval: &CalendarInterval, indent: &st
     }
 }
 
+/// Extract the `<string>` values inside a plist's `ProgramArguments` array.
+///
+/// Returns an empty vector if the key or array cannot be located.
+fn parse_program_arguments(text: &str) -> Vec<String> {
+    let key = "<key>ProgramArguments</key>";
+    let key_pos = match text.find(key) {
+        Some(p) => p + key.len(),
+        None => return Vec::new(),
+    };
+    let after_key = &text[key_pos..];
+    let array_open = match after_key.find("<array>") {
+        Some(p) => key_pos + p + "<array>".len(),
+        None => return Vec::new(),
+    };
+    let array_close = match text[array_open..].find("</array>") {
+        Some(p) => array_open + p,
+        None => return Vec::new(),
+    };
+    let body = &text[array_open..array_close];
+
+    let mut args = Vec::new();
+    let mut cursor = body;
+    while let Some(open) = cursor.find("<string>") {
+        let value_start = open + "<string>".len();
+        let rest = &cursor[value_start..];
+        let close = match rest.find("</string>") {
+            Some(p) => p,
+            None => break,
+        };
+        args.push(rest[..close].to_string());
+        cursor = &rest[close + "</string>".len()..];
+    }
+    args
+}
+
 // ============================================================================
 // Adapter
 // ============================================================================
@@ -310,6 +345,48 @@ impl LaunchdHostScheduler {
         }
 
         Ok(())
+    }
+
+    /// Read and parse a schedule's plist file into an observed entry.
+    ///
+    /// Returns `None` if the file cannot be read or reports a non-zero exit.
+    /// The XML text is parsed to determine enabled/disabled state, extract the
+    /// program command, and flag corruption.
+    async fn read_plist_entry(&self, schedule_id: &str) -> Option<ObservedHostEntry> {
+        let plist_path = self.plist_path(schedule_id);
+        let path_str = plist_path.to_string_lossy().to_string();
+
+        let output = self.runner.run("cat", &[&path_str]).await.ok()?;
+        if output.exit_code != 0 {
+            return None;
+        }
+
+        let text = &output.stdout;
+
+        // A valid launchd plist has a <plist> root and a Label key.
+        let corrupt = !text.contains("<plist") || !text.contains("<key>Label</key>");
+
+        // Disabled is true when <true/> is the value following the Disabled key,
+        // i.e. it appears before the next sibling <key>.
+        let disabled = text.find("<key>Disabled</key>").map(|pos| {
+            let after = &text[pos + "<key>Disabled</key>".len()..];
+            match (after.find("<true/>"), after.find("<key>")) {
+                (Some(t), Some(k)) => t < k,
+                (Some(_), None) => true,
+                _ => false,
+            }
+        });
+
+        let command = parse_program_arguments(text).join(" ");
+
+        Some(ObservedHostEntry {
+            schedule_id: schedule_id.to_string(),
+            enabled: !disabled.unwrap_or(false),
+            corrupt,
+            raw_schedule: None,
+            observed_command: Some(command),
+            metadata: None,
+        })
     }
 }
 
@@ -413,14 +490,9 @@ impl HostScheduler for LaunchdHostScheduler {
                 .strip_prefix(&format!("{}{}", LABEL_PREFIX, ""))
                 .and_then(|s| s.strip_suffix(".plist"))
             {
-                entries.push(ObservedHostEntry {
-                    schedule_id: schedule_id.to_string(),
-                    enabled: true,
-                    corrupt: false,
-                    raw_schedule: None,
-                    observed_command: None,
-                    metadata: None,
-                });
+                if let Some(entry) = self.read_plist_entry(schedule_id).await {
+                    entries.push(entry);
+                }
             }
         }
         Ok(entries)
@@ -430,8 +502,7 @@ impl HostScheduler for LaunchdHostScheduler {
         &self,
         schedule_id: &str,
     ) -> Result<Option<ObservedHostEntry>, HostSchedulerError> {
-        let list = self.list_owned().await?;
-        Ok(list.into_iter().find(|e| e.schedule_id == schedule_id))
+        Ok(self.read_plist_entry(schedule_id).await)
     }
 }
 

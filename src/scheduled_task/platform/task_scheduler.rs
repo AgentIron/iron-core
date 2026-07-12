@@ -261,6 +261,59 @@ fn task_path(schedule_id: &str) -> String {
     format!("{}{}", TASK_FOLDER, schedule_id)
 }
 
+/// Extract the text between the first occurrence of `open` and its matching
+/// `close` tag in `text`.
+fn extract_xml_block<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = text.find(open)? + open.len();
+    let end = text[start..].find(close)? + start;
+    Some(&text[start..end])
+}
+
+/// Reverse the entity escaping applied by [`escape_xml`].
+fn unescape_xml(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+}
+
+/// Parse a Task Scheduler XML document into `(enabled, corrupt, observed_command)`.
+///
+/// Returns `None` if the document does not resemble a task definition
+/// (missing `<Task` or `<Actions>`), indicating corruption. When `Some` is
+/// returned, `corrupt` is always `false`.
+fn parse_task_xml(xml_text: &str) -> Option<(bool, bool, Option<String>)> {
+    if !xml_text.contains("<Task") || !xml_text.contains("<Actions") {
+        return None;
+    }
+
+    let enabled = extract_xml_block(xml_text, "<Settings>", "</Settings>")
+        .map(|block| block.contains("<Enabled>true</Enabled>"))
+        .unwrap_or(true);
+
+    let observed_command = extract_xml_block(xml_text, "<Exec>", "</Exec>").and_then(|exec| {
+        let command = extract_xml_block(exec, "<Command>", "</Command>").map(unescape_xml);
+        let arguments = extract_xml_block(exec, "<Arguments>", "</Arguments>").map(unescape_xml);
+        match (command, arguments) {
+            (Some(c), Some(a)) if !a.is_empty() => Some(format!("{c} {a}")),
+            (Some(c), _) => Some(c),
+            (None, Some(a)) => Some(a),
+            (None, None) => None,
+        }
+    });
+
+    Some((enabled, false, observed_command))
+}
+
+/// Extract a schedule id from a CSV task-list line containing the AgentIron
+/// task folder.
+fn schedule_id_from_csv_line(line: &str) -> Option<&str> {
+    let idx = line.find(TASK_FOLDER)?;
+    let after = &line[idx + TASK_FOLDER.len()..];
+    let end = after.find([',', '"']).unwrap_or(after.len());
+    Some(&after[..end])
+}
+
 // ============================================================================
 // Adapter
 // ============================================================================
@@ -349,28 +402,27 @@ impl HostScheduler for TaskSchedulerHostScheduler {
     }
 
     async fn list_owned(&self) -> Result<Vec<ObservedHostEntry>, HostSchedulerError> {
-        let output = self
+        let output = match self
             .runner
-            .run(
-                "schtasks.exe",
-                &["/Query", "/TN", TASK_FOLDER, "/FO", "CSV"],
-            )
+            .run("schtasks.exe", &["/Query", "/FO", "CSV", "/NH"])
             .await
-            .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
+        {
+            Ok(o) => o,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        if output.exit_code != 0 {
+            return Ok(Vec::new());
+        }
 
         let mut entries = Vec::new();
         for line in output.stdout.lines() {
-            if line.contains(TASK_FOLDER) {
-                if let Some(id) = line.strip_prefix(TASK_FOLDER) {
-                    let id = id.split(',').next().unwrap_or(id).trim_matches('"');
-                    entries.push(ObservedHostEntry {
-                        schedule_id: id.to_string(),
-                        enabled: true,
-                        corrupt: false,
-                        raw_schedule: None,
-                        observed_command: None,
-                        metadata: None,
-                    });
+            if !line.contains(TASK_FOLDER) {
+                continue;
+            }
+            if let Some(id) = schedule_id_from_csv_line(line) {
+                if let Some(entry) = self.inspect(id).await? {
+                    entries.push(entry);
                 }
             }
         }
@@ -384,7 +436,7 @@ impl HostScheduler for TaskSchedulerHostScheduler {
         let path = task_path(schedule_id);
         let output = self
             .runner
-            .run("schtasks.exe", &["/Query", "/TN", &path, "/FO", "CSV"])
+            .run("schtasks.exe", &["/Query", "/TN", &path, "/XML"])
             .await
             .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
 
@@ -392,12 +444,15 @@ impl HostScheduler for TaskSchedulerHostScheduler {
             return Ok(None);
         }
 
+        let (enabled, corrupt, observed_command) =
+            parse_task_xml(&output.stdout).unwrap_or((true, true, None));
+
         Ok(Some(ObservedHostEntry {
             schedule_id: schedule_id.to_string(),
-            enabled: output.stdout.contains("Ready"),
-            corrupt: false,
+            enabled,
+            corrupt,
             raw_schedule: None,
-            observed_command: None,
+            observed_command,
             metadata: None,
         }))
     }
