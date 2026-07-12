@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Durable configuration store for AgentIron.
+#[derive(Clone)]
 pub struct ConfigStore {
     pool: SqlitePool,
     cipher: Option<DynCredentialCipher>,
@@ -320,12 +321,32 @@ impl ConfigStore {
     }
 
     /// Delete a prompt by ID.
+    ///
+    /// Returns `ConfigError::PromptReferencedByTasks` if one or more
+    /// automation tasks reference this prompt.
+    ///
+    /// The reference check and deletion are performed atomically in a
+    /// transaction to prevent race conditions.
     pub async fn delete_prompt(&self, id: &str) -> Result<(), ConfigError> {
+        let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
+
+        // Check whether automation tasks reference this prompt.
+        let referencing_tasks = fetch_referencing_task_ids(&mut *tx, id).await?;
+
+        if !referencing_tasks.is_empty() {
+            return Err(ConfigError::PromptReferencedByTasks {
+                prompt_id: id.to_string(),
+                task_ids: referencing_tasks,
+            });
+        }
+
         sqlx::query("DELETE FROM prompts WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(ConfigError::from)?;
+
+        tx.commit().await.map_err(ConfigError::from)?;
 
         Ok(())
     }
@@ -1919,6 +1940,211 @@ impl ConfigStore {
             })
             .collect()
     }
+
+    // ============================================================================
+    // Automation Task APIs
+    // ============================================================================
+
+    /// Store or replace an automation task.
+    ///
+    /// Validates the input, requires the referenced stored prompt to exist,
+    /// and creates or replaces the task atomically. On replacement, the
+    /// original creation timestamp is preserved and the update timestamp
+    /// advances.
+    pub async fn set_automation_task(
+        &self,
+        input: &crate::automation_task::AutomationTaskInput,
+    ) -> Result<crate::automation_task::AutomationTask, ConfigError> {
+        use crate::automation_task::{validate_task_input, AUTOMATION_TASK_SCHEMA_VERSION};
+
+        let normalized = validate_task_input(input).map_err(ConfigError::Validation)?;
+
+        let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
+
+        // Require the referenced prompt to exist.
+        let prompt_exists: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM prompts WHERE id = ?")
+            .bind(&normalized.stored_prompt_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(ConfigError::from)?;
+
+        if prompt_exists.is_none() {
+            return Err(ConfigError::UnknownStoredPrompt(
+                normalized.stored_prompt_id.clone(),
+            ));
+        }
+
+        let now = Utc::now().to_rfc3339();
+
+        // Try to fetch the existing created_at so we can preserve it.
+        let existing_created_at: Option<(String,)> =
+            sqlx::query_as("SELECT created_at FROM automation_tasks WHERE id = ?")
+                .bind(&normalized.id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(ConfigError::from)?;
+
+        let created_at = existing_created_at
+            .map(|(ca,)| ca)
+            .unwrap_or_else(|| now.clone());
+
+        sqlx::query(
+            r#"
+            INSERT INTO automation_tasks (id, name, stored_prompt_id, expected_outcome, schema_version, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                stored_prompt_id = excluded.stored_prompt_id,
+                expected_outcome = excluded.expected_outcome,
+                schema_version = excluded.schema_version,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&normalized.id)
+        .bind(&normalized.name)
+        .bind(&normalized.stored_prompt_id)
+        .bind(&normalized.expected_outcome)
+        .bind(AUTOMATION_TASK_SCHEMA_VERSION)
+        .bind(&created_at)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(ConfigError::from)?;
+
+        tx.commit().await.map_err(ConfigError::from)?;
+
+        let created_at_dt = parse_datetime(created_at)?;
+        let updated_at_dt = parse_datetime(now)?;
+
+        Ok(crate::automation_task::AutomationTask {
+            id: normalized.id,
+            name: normalized.name,
+            stored_prompt_id: normalized.stored_prompt_id,
+            expected_outcome: normalized.expected_outcome,
+            created_at: created_at_dt,
+            updated_at: updated_at_dt,
+        })
+    }
+
+    /// Get an automation task by ID.
+    ///
+    /// Returns `ConfigError::Deserialization` if the stored record has an
+    /// unsupported schema version.
+    pub async fn get_automation_task(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::automation_task::AutomationTask>, ConfigError> {
+        use crate::automation_task::AUTOMATION_TASK_SCHEMA_VERSION;
+
+        let row = sqlx::query(
+            "SELECT id, name, stored_prompt_id, expected_outcome, schema_version, created_at, updated_at FROM automation_tasks WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        match row {
+            Some(row) => {
+                let schema_version: i64 = row.get("schema_version");
+                if schema_version != AUTOMATION_TASK_SCHEMA_VERSION {
+                    return Err(ConfigError::Deserialization(format!(
+                        "automation task '{}' has unsupported schema version {} (expected {})",
+                        id, schema_version, AUTOMATION_TASK_SCHEMA_VERSION
+                    )));
+                }
+                Ok(Some(crate::automation_task::AutomationTask {
+                    id: row.get("id"),
+                    name: row.get("name"),
+                    stored_prompt_id: row.get("stored_prompt_id"),
+                    expected_outcome: row.get("expected_outcome"),
+                    created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                    updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// List all automation tasks in deterministic order (by ID ascending).
+    ///
+    /// Returns `ConfigError::Deserialization` if any stored record has an
+    /// unsupported schema version.
+    pub async fn list_automation_tasks(
+        &self,
+    ) -> Result<Vec<crate::automation_task::AutomationTask>, ConfigError> {
+        use crate::automation_task::AUTOMATION_TASK_SCHEMA_VERSION;
+
+        let rows = sqlx::query(
+            "SELECT id, name, stored_prompt_id, expected_outcome, schema_version, created_at, updated_at FROM automation_tasks ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        rows.into_iter()
+            .map(|row| {
+                let schema_version: i64 = row.get("schema_version");
+                if schema_version != AUTOMATION_TASK_SCHEMA_VERSION {
+                    return Err(ConfigError::Deserialization(format!(
+                        "automation task '{}' has unsupported schema version {} (expected {})",
+                        row.get::<String, _>("id"),
+                        schema_version,
+                        AUTOMATION_TASK_SCHEMA_VERSION
+                    )));
+                }
+                Ok(crate::automation_task::AutomationTask {
+                    id: row.get("id"),
+                    name: row.get("name"),
+                    stored_prompt_id: row.get("stored_prompt_id"),
+                    expected_outcome: row.get("expected_outcome"),
+                    created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                    updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+                })
+            })
+            .collect()
+    }
+
+    /// Delete an automation task by ID. Does not affect the referenced prompt.
+    pub async fn delete_automation_task(&self, id: &str) -> Result<(), ConfigError> {
+        sqlx::query("DELETE FROM automation_tasks WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+        Ok(())
+    }
+
+    /// List task IDs that reference a given stored prompt.
+    pub async fn tasks_referencing_prompt(
+        &self,
+        prompt_id: &str,
+    ) -> Result<Vec<String>, ConfigError> {
+        fetch_referencing_task_ids(&self.pool, prompt_id).await
+    }
+}
+
+/// Fetch the IDs of automation tasks referencing a stored prompt, ordered by
+/// ID ascending. Generic over the executor so it works with both the
+/// connection pool and an in-flight transaction.
+async fn fetch_referencing_task_ids<'e, E>(
+    executor: E,
+    prompt_id: &str,
+) -> Result<Vec<String>, ConfigError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let rows =
+        sqlx::query("SELECT id FROM automation_tasks WHERE stored_prompt_id = ? ORDER BY id ASC")
+            .bind(prompt_id)
+            .fetch_all(executor)
+            .await
+            .map_err(ConfigError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<String, _>("id"))
+        .collect())
 }
 
 /// Resolve the platform-default config path.

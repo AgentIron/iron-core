@@ -303,7 +303,10 @@ impl IronRuntime {
 
         // Build initial user message.
         let user_text = if let Some(context) = &request.context {
-            format!("{}\n\nContext:\n{}", request.goal, context)
+            crate::execution::compose_user_goal(
+                &request.goal,
+                Some(&format!("Context:\n{}", context)),
+            )
         } else {
             request.goal.clone()
         };

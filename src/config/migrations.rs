@@ -165,11 +165,31 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
             INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 6);
             "#,
     ),
+    (
+        7,
+        r#"
+            CREATE TABLE IF NOT EXISTS automation_tasks (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                stored_prompt_id TEXT NOT NULL,
+                expected_outcome TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (stored_prompt_id) REFERENCES prompts(id) ON DELETE RESTRICT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_automation_tasks_stored_prompt_id
+                ON automation_tasks (stored_prompt_id);
+
+            INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 7);
+            "#,
+    ),
 ];
 
 /// The current schema version.
 #[allow(dead_code)]
-pub const CURRENT_SCHEMA_VERSION: i64 = 6;
+pub const CURRENT_SCHEMA_VERSION: i64 = 7;
 
 /// Apply all pending migrations to the database.
 pub async fn apply_migrations(pool: &sqlx::SqlitePool) -> Result<(), super::error::ConfigError> {

@@ -62,6 +62,19 @@ pub enum ConfigError {
     /// Effective model catalog error.
     #[error("Model catalog error: {0}")]
     Catalog(String),
+
+    /// Automation task references a stored prompt that does not exist.
+    #[error("Automation task references unknown stored prompt: {0}")]
+    UnknownStoredPrompt(String),
+
+    /// Stored prompt deletion blocked because automation tasks reference it.
+    #[error("Stored prompt '{prompt_id}' is referenced by automation tasks: {task_ids:?}")]
+    PromptReferencedByTasks {
+        /// The prompt that was being deleted.
+        prompt_id: String,
+        /// IDs of tasks that reference the prompt.
+        task_ids: Vec<String>,
+    },
 }
 
 impl From<sqlx::Error> for ConfigError {

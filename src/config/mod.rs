@@ -585,6 +585,9 @@ mod db;
 mod key_source;
 mod migrations;
 
+#[cfg(test)]
+mod automation_task_tests;
+
 pub use builtin_models::{builtin_model_catalog, BuiltinModelEntry};
 pub use effective_catalog::{
     build_effective_catalog, CatalogError, EffectiveModelCatalog, EffectiveModelEntry,
