@@ -115,6 +115,79 @@ fn parse_help_shorthand() {
     assert!(err.message.contains("Usage:"));
 }
 
+#[test]
+fn parse_short_flag_aliases() {
+    let args = vec![
+        "run".to_string(),
+        "daily-report".to_string(),
+        "-c".to_string(),
+        "/etc/iron.db".to_string(),
+        "-o".to_string(),
+        "json".to_string(),
+        "-q".to_string(),
+    ];
+    let parsed = parse_args(&args).unwrap();
+    assert_eq!(parsed.task_id, "daily-report");
+    assert_eq!(parsed.config.as_deref(), Some("/etc/iron.db"));
+    assert_eq!(parsed.format.as_deref(), Some("json"));
+    assert!(parsed.quiet);
+}
+
+#[test]
+fn parse_short_config_without_value_errors() {
+    let args = vec!["run".to_string(), "task".to_string(), "-c".to_string()];
+    let err = parse_args(&args).unwrap_err();
+    assert!(err.message.contains("--config requires a value"));
+}
+
+// ============================================================================
+// Raw JSON detection (pre-parse usage-error contract)
+// ============================================================================
+
+#[test]
+fn raw_json_detects_long_flag() {
+    let args = vec![
+        "run".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ];
+    assert!(raw_args_request_json(&args));
+}
+
+#[test]
+fn raw_json_detects_short_flag() {
+    let args = vec!["run".to_string(), "-o".to_string(), "json".to_string()];
+    assert!(raw_args_request_json(&args));
+}
+
+#[test]
+fn raw_json_detects_equals_form() {
+    let args = vec!["--format=json".to_string()];
+    assert!(raw_args_request_json(&args));
+}
+
+#[test]
+fn raw_json_case_insensitive() {
+    let args = vec!["--format".to_string(), "JSON".to_string()];
+    assert!(raw_args_request_json(&args));
+}
+
+#[test]
+fn raw_json_false_for_text_format() {
+    let args = vec![
+        "run".to_string(),
+        "--format".to_string(),
+        "text".to_string(),
+    ];
+    assert!(!raw_args_request_json(&args));
+}
+
+#[test]
+fn raw_json_false_when_absent() {
+    let args = vec!["run".to_string(), "task".to_string()];
+    assert!(!raw_args_request_json(&args));
+}
+
 // ============================================================================
 // Duration parsing
 // ============================================================================

@@ -119,8 +119,13 @@ pub struct HeadlessRuntime {
     pub provider_slug: String,
     /// Resolved model identifier (from saved default model).
     pub model: String,
-    /// Sorted effective tool names after applying the profile's tool filter
-    /// to the reconstructed base tool inventory.
+    /// Reserved effective tool names.
+    ///
+    /// [`bootstrap_headless`] leaves this empty because the full session tool
+    /// catalog (including MCP tools) is not available until a session is
+    /// created. [`run_automation`] computes the authoritative effective tool
+    /// set separately after session creation. Test helpers may populate this
+    /// field directly.
     pub effective_tools: Vec<String>,
 }
 
@@ -206,13 +211,7 @@ pub async fn bootstrap_headless(
 
     // 11. Preflight: approval check only. Tool availability is checked in
     //     run_automation after session creation so MCP tools are included.
-    if !is_headless_safe(resolved.profile.approval) {
-        return Err(HeadlessBootstrapError::UnsafePolicy(format!(
-            "profile '{}' uses {:?}, but headless execution requires AutoApprove",
-            resolved.profile_id.as_str(),
-            resolved.profile.approval
-        )));
-    }
+    check_approval_safe(&resolved)?;
 
     // 12. Determine reported provider/model based on the resolved profile
     //     variant (F1). Managed profiles report their configured provider/model;
@@ -334,6 +333,22 @@ fn map_auth_error(e: ProviderAuthError) -> HeadlessBootstrapError {
 // Headless safety preflight
 // ============================================================================
 
+/// Validate that the resolved profile's approval mode is safe for
+/// non-interactive headless execution (must be `AutoApprove`).
+///
+/// This is the single source of truth for the approval check, shared by
+/// [`bootstrap_headless`] and [`preflight_headless_safety`].
+fn check_approval_safe(input: &ResolvedExecutionInput) -> Result<(), HeadlessBootstrapError> {
+    if !is_headless_safe(input.profile.approval) {
+        return Err(HeadlessBootstrapError::UnsafePolicy(format!(
+            "profile '{}' uses {:?}, but headless execution requires AutoApprove",
+            input.profile_id.as_str(),
+            input.profile.approval
+        )));
+    }
+    Ok(())
+}
+
 /// Validate that the resolved profile and tool inventory are safe for
 /// non-interactive headless execution.
 ///
@@ -345,13 +360,7 @@ pub fn preflight_headless_safety(
     input: &ResolvedExecutionInput,
     tool_names: &[String],
 ) -> Result<(), HeadlessBootstrapError> {
-    if !is_headless_safe(input.profile.approval) {
-        return Err(HeadlessBootstrapError::UnsafePolicy(format!(
-            "profile '{}' uses {:?}, but headless execution requires AutoApprove",
-            input.profile_id.as_str(),
-            input.profile.approval
-        )));
-    }
+    check_approval_safe(input)?;
 
     if let ToolFilter::Allow(allowed) = &input.profile.tools {
         for tool in allowed {

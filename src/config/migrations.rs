@@ -175,7 +175,8 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
                 expected_outcome TEXT NOT NULL,
                 schema_version INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (stored_prompt_id) REFERENCES prompts(id) ON DELETE RESTRICT
             );
 
             CREATE INDEX IF NOT EXISTS idx_automation_tasks_stored_prompt_id

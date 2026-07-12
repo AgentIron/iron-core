@@ -331,16 +331,7 @@ impl ConfigStore {
         let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
 
         // Check whether automation tasks reference this prompt.
-        let referencing_tasks: Vec<String> = sqlx::query(
-            "SELECT id FROM automation_tasks WHERE stored_prompt_id = ? ORDER BY id ASC",
-        )
-        .bind(id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(ConfigError::from)?
-        .into_iter()
-        .map(|row| row.get::<String, _>("id"))
-        .collect();
+        let referencing_tasks = fetch_referencing_task_ids(&mut *tx, id).await?;
 
         if !referencing_tasks.is_empty() {
             return Err(ConfigError::PromptReferencedByTasks {
@@ -2130,18 +2121,30 @@ impl ConfigStore {
         &self,
         prompt_id: &str,
     ) -> Result<Vec<String>, ConfigError> {
-        let rows = sqlx::query(
-            "SELECT id FROM automation_tasks WHERE stored_prompt_id = ? ORDER BY id ASC",
-        )
-        .bind(prompt_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(ConfigError::from)?;
-        Ok(rows
-            .into_iter()
-            .map(|row| row.get::<String, _>("id"))
-            .collect())
+        fetch_referencing_task_ids(&self.pool, prompt_id).await
     }
+}
+
+/// Fetch the IDs of automation tasks referencing a stored prompt, ordered by
+/// ID ascending. Generic over the executor so it works with both the
+/// connection pool and an in-flight transaction.
+async fn fetch_referencing_task_ids<'e, E>(
+    executor: E,
+    prompt_id: &str,
+) -> Result<Vec<String>, ConfigError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let rows =
+        sqlx::query("SELECT id FROM automation_tasks WHERE stored_prompt_id = ? ORDER BY id ASC")
+            .bind(prompt_id)
+            .fetch_all(executor)
+            .await
+            .map_err(ConfigError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<String, _>("id"))
+        .collect())
 }
 
 /// Resolve the platform-default config path.

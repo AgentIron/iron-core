@@ -1073,8 +1073,11 @@ impl IronAgent {
         store: &ConfigStore,
         id: &str,
     ) -> Result<(), crate::config::ConfigError> {
-        store.delete_prompt(id).await?;
-        self.stored_prompt_registry.write().unregister(id.trim());
+        let normalized_id = id.trim();
+        store.delete_prompt(normalized_id).await?;
+        self.stored_prompt_registry
+            .write()
+            .unregister(normalized_id);
         Ok(())
     }
 

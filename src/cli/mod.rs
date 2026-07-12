@@ -89,12 +89,12 @@ const USAGE: &str = "\
 Usage: agent-iron run <task-id> [OPTIONS]
 
 Options:
-  --config <path>        Path to ConfigStore database
-  --workspace <dir>      Workspace directory (default: process cwd)
-  --timeout <duration>   Execution timeout (e.g. 30s, 5m, 1h) [required]
-  --format <text|json>   Output format (default: text)
-  --quiet                Suppress progress output on stderr
-  -h, --help             Show this help message";
+  -c, --config <path>     Path to ConfigStore database
+  --workspace <dir>       Workspace directory (default: process cwd)
+  --timeout <duration>    Execution timeout (e.g. 30s, 5m, 1h) [required]
+  -o, --format <text|json> Output format (default: text)
+  -q, --quiet             Suppress progress output on stderr
+  -h, --help              Show this help message";
 
 /// Parse command-line arguments (everything after the program name).
 pub fn parse_args(args: &[String]) -> Result<CliArgs, UsageError> {
@@ -131,7 +131,7 @@ pub fn parse_args(args: &[String]) -> Result<CliArgs, UsageError> {
     while i < rest.len() {
         let arg = &rest[i];
         match arg.as_str() {
-            "--config" => {
+            "--config" | "-c" => {
                 i += 1;
                 config = Some(expect_value(rest, i, "--config")?);
             }
@@ -143,11 +143,11 @@ pub fn parse_args(args: &[String]) -> Result<CliArgs, UsageError> {
                 i += 1;
                 timeout = Some(expect_value(rest, i, "--timeout")?);
             }
-            "--format" => {
+            "--format" | "-o" => {
                 i += 1;
                 format = Some(expect_value(rest, i, "--format")?);
             }
-            "--quiet" => {
+            "--quiet" | "-q" => {
                 quiet = true;
             }
             "-h" | "--help" => {
@@ -194,6 +194,34 @@ fn expect_value(args: &[String], idx: usize, flag: &str) -> Result<String, Usage
     args.get(idx).cloned().ok_or_else(|| UsageError {
         message: format!("{} requires a value\n\n{}", flag, USAGE),
     })
+}
+
+/// Lightweight raw scan of args to detect a JSON output request
+/// (`--format json`, `-o json`, or `--format=json`) without a full parse.
+///
+/// Used to honor the JSON output contract for usage errors that occur before
+/// argument parsing completes.
+fn raw_args_request_json(args: &[String]) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--format" || a == "-o" {
+            if let Some(v) = args.get(i + 1) {
+                if v.trim().eq_ignore_ascii_case("json") {
+                    return true;
+                }
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--format=") {
+            if v.trim().eq_ignore_ascii_case("json") {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 // ============================================================================
@@ -457,11 +485,28 @@ pub async fn execute_run_with_streams(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> i32 {
+    // Detect JSON output mode from raw args/env so that usage errors emitted
+    // before or during argument parsing still honor the JSON output contract.
+    let json_mode = raw_args_request_json(args)
+        || env_get(env, "AGENTIRON_FORMAT")
+            .map(|v| v.trim().eq_ignore_ascii_case("json"))
+            .unwrap_or(false);
+
     // 1. Parse arguments.
     let parsed = match parse_args(args) {
         Ok(p) => p,
         Err(e) => {
-            let _ = writeln!(stderr, "{}", e.message);
+            if json_mode {
+                let result = AutomationRunResult::cli_failure(
+                    "unknown",
+                    PathBuf::from("."),
+                    AutomationRunErrorCategory::Config,
+                    e.message.clone(),
+                );
+                let _ = writeln!(stdout, "{}", format_json_output(&result));
+            } else {
+                let _ = writeln!(stderr, "{}", e.message);
+            }
             return EXIT_USAGE;
         }
     };

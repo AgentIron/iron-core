@@ -166,7 +166,7 @@ The CLI SHALL support `text` and `json` formats and a quiet mode. Standard outpu
 - **AND** final output and fatal errors remain observable
 
 ### Requirement: JSON output SHALL be one versioned terminal object
-For JSON format, the CLI SHALL emit exactly one JSON object on standard output after argument parsing establishes JSON mode. The object SHALL include a schema version, run ID, task ID and name, status, output, expected outcome, resolved profile/provider/model/workspace, effective tool names, start/end timing, duration, and a structured nullable error. Terminal statuses SHALL be `completed`, `failed`, `cancelled`, or `timed_out`.
+For JSON format, the CLI SHALL emit exactly one JSON object on standard output whenever JSON mode is requested through arguments or environment, including usage errors detected before argument parsing completes. The object SHALL include a schema version, run ID, task ID and name, status, output, expected outcome, resolved profile/provider/model/workspace, effective tool names, start/end timing, duration, and a structured nullable error. Terminal statuses SHALL be `completed`, `failed`, `cancelled`, or `timed_out`.
 
 #### Scenario: JSON run completes
 - **WHEN** execution completes in JSON format
@@ -179,6 +179,11 @@ For JSON format, the CLI SHALL emit exactly one JSON object on standard output a
 - **THEN** standard output still contains exactly one valid terminal JSON object
 - **AND** its non-completed status and structured error describe the failure
 - **AND** the process exits nonzero
+
+#### Scenario: Pre-parse usage error honors JSON
+- **WHEN** a caller requests JSON format through arguments or environment but supplies arguments that fail parsing (missing task ID, unknown option, missing value, or missing subcommand)
+- **THEN** standard output still contains exactly one valid terminal JSON object describing the usage error
+- **AND** the process exits with the usage exit code
 
 ### Requirement: Headless exit codes SHALL be stable
 The CLI SHALL use exit code `0` for `completed`, `2` for usage errors, `3` for configuration or reference errors, `4` for unsafe policy, `5` for provider or credential initialization, `6` for execution failure, `7` for cancellation, and `8` for timeout. A tool error that the model handles successfully SHALL NOT by itself force a nonzero exit.

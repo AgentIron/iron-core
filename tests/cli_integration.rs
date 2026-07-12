@@ -50,10 +50,20 @@ fn test_key_b64() -> String {
 // Store fixture helpers
 // ============================================================================
 
+/// Serializes tests that mutate the process-global encryption-key env var so
+/// that parallel `cargo test` execution cannot race on `AGENTIRON_CONFIG_ENCRYPTION_KEY`.
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Set the process-level encryption key so `ConfigStore::open_at` can decrypt
 /// credentials stored by the same key.
-fn set_encryption_key() {
+///
+/// Returns a guard that must be held for the duration of any code path that
+/// reads the env var. This serializes the env-dependent tests under parallel
+/// `cargo test` execution to avoid races on the process-global env var.
+async fn set_encryption_key() -> tokio::sync::MutexGuard<'static, ()> {
+    let guard = ENV_LOCK.lock().await;
     std::env::set_var("AGENTIRON_CONFIG_ENCRYPTION_KEY", test_key_b64());
+    guard
 }
 
 /// Build a cipher matching the env-var key.
@@ -477,6 +487,48 @@ async fn json_failure_for_usage_error() {
 }
 
 #[tokio::test]
+async fn json_failure_for_pre_parse_usage_error() {
+    // Missing task-id with --format json: parse_args fails before format
+    // resolution, but the JSON output contract must still be honored.
+    let args = vec![
+        "run".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ];
+    let env = vec![];
+    let (code, stdout, stderr) = run_cli(&args, &mut env.clone()).await;
+    assert_eq!(code, EXIT_USAGE);
+
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .expect("stdout should be a JSON object even for pre-parse usage errors");
+    assert_eq!(v["status"], "failed");
+    assert_eq!(v["error"]["category"], "config");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing required <task-id>"),
+        "message should describe the usage error: {:?}",
+        v["error"]["message"]
+    );
+    assert!(stderr.is_empty(), "stderr should be empty in JSON mode");
+}
+
+#[tokio::test]
+async fn json_failure_for_pre_parse_usage_error_via_env() {
+    // AGENTIRON_FORMAT=json in env should also trigger JSON for usage errors.
+    let args = vec!["run".to_string()];
+    let env = vec![("AGENTIRON_FORMAT".to_string(), "json".to_string())];
+    let (code, stdout, stderr) = run_cli(&args, &mut env.clone()).await;
+    assert_eq!(code, EXIT_USAGE);
+
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be JSON via env override");
+    assert_eq!(v["status"], "failed");
+    assert!(stderr.is_empty(), "stderr should be empty in JSON mode");
+}
+
+#[tokio::test]
 async fn json_failure_for_config_error() {
     let args = vec![
         "run".to_string(),
@@ -499,7 +551,7 @@ async fn json_failure_for_config_error() {
 
 #[tokio::test]
 async fn json_failure_for_unsafe_policy() {
-    set_encryption_key();
+    let _env_guard = set_encryption_key().await;
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("config.db");
     let store = open_store(&db_path).await;
@@ -530,7 +582,7 @@ async fn json_failure_for_unsafe_policy() {
 
 #[tokio::test]
 async fn text_failure_for_unsafe_policy() {
-    set_encryption_key();
+    let _env_guard = set_encryption_key().await;
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("config.db");
     let store = open_store(&db_path).await;
@@ -599,7 +651,7 @@ async fn e2e_missing_credential_exit5() {
 
 #[tokio::test]
 async fn e2e_task_not_found_exit3() {
-    set_encryption_key();
+    let _env_guard = set_encryption_key().await;
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("config.db");
     let store = open_store(&db_path).await;
@@ -618,7 +670,7 @@ async fn e2e_task_not_found_exit3() {
 
 #[tokio::test]
 async fn e2e_auto_approve_preflight_blocks_pertool() {
-    set_encryption_key();
+    let _env_guard = set_encryption_key().await;
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("config.db");
     let store = open_store(&db_path).await;
@@ -639,7 +691,7 @@ async fn e2e_auto_approve_preflight_blocks_pertool() {
 
 #[tokio::test]
 async fn e2e_plugin_tool_excluded_from_allow_list() {
-    set_encryption_key();
+    let _env_guard = set_encryption_key().await;
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("config.db");
     let store = open_store(&db_path).await;
@@ -676,7 +728,7 @@ async fn e2e_plugin_tool_excluded_from_allow_list() {
 
 #[tokio::test]
 async fn e2e_uses_saved_default_provider_and_model() {
-    set_encryption_key();
+    let _env_guard = set_encryption_key().await;
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("config.db");
     let store = open_store(&db_path).await;
@@ -709,7 +761,7 @@ async fn e2e_uses_saved_default_provider_and_model() {
 
 #[tokio::test]
 async fn e2e_json_success_contract() {
-    set_encryption_key();
+    let _env_guard = set_encryption_key().await;
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("config.db");
     let store = open_store(&db_path).await;
@@ -760,7 +812,7 @@ async fn e2e_json_success_contract() {
 
 #[tokio::test]
 async fn e2e_text_mode_output_is_final_text_only() {
-    set_encryption_key();
+    let _env_guard = set_encryption_key().await;
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("config.db");
     let store = open_store(&db_path).await;
