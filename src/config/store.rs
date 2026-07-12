@@ -1947,17 +1947,21 @@ impl ConfigStore {
 
     /// Store or replace an automation task.
     ///
-    /// Validates the input, requires the referenced stored prompt to exist,
-    /// and creates or replaces the task atomically. On replacement, the
-    /// original creation timestamp is preserved and the update timestamp
-    /// advances.
+    /// Validates the input, normalizes the display name, requires the
+    /// referenced stored prompt to exist, rejects normalized-name collisions
+    /// with other tasks, canonicalizes the project root, and creates or
+    /// replaces the task atomically. On replacement, the original creation
+    /// timestamp is preserved and the update timestamp advances.
     pub async fn set_automation_task(
         &self,
         input: &crate::automation_task::AutomationTaskInput,
     ) -> Result<crate::automation_task::AutomationTask, ConfigError> {
-        use crate::automation_task::{validate_task_input, AUTOMATION_TASK_SCHEMA_VERSION};
+        use crate::automation_task::{
+            normalize_task_name, validate_task_input, AUTOMATION_TASK_SCHEMA_VERSION,
+        };
 
         let normalized = validate_task_input(input).map_err(ConfigError::Validation)?;
+        let normalized_name = normalize_task_name(&normalized.display_name);
 
         let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
 
@@ -1974,6 +1978,48 @@ impl ConfigStore {
             ));
         }
 
+        // Reject normalized-name collisions with a different task ID.
+        let collision: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM automation_tasks WHERE normalized_name = ? AND id != ?")
+                .bind(&normalized_name)
+                .bind(&normalized.id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(ConfigError::from)?;
+
+        if let Some((existing_id,)) = collision {
+            return Err(ConfigError::TaskNameConflict {
+                normalized_name,
+                existing_id,
+            });
+        }
+
+        // Canonicalize project root — must be an existing directory.
+        let canonical_root = tokio::fs::canonicalize(&normalized.project_root)
+            .await
+            .map_err(|e| {
+                ConfigError::Validation(format!(
+                    "Project root '{}' is not accessible: {}",
+                    normalized.project_root.display(),
+                    e
+                ))
+            })?;
+
+        let metadata = tokio::fs::metadata(&canonical_root).await.map_err(|e| {
+            ConfigError::Validation(format!(
+                "Project root '{}' cannot be read: {}",
+                canonical_root.display(),
+                e
+            ))
+        })?;
+
+        if !metadata.is_dir() {
+            return Err(ConfigError::Validation(format!(
+                "Project root '{}' is not a directory",
+                canonical_root.display()
+            )));
+        }
+
         let now = Utc::now().to_rfc3339();
 
         // Try to fetch the existing created_at so we can preserve it.
@@ -1988,23 +2034,31 @@ impl ConfigStore {
             .map(|(ca,)| ca)
             .unwrap_or_else(|| now.clone());
 
+        let project_root_str = canonical_root.to_string_lossy();
+
         sqlx::query(
             r#"
-            INSERT INTO automation_tasks (id, name, stored_prompt_id, expected_outcome, schema_version, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO automation_tasks (id, name, normalized_name, stored_prompt_id, expected_outcome, project_root, timeout_seconds, schema_version, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
+                normalized_name = excluded.normalized_name,
                 stored_prompt_id = excluded.stored_prompt_id,
                 expected_outcome = excluded.expected_outcome,
+                project_root = excluded.project_root,
+                timeout_seconds = excluded.timeout_seconds,
                 schema_version = excluded.schema_version,
                 created_at = excluded.created_at,
                 updated_at = excluded.updated_at
             "#,
         )
         .bind(&normalized.id)
-        .bind(&normalized.name)
+        .bind(&normalized.display_name)
+        .bind(&normalized_name)
         .bind(&normalized.stored_prompt_id)
         .bind(&normalized.expected_outcome)
+        .bind(&*project_root_str)
+        .bind(normalized.timeout_seconds as i64)
         .bind(AUTOMATION_TASK_SCHEMA_VERSION)
         .bind(&created_at)
         .bind(&now)
@@ -2019,9 +2073,12 @@ impl ConfigStore {
 
         Ok(crate::automation_task::AutomationTask {
             id: normalized.id,
-            name: normalized.name,
+            display_name: normalized.display_name,
+            normalized_name,
             stored_prompt_id: normalized.stored_prompt_id,
             expected_outcome: normalized.expected_outcome,
+            project_root: canonical_root,
+            timeout_seconds: normalized.timeout_seconds,
             created_at: created_at_dt,
             updated_at: updated_at_dt,
         })
@@ -2038,7 +2095,7 @@ impl ConfigStore {
         use crate::automation_task::AUTOMATION_TASK_SCHEMA_VERSION;
 
         let row = sqlx::query(
-            "SELECT id, name, stored_prompt_id, expected_outcome, schema_version, created_at, updated_at FROM automation_tasks WHERE id = ?",
+            "SELECT id, name, normalized_name, stored_prompt_id, expected_outcome, project_root, timeout_seconds, schema_version, created_at, updated_at FROM automation_tasks WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -2056,9 +2113,14 @@ impl ConfigStore {
                 }
                 Ok(Some(crate::automation_task::AutomationTask {
                     id: row.get("id"),
-                    name: row.get("name"),
+                    display_name: row.get("name"),
+                    normalized_name: row.get("normalized_name"),
                     stored_prompt_id: row.get("stored_prompt_id"),
                     expected_outcome: row.get("expected_outcome"),
+                    project_root: std::path::PathBuf::from(
+                        row.get::<String, _>("project_root"),
+                    ),
+                    timeout_seconds: row.get::<i64, _>("timeout_seconds") as u64,
                     created_at: parse_datetime(row.get::<String, _>("created_at"))?,
                     updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
                 }))
@@ -2077,7 +2139,7 @@ impl ConfigStore {
         use crate::automation_task::AUTOMATION_TASK_SCHEMA_VERSION;
 
         let rows = sqlx::query(
-            "SELECT id, name, stored_prompt_id, expected_outcome, schema_version, created_at, updated_at FROM automation_tasks ORDER BY id ASC",
+            "SELECT id, name, normalized_name, stored_prompt_id, expected_outcome, project_root, timeout_seconds, schema_version, created_at, updated_at FROM automation_tasks ORDER BY id ASC",
         )
         .fetch_all(&self.pool)
         .await
@@ -2096,9 +2158,14 @@ impl ConfigStore {
                 }
                 Ok(crate::automation_task::AutomationTask {
                     id: row.get("id"),
-                    name: row.get("name"),
+                    display_name: row.get("name"),
+                    normalized_name: row.get("normalized_name"),
                     stored_prompt_id: row.get("stored_prompt_id"),
                     expected_outcome: row.get("expected_outcome"),
+                    project_root: std::path::PathBuf::from(
+                        row.get::<String, _>("project_root"),
+                    ),
+                    timeout_seconds: row.get::<i64, _>("timeout_seconds") as u64,
                     created_at: parse_datetime(row.get::<String, _>("created_at"))?,
                     updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
                 })
@@ -2107,12 +2174,27 @@ impl ConfigStore {
     }
 
     /// Delete an automation task by ID. Does not affect the referenced prompt.
+    ///
+    /// Returns `ConfigError::TaskReferencedBySchedules` if one or more
+    /// schedules reference this task.
     pub async fn delete_automation_task(&self, id: &str) -> Result<(), ConfigError> {
+        let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
+
+        let referencing_schedules = fetch_referencing_schedule_ids(&mut *tx, id).await?;
+        if !referencing_schedules.is_empty() {
+            return Err(ConfigError::TaskReferencedBySchedules {
+                task_id: id.to_string(),
+                schedule_ids: referencing_schedules,
+            });
+        }
+
         sqlx::query("DELETE FROM automation_tasks WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(ConfigError::from)?;
+
+        tx.commit().await.map_err(ConfigError::from)?;
         Ok(())
     }
 
@@ -2122,6 +2204,173 @@ impl ConfigStore {
         prompt_id: &str,
     ) -> Result<Vec<String>, ConfigError> {
         fetch_referencing_task_ids(&self.pool, prompt_id).await
+    }
+
+    // ============================================================================
+    // Typed Scheduled-Task APIs
+    // ============================================================================
+
+    /// Store or replace a typed scheduled task.
+    ///
+    /// Validates the input, requires the referenced automation task to exist,
+    /// and creates or replaces the schedule atomically. On replacement, the
+    /// original creation timestamp is preserved and the update timestamp
+    /// advances.
+    pub async fn set_scheduled_task(
+        &self,
+        input: &crate::scheduled_task::ScheduledTaskInput,
+    ) -> Result<crate::scheduled_task::ScheduledTask, ConfigError> {
+        use crate::scheduled_task::{validate_schedule_input, SCHEDULED_TASK_SCHEMA_VERSION};
+
+        let normalized = validate_schedule_input(input).map_err(ConfigError::Validation)?;
+
+        let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
+
+        let task_exists: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM automation_tasks WHERE id = ?")
+                .bind(&normalized.automation_task_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(ConfigError::from)?;
+
+        if task_exists.is_none() {
+            return Err(ConfigError::UnknownAutomationTask(
+                normalized.automation_task_id.clone(),
+            ));
+        }
+
+        let now = Utc::now().to_rfc3339();
+
+        let existing_created_at: Option<(String,)> =
+            sqlx::query_as("SELECT created_at FROM schedule WHERE id = ?")
+                .bind(&normalized.id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(ConfigError::from)?;
+
+        let created_at = existing_created_at
+            .map(|(ca,)| ca)
+            .unwrap_or_else(|| now.clone());
+
+        let payload = serde_json::json!({
+            "automation_task_id": normalized.automation_task_id,
+            "cron_expression": normalized.cron_expression,
+            "enabled": normalized.enabled,
+        });
+        let payload_str = serde_json::to_string(&payload)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO schedule (id, schema_version, payload, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                schema_version = excluded.schema_version,
+                payload = excluded.payload,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&normalized.id)
+        .bind(SCHEDULED_TASK_SCHEMA_VERSION)
+        .bind(&payload_str)
+        .bind(&created_at)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(ConfigError::from)?;
+
+        tx.commit().await.map_err(ConfigError::from)?;
+
+        let created_at_dt = parse_datetime(created_at)?;
+        let updated_at_dt = parse_datetime(now)?;
+
+        Ok(crate::scheduled_task::ScheduledTask {
+            id: normalized.id,
+            automation_task_id: normalized.automation_task_id,
+            cron_expression: normalized.cron_expression,
+            enabled: normalized.enabled,
+            created_at: created_at_dt,
+            updated_at: updated_at_dt,
+        })
+    }
+
+    /// Get a typed scheduled task by ID.
+    ///
+    /// Returns `Ok(None)` if no schedule with the given ID exists. Returns
+    /// `ConfigError::Deserialization` if the stored record has an unsupported
+    /// schema version or payload that is not a valid typed schedule.
+    pub async fn get_scheduled_task(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::scheduled_task::ScheduledTask>, ConfigError> {
+        use crate::scheduled_task::SCHEDULED_TASK_SCHEMA_VERSION;
+
+        let row = sqlx::query(
+            "SELECT id, schema_version, payload, created_at, updated_at FROM schedule WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        match row {
+            Some(row) => {
+                let schema_version: i64 = row.get("schema_version");
+                if schema_version != SCHEDULED_TASK_SCHEMA_VERSION {
+                    return Ok(None);
+                }
+                deserialize_schedule_row(&row)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// List all typed scheduled tasks in deterministic order (by ID ascending).
+    ///
+    /// Skips records with an unsupported schema version or non-schedule
+    /// payloads rather than failing the entire list.
+    pub async fn list_scheduled_tasks(
+        &self,
+    ) -> Result<Vec<crate::scheduled_task::ScheduledTask>, ConfigError> {
+        use crate::scheduled_task::SCHEDULED_TASK_SCHEMA_VERSION;
+
+        let rows = sqlx::query(
+            "SELECT id, schema_version, payload, created_at, updated_at FROM schedule ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            let schema_version: i64 = row.get("schema_version");
+            if schema_version != SCHEDULED_TASK_SCHEMA_VERSION {
+                continue;
+            }
+            if let Ok(task) = deserialize_schedule_row(&row) {
+                if let Some(task) = task {
+                    result.push(task);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Delete a scheduled task by ID.
+    pub async fn delete_scheduled_task(&self, id: &str) -> Result<(), ConfigError> {
+        sqlx::query("DELETE FROM schedule WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+        Ok(())
+    }
+
+    /// List schedule IDs that reference a given automation task.
+    pub async fn schedules_referencing_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<String>, ConfigError> {
+        fetch_referencing_schedule_ids(&self.pool, task_id).await
     }
 }
 
@@ -2145,6 +2394,76 @@ where
         .into_iter()
         .map(|row| row.get::<String, _>("id"))
         .collect())
+}
+
+/// Fetch schedule IDs referencing an automation task via JSON payload
+/// extraction. Generic over the executor so it works with both the connection
+/// pool and an in-flight transaction.
+async fn fetch_referencing_schedule_ids<'e, E>(
+    executor: E,
+    task_id: &str,
+) -> Result<Vec<String>, ConfigError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    use crate::scheduled_task::SCHEDULED_TASK_SCHEMA_VERSION;
+
+    let rows = sqlx::query(
+        "SELECT id FROM schedule \
+         WHERE schema_version = ? \
+         AND json_extract(payload, '$.automation_task_id') = ? \
+         ORDER BY id ASC",
+    )
+    .bind(SCHEDULED_TASK_SCHEMA_VERSION)
+    .bind(task_id)
+    .fetch_all(executor)
+    .await
+    .map_err(ConfigError::from)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<String, _>("id"))
+        .collect())
+}
+
+/// Deserialize a schedule table row into a typed `ScheduledTask`.
+fn deserialize_schedule_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<Option<crate::scheduled_task::ScheduledTask>, ConfigError> {
+    use sqlx::Row;
+
+    let id: String = row.get("id");
+    let payload_str: String = row.get("payload");
+    let payload: serde_json::Value = match serde_json::from_str(&payload_str) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+
+    let automation_task_id = payload
+        .get("automation_task_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let cron_expression = payload
+        .get("cron_expression")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let enabled = payload
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if automation_task_id.is_empty() || cron_expression.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(crate::scheduled_task::ScheduledTask {
+        id,
+        automation_task_id: automation_task_id.to_string(),
+        cron_expression: cron_expression.to_string(),
+        enabled,
+        created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+        updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+    }))
 }
 
 /// Resolve the platform-default config path.

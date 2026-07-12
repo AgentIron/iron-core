@@ -75,6 +75,28 @@ pub enum ConfigError {
         /// IDs of tasks that reference the prompt.
         task_ids: Vec<String>,
     },
+
+    /// Automation task normalized name collides with an existing task.
+    #[error("Task normalized name '{normalized_name}' collides with existing task '{existing_id}'")]
+    TaskNameConflict {
+        /// The normalized name that collided.
+        normalized_name: String,
+        /// The ID of the existing task that already owns the name.
+        existing_id: String,
+    },
+
+    /// Schedule references an automation task that does not exist.
+    #[error("Schedule references unknown automation task: {0}")]
+    UnknownAutomationTask(String),
+
+    /// Automation task deletion blocked because schedules reference it.
+    #[error("Automation task '{task_id}' is referenced by schedules: {schedule_ids:?}")]
+    TaskReferencedBySchedules {
+        /// The task that was being deleted.
+        task_id: String,
+        /// IDs of schedules that reference the task.
+        schedule_ids: Vec<String>,
+    },
 }
 
 impl From<sqlx::Error> for ConfigError {

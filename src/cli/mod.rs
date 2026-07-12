@@ -273,22 +273,37 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
 // Resolution functions (CLI > env > defaults)
 // ============================================================================
 
-/// Resolve workspace from CLI, environment, or process cwd.
+/// Resolve workspace from CLI, environment, or task fallback.
 ///
 /// Canonicalizes the path and requires it to be an existing directory.
-pub fn resolve_workspace(cli: Option<&str>, env: Option<&str>) -> Result<PathBuf, String> {
-    let raw = cli.or(env).unwrap_or(".");
+pub fn resolve_workspace(
+    cli: Option<&str>,
+    env: Option<&str>,
+    fallback: Option<&std::path::Path>,
+) -> Result<PathBuf, String> {
+    let path = match cli.or(env) {
+        Some(raw) => PathBuf::from(raw),
+        None => match fallback {
+            Some(p) => p.to_path_buf(),
+            None => {
+                return Err(
+                    "workspace is required: use --workspace, AGENTIRON_WORKSPACE, \
+                     or set a project root on the automation task"
+                        .to_string(),
+                )
+            }
+        },
+    };
 
-    let path = PathBuf::from(raw);
     if !path.exists() {
-        return Err(format!("workspace does not exist: {}", raw));
+        return Err(format!("workspace does not exist: {}", path.display()));
     }
     if !path.is_dir() {
-        return Err(format!("workspace is not a directory: {}", raw));
+        return Err(format!("workspace is not a directory: {}", path.display()));
     }
 
     path.canonicalize()
-        .map_err(|e| format!("failed to canonicalize workspace '{}': {}", raw, e))
+        .map_err(|e| format!("failed to canonicalize workspace '{}': {}", path.display(), e))
 }
 
 /// Resolve the ConfigStore database path from CLI, environment, or default.
@@ -302,12 +317,21 @@ pub fn resolve_config_path(cli: Option<&str>, env: Option<&str>) -> Result<PathB
     default_config_path().map_err(|e| format!("failed to determine default config path: {}", e))
 }
 
-/// Resolve timeout duration from CLI or environment (required).
-pub fn resolve_timeout(cli: Option<&str>, env: Option<&str>) -> Result<Duration, String> {
-    let raw = cli.or(env).ok_or_else(|| {
-        "timeout is required: use --timeout or AGENTIRON_TIMEOUT (e.g. 30s, 5m, 1h)".to_string()
-    })?;
-    parse_duration(raw)
+/// Resolve timeout duration from CLI, environment, or task fallback.
+pub fn resolve_timeout(
+    cli: Option<&str>,
+    env: Option<&str>,
+    fallback: Option<Duration>,
+) -> Result<Duration, String> {
+    if let Some(raw) = cli.or(env) {
+        return parse_duration(raw);
+    }
+
+    fallback.ok_or_else(|| {
+        "timeout is required: use --timeout, AGENTIRON_TIMEOUT, \
+         or set a timeout on the automation task"
+            .to_string()
+    })
 }
 
 /// Resolve output format from CLI or environment (default: text).
@@ -545,10 +569,59 @@ pub async fn execute_run_with_streams(
         }};
     }
 
-    // 3. Resolve workspace.
+    // 3. Resolve config path and open ConfigStore (moved before
+    //    workspace/timeout so we can load task defaults).
+    let config_path =
+        match resolve_config_path(parsed.config.as_deref(), env_get(env, "AGENTIRON_CONFIG")) {
+            Ok(p) => p,
+            Err(e) => {
+                emit_failure!(
+                    AutomationRunErrorCategory::Config,
+                    e,
+                    EXIT_CONFIG,
+                    PathBuf::from(parsed.workspace.as_deref().unwrap_or("."))
+                );
+            }
+        };
+
+    if !quiet {
+        let _ = writeln!(stderr, "config: {}", config_path.display());
+    }
+
+    let store = match ConfigStore::open_at(&config_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            emit_failure!(
+                AutomationRunErrorCategory::Config,
+                format!("failed to open config store: {}", e),
+                EXIT_CONFIG,
+                PathBuf::from(parsed.workspace.as_deref().unwrap_or("."))
+            );
+        }
+    };
+
+    // 4. Load the task to get workspace/timeout defaults.
+    let task_defaults = match store.get_automation_task(&parsed.task_id).await {
+        Ok(Some(t)) => Some(t),
+        Ok(None) => None,
+        Err(_) => None,
+    };
+
+    let workspace_fallback = task_defaults
+        .as_ref()
+        .filter(|t| !t.project_root.as_os_str().is_empty())
+        .map(|t| t.project_root.as_path());
+
+    let timeout_fallback = task_defaults
+        .as_ref()
+        .filter(|t| t.timeout_seconds > 0)
+        .map(|t| Duration::from_secs(t.timeout_seconds));
+
+    // 5. Resolve workspace (CLI > env > task project root).
     let workspace = match resolve_workspace(
         parsed.workspace.as_deref(),
         env_get(env, "AGENTIRON_WORKSPACE"),
+        workspace_fallback,
     ) {
         Ok(w) => w,
         Err(e) => {
@@ -565,55 +638,28 @@ pub async fn execute_run_with_streams(
         let _ = writeln!(stderr, "workspace: {}", workspace.display());
     }
 
-    // 4. Resolve timeout (required).
-    let timeout =
-        match resolve_timeout(parsed.timeout.as_deref(), env_get(env, "AGENTIRON_TIMEOUT")) {
-            Ok(t) => t,
-            Err(e) => {
-                emit_failure!(AutomationRunErrorCategory::Config, e, EXIT_USAGE, workspace);
-            }
-        };
+    // 6. Resolve timeout (CLI > env > task timeout).
+    let timeout = match resolve_timeout(
+        parsed.timeout.as_deref(),
+        env_get(env, "AGENTIRON_TIMEOUT"),
+        timeout_fallback,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            emit_failure!(AutomationRunErrorCategory::Config, e, EXIT_USAGE, workspace);
+        }
+    };
 
     if !quiet {
         let _ = writeln!(stderr, "timeout: {:?}", timeout);
     }
-
-    // 5. Resolve config path and open ConfigStore.
-    let config_path =
-        match resolve_config_path(parsed.config.as_deref(), env_get(env, "AGENTIRON_CONFIG")) {
-            Ok(p) => p,
-            Err(e) => {
-                emit_failure!(
-                    AutomationRunErrorCategory::Config,
-                    e,
-                    EXIT_CONFIG,
-                    workspace
-                );
-            }
-        };
-
-    if !quiet {
-        let _ = writeln!(stderr, "config: {}", config_path.display());
-    }
-
-    let store = match ConfigStore::open_at(&config_path).await {
-        Ok(s) => s,
-        Err(e) => {
-            emit_failure!(
-                AutomationRunErrorCategory::Config,
-                format!("failed to open config store: {}", e),
-                EXIT_CONFIG,
-                workspace
-            );
-        }
-    };
 
     // 6. Bootstrap headless runtime.
     if !quiet {
         let _ = writeln!(stderr, "bootstrapping headless runtime...");
     }
 
-    let headless = match bootstrap_headless(store, &parsed.task_id, workspace.clone()).await {
+    let headless = match bootstrap_headless(store, &parsed.task_id, workspace.clone(), timeout).await {
         Ok(h) => h,
         Err(e) => {
             let code = exit_code_for_bootstrap_error(&e);

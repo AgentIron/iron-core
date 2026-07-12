@@ -162,6 +162,7 @@
 //! [`Tool`] implementations must not block the orchestration runtime.
 
 pub mod automation_task;
+pub mod scheduled_task;
 pub mod builtin;
 pub mod capability;
 pub mod cli;

@@ -588,6 +588,9 @@ mod migrations;
 #[cfg(test)]
 mod automation_task_tests;
 
+#[cfg(test)]
+mod scheduled_task_tests;
+
 pub use builtin_models::{builtin_model_catalog, BuiltinModelEntry};
 pub use effective_catalog::{
     build_effective_catalog, CatalogError, EffectiveModelCatalog, EffectiveModelEntry,

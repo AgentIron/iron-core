@@ -1016,7 +1016,7 @@ async fn test_migrations_v1_to_v2() {
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
 
     // Verify v2/v3 tables exist by using the new APIs
     store
@@ -1368,7 +1368,7 @@ async fn test_migrations_v2_to_v3_custom_models_columns() {
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
 
     // Verify the new columns have correct defaults for existing rows
     let retrieved = store
