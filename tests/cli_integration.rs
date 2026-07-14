@@ -156,6 +156,8 @@ async fn seed_pertool_profile(store: &ConfigStore) {
 /// Create a stored prompt (referencing the given profile) and an automation task.
 async fn seed_prompt_and_task(store: &ConfigStore, profile_id: &str) {
     let prompt = StoredPrompt {
+        display_name: "Daily Report".to_string(),
+        normalized_name: "daily-report".to_string(),
         instructions: "Generate a daily report".to_string(),
         skills: Vec::new(),
         profile: Some(AgentProfileId::from(profile_id)),
@@ -165,6 +167,8 @@ async fn seed_prompt_and_task(store: &ConfigStore, profile_id: &str) {
             id: "report-prompt".to_string(),
             schema_version: STORED_PROMPT_SCHEMA_VERSION,
             payload: serde_json::to_value(&prompt).unwrap(),
+            display_name: "Daily Report".to_string(),
+            normalized_name: "daily-report".to_string(),
         })
         .await
         .unwrap();

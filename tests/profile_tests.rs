@@ -1045,6 +1045,8 @@ fn blank_identity_prompt_falls_back_to_default() {
 fn stored_prompt_registry_crud_is_deterministic() {
     let agent = test_agent();
     let prompt = StoredPrompt {
+        display_name: "Review Changes".to_string(),
+        normalized_name: "review-changes".to_string(),
         instructions: "Review the latest changes".to_string(),
         skills: Vec::new(),
         profile: None,
@@ -1064,6 +1066,8 @@ fn stored_prompt_registry_crud_is_deterministic() {
 async fn load_stored_prompts_populates_registry() {
     let store = ConfigStore::open_in_memory().await.unwrap();
     let prompt = StoredPrompt {
+        display_name: "Summary".to_string(),
+        normalized_name: "summary".to_string(),
         instructions: "Summarize this session".to_string(),
         skills: vec!["summarizer".to_string()],
         profile: None,
@@ -1073,6 +1077,8 @@ async fn load_stored_prompts_populates_registry() {
             id: "summary".to_string(),
             schema_version: STORED_PROMPT_SCHEMA_VERSION,
             payload: serde_json::to_value(&prompt).unwrap(),
+            display_name: "Summary".to_string(),
+            normalized_name: "summary".to_string(),
         })
         .await
         .unwrap();

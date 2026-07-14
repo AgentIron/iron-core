@@ -562,7 +562,9 @@ mod tests {
             .set_prompt(&PromptInput {
                 id: "prompt-1".to_string(),
                 schema_version: crate::stored_prompt::STORED_PROMPT_SCHEMA_VERSION,
-                payload: json!({"instructions": "Do thing", "skills": []}),
+                payload: json!({"display_name": "Test Prompt", "normalized_name": "test-prompt", "instructions": "Do thing", "skills": []}),
+                display_name: "Test Prompt".to_string(),
+                normalized_name: "test-prompt".to_string(),
             })
             .await
             .unwrap();

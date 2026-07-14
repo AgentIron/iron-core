@@ -1096,6 +1096,7 @@ impl IronAgent {
             .map(|prompt| StoredPromptEntry {
                 id: normalized_id.to_string(),
                 prompt,
+                identity_state: crate::stored_prompt::IdentityState::Ready,
             })
     }
 

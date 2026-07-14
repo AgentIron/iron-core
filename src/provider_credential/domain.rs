@@ -83,7 +83,7 @@ impl StoredCredential {
 }
 
 /// Client-visible provider auth status without secret material.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProviderAuthStatus {
     /// No credential is configured for this provider.
     NotConfigured,

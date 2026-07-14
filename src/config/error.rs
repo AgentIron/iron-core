@@ -99,6 +99,33 @@ pub enum ConfigError {
         /// IDs of schedules that reference the task.
         schedule_ids: Vec<String>,
     },
+
+    /// Stored prompt normalized name collides with an existing prompt.
+    #[error(
+        "Prompt normalized name '{normalized_name}' collides with existing prompt '{existing_id}'"
+    )]
+    PromptNameConflict {
+        /// The normalized name that collided.
+        normalized_name: String,
+        /// The ID of the existing prompt that already owns the name.
+        existing_id: String,
+    },
+
+    /// Profile deletion blocked because stored prompts reference it.
+    #[error("Profile '{profile_id}' is referenced by prompts: {prompt_ids:?}")]
+    ProfileReferencedByPrompts {
+        /// The profile that was being deleted.
+        profile_id: String,
+        /// IDs of prompts that reference the profile.
+        prompt_ids: Vec<String>,
+    },
+
+    /// Deletion cannot proceed because malformed records prevent reference checking.
+    #[error("Cannot verify referential integrity due to malformed records: {details}")]
+    IntegrityUnknown {
+        /// Human-readable details about the unreadable records.
+        details: String,
+    },
 }
 
 impl From<sqlx::Error> for ConfigError {

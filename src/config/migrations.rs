@@ -201,11 +201,40 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
             INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 8);
             "#,
     ),
+    (
+        9,
+        r#"
+            ALTER TABLE prompts ADD COLUMN display_name TEXT NOT NULL DEFAULT '';
+            ALTER TABLE prompts ADD COLUMN normalized_name TEXT NOT NULL DEFAULT '';
+            ALTER TABLE prompts ADD COLUMN identity_state TEXT NOT NULL DEFAULT 'ready';
+
+            UPDATE prompts SET
+                display_name = id,
+                normalized_name = lower(trim(id));
+
+            UPDATE prompts SET
+                identity_state = 'needs_rename'
+            WHERE normalized_name IN (
+                SELECT normalized_name FROM prompts
+                GROUP BY normalized_name
+                HAVING COUNT(*) > 1
+            );
+
+            UPDATE prompts SET
+                normalized_name = '~legacy-' || id
+            WHERE identity_state = 'needs_rename';
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_prompts_normalized_name
+                ON prompts (normalized_name);
+
+            INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 9);
+            "#,
+    ),
 ];
 
 /// The current schema version.
 #[allow(dead_code)]
-pub const CURRENT_SCHEMA_VERSION: i64 = 8;
+pub const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 /// Apply all pending migrations to the database.
 pub async fn apply_migrations(pool: &sqlx::SqlitePool) -> Result<(), super::error::ConfigError> {
@@ -258,6 +287,80 @@ pub async fn apply_migrations(pool: &sqlx::SqlitePool) -> Result<(), super::erro
                     version, e
                 ))
             })?;
+        }
+    }
+
+    // Post-migration: canonicalize prompt identity columns.
+    canonicalize_prompt_identity(pool).await?;
+
+    Ok(())
+}
+
+/// After SQL migrations, canonicalize prompt identity columns using the Rust
+/// normalization function. This fixes values that the approximate SQL
+/// backfill could not handle correctly (underscores, special characters,
+/// multi-space collapsing).
+async fn canonicalize_prompt_identity(
+    pool: &sqlx::SqlitePool,
+) -> Result<(), super::error::ConfigError> {
+    use crate::stored_prompt::normalize_prompt_name;
+    use sqlx::Row;
+
+    // Only proceed if the prompts table has the identity columns.
+    let has_columns: Option<(i64,)> = sqlx::query_as(
+        "SELECT COUNT(*) FROM pragma_table_info('prompts') WHERE name = 'normalized_name'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| super::error::ConfigError::Migration(e.to_string()))?;
+
+    if has_columns.is_none() {
+        return Ok(());
+    }
+
+    let rows = sqlx::query(
+        "SELECT id, display_name, normalized_name FROM prompts WHERE identity_state = 'ready'",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(super::error::ConfigError::from)?;
+
+    for row in rows {
+        let id: String = row.get("id");
+        let display_name: String = row.get("display_name");
+        let stored_normalized: String = row.get("normalized_name");
+
+        let canonical = normalize_prompt_name(&display_name);
+        if canonical.is_empty() || canonical == stored_normalized {
+            continue;
+        }
+
+        // Check for collision with existing canonical handle.
+        let conflict: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM prompts WHERE normalized_name = ? AND id != ? AND identity_state = 'ready'",
+        )
+        .bind(&canonical)
+        .bind(&id)
+        .fetch_optional(pool)
+        .await
+        .map_err(super::error::ConfigError::from)?;
+
+        if conflict.is_some() {
+            // Mark this record as needing rename with a repair handle.
+            let repair = format!("~legacy-{}", id);
+            sqlx::query("UPDATE prompts SET normalized_name = ?, identity_state = 'needs_rename' WHERE id = ?")
+                .bind(&repair)
+                .bind(&id)
+                .execute(pool)
+                .await
+                .map_err(super::error::ConfigError::from)?;
+        } else {
+            sqlx::query("UPDATE prompts SET normalized_name = ? WHERE id = ?")
+                .bind(&canonical)
+                .bind(&id)
+                .execute(pool)
+                .await
+                .map_err(super::error::ConfigError::from)?;
         }
     }
 

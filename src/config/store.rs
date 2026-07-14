@@ -232,13 +232,7 @@ impl ConfigStore {
 
     /// Delete a profile by ID.
     pub async fn delete_profile(&self, id: &str) -> Result<(), ConfigError> {
-        sqlx::query("DELETE FROM profiles WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(ConfigError::from)?;
-
-        Ok(())
+        self.delete_profile_checked(id).await
     }
 
     /// List all profile IDs.
@@ -262,22 +256,46 @@ impl ConfigStore {
                 "Prompt ID must not be empty".to_string(),
             ));
         }
+
+        if input.schema_version == crate::stored_prompt::STORED_PROMPT_SCHEMA_VERSION {
+            let prompt: crate::stored_prompt::StoredPrompt =
+                serde_json::from_value(input.payload.clone())?;
+            prompt.validate().map_err(ConfigError::Validation)?;
+            if input.display_name != prompt.display_name {
+                return Err(ConfigError::Validation(format!(
+                    "Prompt display_name '{}' does not match payload display_name '{}'",
+                    input.display_name, prompt.display_name
+                )));
+            }
+            if input.normalized_name != prompt.normalized_name {
+                return Err(ConfigError::Validation(format!(
+                    "Prompt normalized_name '{}' does not match payload normalized_name '{}'",
+                    input.normalized_name, prompt.normalized_name
+                )));
+            }
+        }
+
         let now = Utc::now().to_rfc3339();
         let payload = serde_json::to_string(&input.payload)?;
 
         sqlx::query(
             r#"
-            INSERT INTO prompts (id, schema_version, payload, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'ready', ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 schema_version = excluded.schema_version,
                 payload = excluded.payload,
+                display_name = excluded.display_name,
+                normalized_name = excluded.normalized_name,
+                identity_state = 'ready',
                 updated_at = excluded.updated_at
             "#,
         )
         .bind(&input.id)
         .bind(input.schema_version)
         .bind(&payload)
+        .bind(&input.display_name)
+        .bind(&input.normalized_name)
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -290,7 +308,7 @@ impl ConfigStore {
     /// Get a prompt by ID.
     pub async fn get_prompt(&self, id: &str) -> Result<Option<PromptRecord>, ConfigError> {
         let row = sqlx::query(
-            "SELECT id, schema_version, payload, created_at, updated_at FROM prompts WHERE id = ?",
+            "SELECT id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at FROM prompts WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -304,16 +322,11 @@ impl ConfigStore {
                     id: row.get("id"),
                     schema_version: row.get("schema_version"),
                     payload: serde_json::from_str(&payload)?,
-                    created_at: chrono::DateTime::parse_from_rfc3339(
-                        &row.get::<String, _>("created_at"),
-                    )
-                    .map_err(|e| ConfigError::Deserialization(e.to_string()))?
-                    .with_timezone(&Utc),
-                    updated_at: chrono::DateTime::parse_from_rfc3339(
-                        &row.get::<String, _>("updated_at"),
-                    )
-                    .map_err(|e| ConfigError::Deserialization(e.to_string()))?
-                    .with_timezone(&Utc),
+                    display_name: row.get("display_name"),
+                    normalized_name: row.get("normalized_name"),
+                    identity_state: row.get("identity_state"),
+                    created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                    updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
                 }))
             }
             None => Ok(None),
@@ -2220,6 +2233,173 @@ impl ConfigStore {
     }
 
     // ============================================================================
+    // Typed Stored-Prompt Management APIs
+    // ============================================================================
+
+    /// Store or replace a typed stored prompt with normalized identity.
+    ///
+    /// Validates the input, derives the normalized handle from `display_name`,
+    /// checks handle uniqueness transactionally, and persists using the current
+    /// prompt schema version. On replacement, the original creation timestamp
+    /// is preserved and the update timestamp advances.
+    pub async fn set_typed_prompt(
+        &self,
+        id: &str,
+        prompt: &crate::stored_prompt::StoredPrompt,
+    ) -> Result<(), ConfigError> {
+        use crate::stored_prompt::{normalize_prompt_name, STORED_PROMPT_SCHEMA_VERSION};
+
+        let trimmed_id = id.trim();
+        if trimmed_id.is_empty() {
+            return Err(ConfigError::Validation(
+                "Prompt ID must not be empty".to_string(),
+            ));
+        }
+        prompt.validate().map_err(ConfigError::Validation)?;
+        let normalized = normalize_prompt_name(&prompt.display_name);
+
+        let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
+
+        let conflicting: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM prompts WHERE normalized_name = ? AND id != ?")
+                .bind(&normalized)
+                .bind(trimmed_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(ConfigError::from)?;
+
+        if let Some((existing_id,)) = conflicting {
+            return Err(ConfigError::PromptNameConflict {
+                normalized_name: normalized,
+                existing_id,
+            });
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let payload = serde_json::to_string_pretty(&prompt)?;
+
+        let existing_created_at: Option<(String,)> =
+            sqlx::query_as("SELECT created_at FROM prompts WHERE id = ?")
+                .bind(trimmed_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(ConfigError::from)?;
+
+        let created_at = existing_created_at
+            .map(|(ca,)| ca)
+            .unwrap_or_else(|| now.clone());
+
+        sqlx::query(
+            r#"
+            INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'ready', ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                schema_version = excluded.schema_version,
+                payload = excluded.payload,
+                display_name = excluded.display_name,
+                normalized_name = excluded.normalized_name,
+                identity_state = 'ready',
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(trimmed_id)
+        .bind(STORED_PROMPT_SCHEMA_VERSION)
+        .bind(&payload)
+        .bind(&prompt.display_name)
+        .bind(&normalized)
+        .bind(&created_at)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(ConfigError::from)?;
+
+        tx.commit().await.map_err(ConfigError::from)?;
+        Ok(())
+    }
+
+    /// Get a prompt by its canonical normalized handle.
+    pub async fn get_prompt_by_normalized_name(
+        &self,
+        normalized_name: &str,
+    ) -> Result<Option<PromptRecord>, ConfigError> {
+        let normalized = crate::stored_prompt::normalize_prompt_name(normalized_name);
+        if normalized.is_empty() {
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            "SELECT id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at FROM prompts WHERE normalized_name = ? AND identity_state != 'needs_rename'",
+        )
+        .bind(&normalized)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        match row {
+            Some(row) => {
+                let payload: String = row.get("payload");
+                Ok(Some(PromptRecord {
+                    id: row.get("id"),
+                    schema_version: row.get("schema_version"),
+                    payload: serde_json::from_str(&payload)?,
+                    display_name: row.get("display_name"),
+                    normalized_name: row.get("normalized_name"),
+                    identity_state: row.get("identity_state"),
+                    created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                    updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// List all prompt IDs sorted by ID ascending.
+    pub async fn list_prompt_ids_sorted(&self) -> Result<Vec<String>, ConfigError> {
+        let rows = sqlx::query("SELECT id FROM prompts ORDER BY id ASC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+        Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
+    }
+
+    /// List prompt IDs that reference a given profile ID.
+    pub async fn prompts_referencing_profile(
+        &self,
+        profile_id: &str,
+    ) -> Result<Vec<String>, ConfigError> {
+        let rows = sqlx::query(
+            "SELECT id FROM prompts WHERE json_extract(payload, '$.profile') = ? ORDER BY id ASC",
+        )
+        .bind(profile_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+        Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
+    }
+
+    /// Delete a profile by ID, blocking if prompts reference it.
+    ///
+    /// Returns `ConfigError::ProfileReferencedByPrompts` if stored prompts
+    /// reference this profile.
+    pub async fn delete_profile_checked(&self, id: &str) -> Result<(), ConfigError> {
+        let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
+        let referencing_prompts = fetch_prompts_referencing_profile_tx(&mut *tx, id).await?;
+        if !referencing_prompts.is_empty() {
+            return Err(ConfigError::ProfileReferencedByPrompts {
+                profile_id: id.to_string(),
+                prompt_ids: referencing_prompts,
+            });
+        }
+        sqlx::query("DELETE FROM profiles WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(ConfigError::from)?;
+        tx.commit().await.map_err(ConfigError::from)?;
+        Ok(())
+    }
+
+    // ============================================================================
     // Typed Scheduled-Task APIs
     // ============================================================================
 
@@ -2431,6 +2611,29 @@ where
     .await
     .map_err(ConfigError::from)?;
 
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<String, _>("id"))
+        .collect())
+}
+
+/// Fetch prompt IDs referencing a profile via JSON payload extraction.
+/// Generic over the executor so it works with both the connection pool and
+/// an in-flight transaction.
+async fn fetch_prompts_referencing_profile_tx<'e, E>(
+    executor: E,
+    profile_id: &str,
+) -> Result<Vec<String>, ConfigError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let rows = sqlx::query(
+        "SELECT id FROM prompts WHERE json_extract(payload, '$.profile') = ? ORDER BY id ASC",
+    )
+    .bind(profile_id)
+    .fetch_all(executor)
+    .await
+    .map_err(ConfigError::from)?;
     Ok(rows
         .into_iter()
         .map(|row| row.get::<String, _>("id"))

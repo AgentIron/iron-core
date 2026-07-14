@@ -26,6 +26,10 @@ pub struct PromptRecord {
     pub id: String,
     pub schema_version: i64,
     pub payload: Value,
+    pub display_name: String,
+    pub normalized_name: String,
+    /// `"ready"` or `"needs_rename"`.
+    pub identity_state: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -36,6 +40,8 @@ pub struct PromptInput {
     pub id: String,
     pub schema_version: i64,
     pub payload: Value,
+    pub display_name: String,
+    pub normalized_name: String,
 }
 
 /// A stored schedule record.

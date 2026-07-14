@@ -188,6 +188,9 @@ async fn provider_profile_migration_preserves_existing_data() {
         r#"
         CREATE TABLE schema_version (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL);
         CREATE TABLE profiles (id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE prompts (id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE schedule (id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE credentials (provider_slug TEXT PRIMARY KEY, credential_mode TEXT NOT NULL, encrypted_payload BLOB NOT NULL, nonce BLOB NOT NULL, encryption_metadata TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         INSERT INTO schema_version (id, version) VALUES (1, 1);
         INSERT INTO profiles (id, schema_version, payload, created_at, updated_at)
         VALUES ('legacy', 1, '{"name":"Legacy"}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');

@@ -671,6 +671,8 @@ mod tests {
             updated_at: now,
         };
         let prompt = StoredPrompt {
+            display_name: "Test".to_string(),
+            normalized_name: "test".to_string(),
             instructions: "do".to_string(),
             skills: Vec::new(),
             profile: None,
@@ -912,6 +914,8 @@ mod tests {
 
         // 4. Create a stored prompt referencing the automation profile.
         let prompt = StoredPrompt {
+            display_name: "Daily Report".to_string(),
+            normalized_name: "daily-report".to_string(),
             instructions: "Generate a daily report".to_string(),
             skills: Vec::new(),
             profile: Some(AgentProfileId::from("automation")),
@@ -921,6 +925,8 @@ mod tests {
                 id: "report-prompt".to_string(),
                 schema_version: STORED_PROMPT_SCHEMA_VERSION,
                 payload: serde_json::to_value(&prompt).unwrap(),
+                display_name: "Daily Report".to_string(),
+                normalized_name: "daily-report".to_string(),
             })
             .await
             .unwrap();
@@ -1070,6 +1076,8 @@ mod tests {
         // Prompt WITHOUT explicit profile — resolves to built-in "default"
         // which has PerTool → fails preflight.
         let prompt = StoredPrompt {
+            display_name: "Do Something".to_string(),
+            normalized_name: "do-something".to_string(),
             instructions: "Do something".to_string(),
             skills: Vec::new(),
             profile: None,
@@ -1079,6 +1087,8 @@ mod tests {
                 id: "p1".to_string(),
                 schema_version: STORED_PROMPT_SCHEMA_VERSION,
                 payload: serde_json::to_value(&prompt).unwrap(),
+                display_name: "Do Something".to_string(),
+                normalized_name: "do-something".to_string(),
             })
             .await
             .unwrap();
@@ -1422,6 +1432,8 @@ mod tests {
         let store = ConfigStore::open_in_memory().await.unwrap();
 
         let prompt = StoredPrompt {
+            display_name: "Test Report".to_string(),
+            normalized_name: "test-report".to_string(),
             instructions: "Generate a report".to_string(),
             skills: Vec::new(),
             profile: Some(AgentProfileId::from("automation")),
@@ -1431,6 +1443,8 @@ mod tests {
                 id: "test-prompt".to_string(),
                 schema_version: STORED_PROMPT_SCHEMA_VERSION,
                 payload: serde_json::to_value(&prompt).unwrap(),
+                display_name: "Test Report".to_string(),
+                normalized_name: "test-report".to_string(),
             })
             .await
             .unwrap();
