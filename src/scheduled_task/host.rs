@@ -359,11 +359,18 @@ pub struct FakeHostScheduler {
     entries: parking_lot::RwLock<std::collections::HashMap<String, ObservedHostEntry>>,
     /// If set, all operations return this error.
     pub force_error: parking_lot::Mutex<Option<HostSchedulerError>>,
+    install_count: std::sync::atomic::AtomicU32,
 }
 
 impl FakeHostScheduler {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns the number of times `install` was called.
+    pub fn install_count(&self) -> u32 {
+        self.install_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn check_error(&self) -> Result<(), HostSchedulerError> {
@@ -382,6 +389,8 @@ impl HostScheduler for FakeHostScheduler {
 
     async fn install(&self, request: &HostInstallRequest) -> Result<(), HostSchedulerError> {
         self.check_error()?;
+        self.install_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let command = render_command(&request.program, &request.args);
         let mut entries = self.entries.write();
         entries.insert(

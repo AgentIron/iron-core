@@ -390,10 +390,19 @@ impl HostScheduler for TaskSchedulerHostScheduler {
 
     async fn remove(&self, schedule_id: &str) -> Result<(), HostSchedulerError> {
         let path = task_path(schedule_id);
-        let _ = self
+        let output = self
             .runner
             .run("schtasks.exe", &["/Delete", "/TN", &path, "/F"])
-            .await;
+            .await
+            .map_err(|e| HostSchedulerError::Io(e.to_string()))?;
+
+        if output.exit_code != 0 {
+            return Err(HostSchedulerError::Io(format!(
+                "schtasks /Delete failed: {}",
+                output.stderr
+            )));
+        }
+
         Ok(())
     }
 

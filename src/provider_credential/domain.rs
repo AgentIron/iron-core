@@ -44,6 +44,10 @@ pub enum CredentialMode {
     ApiKey,
     /// OAuth bearer credential.
     OAuthBearer,
+    /// Configured credential mode is not recognized. This is surfaced by
+    /// management summaries so an unknown persisted mode is not silently
+    /// hidden, while secret material remains redacted.
+    Unsupported,
 }
 
 /// OAuth token material stored for a provider.
@@ -83,7 +87,7 @@ impl StoredCredential {
 }
 
 /// Client-visible provider auth status without secret material.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProviderAuthStatus {
     /// No credential is configured for this provider.
     NotConfigured,

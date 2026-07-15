@@ -177,6 +177,7 @@ pub mod error;
 pub mod execution;
 pub mod facade;
 pub mod headless;
+pub mod management;
 pub mod mcp;
 pub mod plugin;
 pub mod profile;
@@ -247,10 +248,19 @@ pub use profile::{
 pub use prompt_turn::PromptTurn;
 pub use runtime::{ConnectionId, CreateSessionOptions, IronRuntime};
 pub use stored_prompt::{
-    load_prompts, PromptLoadDiagnostic, PromptLoadIssue, PromptLoadReport, StoredPrompt,
-    StoredPromptEntry, StoredPromptRegistry, STORED_PROMPT_SCHEMA_VERSION,
+    kebab_to_title_case, load_prompts, normalize_prompt_name, IdentityState, PromptLoadDiagnostic,
+    PromptLoadIssue, PromptLoadReport, StoredPrompt, StoredPromptEntry, StoredPromptRegistry,
+    LEGACY_STORED_PROMPT_SCHEMA_VERSION, STORED_PROMPT_SCHEMA_VERSION,
 };
 pub use tool::{FunctionTool, Tool, ToolDefinition, ToolRegistry};
+
+pub use management::{
+    ConfigManagementService, CredentialSummary, DependencyDirection, DependencyEntity,
+    DependencyImpactReport, DependencyLink, DependencyProximity, DiagnosticCategory,
+    ManagedAutomationTaskRecord, ManagedProfileEntry, ManagedProfileRecord, ManagedPromptEntry,
+    ManagedPromptRecord, ManagedRecord, ManagedScheduledTaskRecord, ManagementError,
+    RecordDiagnostic, ScheduleDeletionOutcome,
+};
 
 pub use builtin::{
     register_builtin_tools, BuiltinErrorCode, BuiltinToolConfig, BuiltinToolError,

@@ -78,6 +78,8 @@ async fn test_prompt_crud() {
         id: "test-prompt".to_string(),
         schema_version: 1,
         payload: json!({"template": "Hello {{name}}"}),
+        display_name: "Test Prompt".to_string(),
+        normalized_name: "test-prompt".to_string(),
     };
 
     store.set_prompt(&prompt).await.unwrap();
@@ -204,6 +206,8 @@ async fn test_empty_prompt_id_rejected() {
         id: "".to_string(),
         schema_version: 1,
         payload: json!({"template": "test"}),
+        display_name: "Test Prompt".to_string(),
+        normalized_name: "test-prompt".to_string(),
     };
     let err = store.set_prompt(&prompt).await.unwrap_err();
     assert!(
@@ -1016,7 +1020,7 @@ async fn test_migrations_v1_to_v2() {
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 10);
 
     // Verify v2/v3 tables exist by using the new APIs
     store
@@ -1335,6 +1339,40 @@ async fn test_migrations_v2_to_v3_custom_models_columns() {
             version INTEGER NOT NULL
         );
 
+        CREATE TABLE profiles (
+            id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE prompts (
+            id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE schedule (
+            id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE credentials (
+            provider_slug TEXT PRIMARY KEY,
+            credential_mode TEXT NOT NULL,
+            encrypted_payload BLOB NOT NULL,
+            nonce BLOB NOT NULL,
+            encryption_metadata TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE custom_models (
             provider_slug TEXT NOT NULL,
             model_id TEXT NOT NULL,
@@ -1368,7 +1406,7 @@ async fn test_migrations_v2_to_v3_custom_models_columns() {
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 10);
 
     // Verify the new columns have correct defaults for existing rows
     let retrieved = store

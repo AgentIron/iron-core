@@ -680,6 +680,8 @@ fn run_task_activates_stored_prompt_requested_skills() {
             .register_stored_prompt(
                 "review-task",
                 StoredPrompt {
+                    display_name: "Review Change".to_string(),
+                    normalized_name: "review-change".to_string(),
                     instructions: "Review this change".to_string(),
                     skills: vec!["review".to_string()],
                     profile: None,
@@ -736,6 +738,8 @@ fn run_task_requested_skills_respect_profile_filter() {
             .register_stored_prompt(
                 "blocked-task",
                 StoredPrompt {
+                    display_name: "Blocked Task".to_string(),
+                    normalized_name: "blocked-task".to_string(),
                     instructions: "Try blocked skill".to_string(),
                     skills: vec!["blocked".to_string()],
                     profile: Some(profile_id),

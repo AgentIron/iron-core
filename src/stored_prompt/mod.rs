@@ -8,12 +8,31 @@ use crate::profile::AgentProfileId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Schema version for typed `StoredPrompt` payloads stored in ConfigStore.
-pub const STORED_PROMPT_SCHEMA_VERSION: i64 = 1;
+/// Current schema version for typed `StoredPrompt` payloads stored in ConfigStore.
+pub const STORED_PROMPT_SCHEMA_VERSION: i64 = 2;
+
+/// Legacy schema version still recognized during best-effort loading.
+pub const LEGACY_STORED_PROMPT_SCHEMA_VERSION: i64 = 1;
+
+/// Identity state of a stored prompt record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum IdentityState {
+    /// The prompt has a valid display name and normalized handle.
+    #[default]
+    Ready,
+    /// The prompt's handle collided during migration and must be renamed.
+    NeedsRename,
+}
 
 /// A reusable prompt task definition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredPrompt {
+    /// User-facing display name. Mutable; renaming preserves the immutable ID.
+    #[serde(default)]
+    pub display_name: String,
+    /// Canonical ASCII kebab-case lookup handle derived from `display_name`.
+    #[serde(default)]
+    pub normalized_name: String,
     /// Instructions passed as the child's goal or system prompt layer.
     pub instructions: String,
     /// Requested skills to activate for the child run.
@@ -25,20 +44,49 @@ pub struct StoredPrompt {
 }
 
 impl StoredPrompt {
-    /// Validate invariants.
+    /// Validate invariants for v2 records.
     pub fn validate(&self) -> Result<(), String> {
         if self.instructions.trim().is_empty() {
             return Err("stored prompt instructions must not be empty".to_string());
+        }
+        if self.display_name.trim().is_empty() {
+            return Err("stored prompt display name must not be empty".to_string());
+        }
+        let normalized = normalize_prompt_name(&self.display_name);
+        if normalized.is_empty() {
+            return Err(
+                "stored prompt display name must produce a non-empty normalized handle".to_string(),
+            );
+        }
+        if self.normalized_name != normalized {
+            return Err(format!(
+                "stored prompt normalized_name '{}' does not match derived '{}'",
+                self.normalized_name, normalized
+            ));
+        }
+        for skill in &self.skills {
+            validate_skill_identifier(skill)?;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for skill in &self.skills {
+            let lower = skill.to_lowercase();
+            if !seen.insert(lower) {
+                return Err(format!(
+                    "duplicate skill identifier '{}' (case-insensitive)",
+                    skill
+                ));
+            }
         }
         Ok(())
     }
 }
 
-/// A stored prompt paired with its stable ID.
+/// A stored prompt paired with its stable ID and identity state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredPromptEntry {
     pub id: String,
     pub prompt: StoredPrompt,
+    pub identity_state: IdentityState,
 }
 
 /// Issue category reported for a skipped prompt during `load_prompts`.
@@ -47,6 +95,9 @@ pub enum PromptLoadIssue {
     UnsupportedSchemaVersion { version: i64 },
     InvalidPayload,
     MissingRecord,
+    UnavailableProfile { profile_id: String },
+    UnavailableSkill { skill: String },
+    NeedsRename,
 }
 
 /// Per-prompt diagnostic returned by best-effort prompt loading.
@@ -104,6 +155,7 @@ impl StoredPromptRegistry {
             .map(|id| StoredPromptEntry {
                 id: id.clone(),
                 prompt: self.prompts[id].clone(),
+                identity_state: IdentityState::Ready,
             })
             .collect()
     }
@@ -117,13 +169,136 @@ impl StoredPromptRegistry {
     }
 }
 
+/// Prefix reserved for deterministic repair handles assigned to colliding
+/// legacy records during migration. Normal user-facing handles cannot use this
+/// namespace, so repair handles are never ambiguous with legitimate lookups.
+pub const LEGACY_RESERVED_PREFIX: &str = "legacy-";
+
+/// Returns true if the normalized handle uses the reserved repair namespace.
+pub fn is_reserved_handle(normalized: &str) -> bool {
+    normalized.starts_with(LEGACY_RESERVED_PREFIX)
+}
+
+/// Normalize a user-facing prompt name into a canonical ASCII kebab-case handle.
+///
+/// Lowercases the input, converts whitespace, underscores, and existing hyphens
+/// to single hyphens, removes all other non-alphanumeric characters, collapses
+/// consecutive hyphens, and strips leading/trailing hyphens.
+///
+/// Examples:
+/// - `Check Email` → `check-email`
+/// - `Check_Email` → `check-email`
+/// - `CHECK-EMAIL` → `check-email`
+pub fn normalize_prompt_name(name: &str) -> String {
+    let trimmed = name.trim();
+    let mut result = String::with_capacity(trimmed.len());
+    let mut prev_was_hyphen = false;
+
+    for c in trimmed.chars() {
+        // Filter to ASCII before lowercasing so Unicode characters whose
+        // lowercase mapping introduces ASCII (e.g. K → k) are removed
+        // rather than contributing unexpected ASCII letters.
+        if c.is_ascii_alphanumeric() {
+            result.push(c.to_ascii_lowercase());
+            prev_was_hyphen = false;
+        } else if (c == '-' || c == '_' || c.is_whitespace())
+            && !prev_was_hyphen
+            && !result.is_empty()
+        {
+            result.push('-');
+            prev_was_hyphen = true;
+        }
+    }
+
+    if result.ends_with('-') {
+        result.pop();
+    }
+
+    result
+}
+
+/// Validate a requested skill identifier.
+///
+/// Skill identifiers must be non-empty, must not contain control characters or
+/// whitespace, and must consist only of ASCII alphanumeric characters,
+/// hyphens, underscores, dots, or slashes.
+pub fn validate_skill_identifier(skill: &str) -> Result<(), String> {
+    let trimmed = skill.trim();
+    if trimmed.is_empty() {
+        return Err("skill identifier must not be empty or whitespace".to_string());
+    }
+    if trimmed != skill {
+        return Err(format!(
+            "skill identifier '{}' must not have leading or trailing whitespace",
+            skill
+        ));
+    }
+    if trimmed.as_bytes().iter().any(|b| b.is_ascii_control()) {
+        return Err(format!(
+            "skill identifier '{}' must not contain control characters",
+            trimmed
+        ));
+    }
+    if trimmed.contains(char::is_whitespace) {
+        return Err(format!(
+            "skill identifier '{}' must not contain whitespace",
+            trimmed
+        ));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/')
+    {
+        return Err(format!(
+            "skill identifier '{}' contains invalid characters; use only letters, digits, hyphens, underscores, dots, or slashes",
+            trimmed
+        ));
+    }
+    Ok(())
+}
+
+/// Convert a kebab-case identifier to title case for display purposes.
+///
+/// Used during v1 migration to derive a human-readable display name from
+/// a legacy record ID.
+///
+/// Examples:
+/// - `check-email` → `Check Email`
+/// - `daily_report` → `Daily Report`
+pub fn kebab_to_title_case(id: &str) -> String {
+    let normalized = id.replace('_', "-");
+    normalized
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let mut chars = s.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Load stored prompts from a ConfigStore.
+///
+/// Accepts both legacy v1 and current v2 schema versions. For v1 records,
+/// display name and normalized handle are derived from the stable record ID.
 pub async fn load_prompts(store: &ConfigStore) -> Result<PromptLoadReport, ConfigError> {
     let mut report = PromptLoadReport::default();
     let mut ids = store.list_prompt_ids().await?;
     ids.sort();
 
     for id in ids {
+        let trimmed_id = id.trim();
+        if trimmed_id.is_empty() || trimmed_id.as_bytes().iter().any(|b| b.is_ascii_control()) {
+            report.diagnostics.push(PromptLoadDiagnostic {
+                prompt_id: id,
+                issue: PromptLoadIssue::InvalidPayload,
+            });
+            continue;
+        }
         let record = match store.get_prompt(&id).await? {
             Some(record) => record,
             None => {
@@ -135,6 +310,56 @@ pub async fn load_prompts(store: &ConfigStore) -> Result<PromptLoadReport, Confi
             }
         };
 
+        if record.schema_version == LEGACY_STORED_PROMPT_SCHEMA_VERSION {
+            let prompt: StoredPrompt = match serde_json::from_value(record.payload.clone()) {
+                Ok(p) => p,
+                Err(_) => {
+                    report.diagnostics.push(PromptLoadDiagnostic {
+                        prompt_id: record.id,
+                        issue: PromptLoadIssue::InvalidPayload,
+                    });
+                    continue;
+                }
+            };
+            if prompt.instructions.trim().is_empty() {
+                report.diagnostics.push(PromptLoadDiagnostic {
+                    prompt_id: record.id,
+                    issue: PromptLoadIssue::InvalidPayload,
+                });
+                continue;
+            }
+            let display_name = kebab_to_title_case(&record.id);
+            // Derive normalized handle from the deterministic display name
+            // rather than trusting the DB column, which may be a repair handle
+            // or stale placeholder.
+            let normalized_name = normalize_prompt_name(&display_name);
+            let identity_state = if record.identity_state == "needs_rename" {
+                IdentityState::NeedsRename
+            } else {
+                IdentityState::Ready
+            };
+            let prompt = StoredPrompt {
+                display_name,
+                normalized_name,
+                instructions: prompt.instructions,
+                skills: prompt.skills,
+                profile: prompt.profile,
+            };
+            if prompt.validate().is_err() {
+                report.diagnostics.push(PromptLoadDiagnostic {
+                    prompt_id: record.id,
+                    issue: PromptLoadIssue::InvalidPayload,
+                });
+                continue;
+            }
+            report.loaded.push(StoredPromptEntry {
+                id: record.id,
+                prompt,
+                identity_state,
+            });
+            continue;
+        }
+
         if record.schema_version != STORED_PROMPT_SCHEMA_VERSION {
             report.diagnostics.push(PromptLoadDiagnostic {
                 prompt_id: record.id,
@@ -145,7 +370,7 @@ pub async fn load_prompts(store: &ConfigStore) -> Result<PromptLoadReport, Confi
             continue;
         }
 
-        let prompt: StoredPrompt = match serde_json::from_value(record.payload) {
+        let prompt: StoredPrompt = match serde_json::from_value(record.payload.clone()) {
             Ok(prompt) => prompt,
             Err(_) => {
                 report.diagnostics.push(PromptLoadDiagnostic {
@@ -164,9 +389,16 @@ pub async fn load_prompts(store: &ConfigStore) -> Result<PromptLoadReport, Confi
             continue;
         }
 
+        let identity_state = if record.identity_state == "needs_rename" {
+            IdentityState::NeedsRename
+        } else {
+            IdentityState::Ready
+        };
+
         report.loaded.push(StoredPromptEntry {
             id: record.id,
             prompt,
+            identity_state,
         });
     }
 
@@ -177,10 +409,46 @@ pub async fn load_prompts(store: &ConfigStore) -> Result<PromptLoadReport, Confi
 mod tests {
     use super::*;
 
+    fn valid_prompt() -> StoredPrompt {
+        StoredPrompt {
+            display_name: "Check Email".to_string(),
+            normalized_name: "check-email".to_string(),
+            instructions: "do thing".to_string(),
+            skills: Vec::new(),
+            profile: None,
+        }
+    }
+
     #[test]
     fn stored_prompt_rejects_empty_instructions() {
         let prompt = StoredPrompt {
+            display_name: "Test".to_string(),
+            normalized_name: "test".to_string(),
             instructions: "   ".to_string(),
+            skills: Vec::new(),
+            profile: None,
+        };
+        assert!(prompt.validate().is_err());
+    }
+
+    #[test]
+    fn stored_prompt_rejects_empty_display_name() {
+        let prompt = StoredPrompt {
+            display_name: "  ".to_string(),
+            normalized_name: "".to_string(),
+            instructions: "do thing".to_string(),
+            skills: Vec::new(),
+            profile: None,
+        };
+        assert!(prompt.validate().is_err());
+    }
+
+    #[test]
+    fn stored_prompt_rejects_mismatched_normalized() {
+        let prompt = StoredPrompt {
+            display_name: "Check Email".to_string(),
+            normalized_name: "wrong-handle".to_string(),
+            instructions: "do thing".to_string(),
             skills: Vec::new(),
             profile: None,
         };
@@ -190,11 +458,7 @@ mod tests {
     #[test]
     fn registry_replaces_existing() {
         let mut reg = StoredPromptRegistry::new();
-        let prompt = StoredPrompt {
-            instructions: "do thing".to_string(),
-            skills: Vec::new(),
-            profile: None,
-        };
+        let prompt = valid_prompt();
         reg.register("task".to_string(), prompt.clone()).unwrap();
         reg.register("task".to_string(), prompt).unwrap();
         assert_eq!(reg.len(), 1);
@@ -203,15 +467,111 @@ mod tests {
     #[test]
     fn registry_list_is_sorted() {
         let mut reg = StoredPromptRegistry::new();
-        let prompt = StoredPrompt {
-            instructions: "do thing".to_string(),
-            skills: Vec::new(),
-            profile: None,
-        };
+        let prompt = valid_prompt();
         reg.register("b".to_string(), prompt.clone()).unwrap();
         reg.register("a".to_string(), prompt).unwrap();
         let list = reg.list();
         assert_eq!(list[0].id, "a");
         assert_eq!(list[1].id, "b");
+    }
+
+    #[tokio::test]
+    async fn legacy_load_reports_invalid_prompt_without_suppressing_valid_siblings() {
+        use crate::config::PromptInput;
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        store
+            .set_prompt(&PromptInput {
+                id: "valid-legacy".to_string(),
+                schema_version: LEGACY_STORED_PROMPT_SCHEMA_VERSION,
+                payload: serde_json::json!({"instructions": "Do work"}),
+                display_name: "valid-legacy".to_string(),
+                normalized_name: "valid-legacy".to_string(),
+            })
+            .await
+            .unwrap();
+        store
+            .set_prompt(&PromptInput {
+                id: "invalid-legacy".to_string(),
+                schema_version: LEGACY_STORED_PROMPT_SCHEMA_VERSION,
+                payload: serde_json::json!({
+                    "instructions": "Do work",
+                    "skills": ["invalid skill"]
+                }),
+                display_name: "invalid-legacy".to_string(),
+                normalized_name: "invalid-legacy".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let report = load_prompts(&store).await.unwrap();
+        assert_eq!(report.loaded.len(), 1);
+        assert_eq!(report.loaded[0].id, "valid-legacy");
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.prompt_id == "invalid-legacy"
+                && diagnostic.issue == PromptLoadIssue::InvalidPayload
+        }));
+    }
+
+    // ---- normalize_prompt_name tests ----
+
+    #[test]
+    fn normalize_basic() {
+        assert_eq!(normalize_prompt_name("Check Email"), "check-email");
+    }
+
+    #[test]
+    fn normalize_underscore_as_separator() {
+        assert_eq!(normalize_prompt_name("Check_Email"), "check-email");
+    }
+
+    #[test]
+    fn normalize_equivalent_separators() {
+        assert_eq!(normalize_prompt_name("Check Email"), "check-email");
+        assert_eq!(normalize_prompt_name("Check_Email"), "check-email");
+        assert_eq!(normalize_prompt_name("CHECK-EMAIL"), "check-email");
+    }
+
+    #[test]
+    fn normalize_collapses_multiple_separators() {
+        assert_eq!(normalize_prompt_name("My___Task"), "my-task");
+        assert_eq!(normalize_prompt_name("My   Task"), "my-task");
+    }
+
+    #[test]
+    fn normalize_strips_leading_trailing() {
+        assert_eq!(normalize_prompt_name("  __Check__  "), "check");
+    }
+
+    #[test]
+    fn normalize_removes_special_chars() {
+        assert_eq!(normalize_prompt_name("Paul's Brief!"), "pauls-brief");
+    }
+
+    #[test]
+    fn normalize_empty_result() {
+        assert_eq!(normalize_prompt_name("'!!!'"), "");
+    }
+
+    #[test]
+    fn normalize_ascii_only() {
+        assert_eq!(normalize_prompt_name("Café Report"), "caf-report");
+    }
+
+    // ---- kebab_to_title_case tests ----
+
+    #[test]
+    fn title_case_basic() {
+        assert_eq!(kebab_to_title_case("check-email"), "Check Email");
+    }
+
+    #[test]
+    fn title_case_underscore() {
+        assert_eq!(kebab_to_title_case("daily_report"), "Daily Report");
+    }
+
+    #[test]
+    fn title_case_single_word() {
+        assert_eq!(kebab_to_title_case("report"), "Report");
     }
 }

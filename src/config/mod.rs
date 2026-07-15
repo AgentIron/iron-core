@@ -583,7 +583,7 @@ pub mod store;
 pub mod crypto;
 mod db;
 mod key_source;
-mod migrations;
+pub mod migrations;
 
 #[cfg(test)]
 mod automation_task_tests;
