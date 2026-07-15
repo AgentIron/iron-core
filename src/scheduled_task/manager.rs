@@ -668,9 +668,7 @@ impl<'a> ScheduleManager<'a> {
 
         let profile_id = match self.store.get_prompt(&task.stored_prompt_id).await {
             Ok(Some(record)) => {
-                if record.schema_version
-                    != crate::stored_prompt::STORED_PROMPT_SCHEMA_VERSION
-                {
+                if record.schema_version != crate::stored_prompt::STORED_PROMPT_SCHEMA_VERSION {
                     return ExecutionState::Unknown;
                 }
                 match serde_json::from_value::<crate::stored_prompt::StoredPrompt>(record.payload) {
