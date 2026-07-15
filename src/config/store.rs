@@ -162,6 +162,82 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// Store or replace a profile record, enforcing name uniqueness
+    /// transactionally.
+    ///
+    /// Returns `ConfigError::Validation` if the ID is empty or if another
+    /// profile (by a different ID) already has the same normalized name.
+    pub async fn set_profile_checked(
+        &self,
+        input: &ProfileInput,
+        normalized_name: &str,
+    ) -> Result<(), ConfigError> {
+        if input.id.is_empty() {
+            return Err(ConfigError::Validation(
+                "Profile ID must not be empty".to_string(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
+
+        // Check for name conflict owned by a different profile ID.
+        let conflict: Option<(String,)> = sqlx::query_as("SELECT id FROM profiles WHERE id != ?")
+            .bind(&input.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(ConfigError::from)?;
+
+        // Scan all other profiles for a matching normalized name.
+        // We do this in Rust because the name lives inside a JSON payload.
+        if conflict.is_some() {
+            let rows = sqlx::query("SELECT id, payload FROM profiles WHERE id != ?")
+                .bind(&input.id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(ConfigError::from)?;
+            for row in &rows {
+                let payload: String = row.get("payload");
+                if let Ok(existing) = serde_json::from_str::<serde_json::Value>(&payload) {
+                    if let Some(name) = existing.get("name").and_then(|v| v.as_str()) {
+                        let existing_normalized = crate::profile::normalize_profile_name(name);
+                        if existing_normalized.as_deref() == Some(normalized_name) {
+                            tx.rollback().await.map_err(ConfigError::from)?;
+                            return Err(ConfigError::Validation(format!(
+                                "Profile name '{}' is already used by another profile",
+                                normalized_name
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let payload = serde_json::to_string(&input.payload)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO profiles (id, schema_version, payload, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                schema_version = excluded.schema_version,
+                payload = excluded.payload,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&input.id)
+        .bind(input.schema_version)
+        .bind(&payload)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(ConfigError::from)?;
+
+        tx.commit().await.map_err(ConfigError::from)?;
+        Ok(())
+    }
+
     /// Insert a profile record only if one with the same ID does not already exist.
     ///
     /// Returns `true` if the row was inserted, `false` if the ID already existed.
@@ -235,9 +311,45 @@ impl ConfigStore {
         self.delete_profile_checked(id).await
     }
 
+    /// Get a profile's raw payload by ID without deserializing it.
+    pub async fn get_profile_raw(&self, id: &str) -> Result<Option<(i64, String)>, ConfigError> {
+        let row = sqlx::query("SELECT schema_version, payload FROM profiles WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+        match row {
+            Some(row) => {
+                let schema_version: i64 = row.get("schema_version");
+                let payload: String = row.get("payload");
+                Ok(Some((schema_version, payload)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// List all profile IDs with their raw payloads.
+    pub async fn list_profile_records_raw(
+        &self,
+    ) -> Result<Vec<(String, i64, String)>, ConfigError> {
+        let rows = sqlx::query("SELECT id, schema_version, payload FROM profiles ORDER BY id ASC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let id: String = r.get("id");
+                let schema_version: i64 = r.get("schema_version");
+                let payload: String = r.get("payload");
+                (id, schema_version, payload)
+            })
+            .collect())
+    }
+
     /// List all profile IDs.
     pub async fn list_profile_ids(&self) -> Result<Vec<String>, ConfigError> {
-        let rows = sqlx::query("SELECT id FROM profiles ORDER BY updated_at DESC")
+        let rows = sqlx::query("SELECT id FROM profiles ORDER BY id ASC")
             .fetch_all(&self.pool)
             .await
             .map_err(ConfigError::from)?;
@@ -454,9 +566,9 @@ impl ConfigStore {
         Ok(())
     }
 
-    /// List all schedule IDs.
+    /// List all schedule IDs in deterministic order (by ID ascending).
     pub async fn list_schedule_ids(&self) -> Result<Vec<String>, ConfigError> {
-        let rows = sqlx::query("SELECT id FROM schedule ORDER BY updated_at DESC")
+        let rows = sqlx::query("SELECT id FROM schedule ORDER BY id ASC")
             .fetch_all(&self.pool)
             .await
             .map_err(ConfigError::from)?;
@@ -555,7 +667,7 @@ impl ConfigStore {
 
     /// List all provider slugs with credentials.
     pub async fn list_credential_slugs(&self) -> Result<Vec<String>, ConfigError> {
-        let rows = sqlx::query("SELECT provider_slug FROM credentials ORDER BY updated_at DESC")
+        let rows = sqlx::query("SELECT provider_slug FROM credentials ORDER BY provider_slug ASC")
             .fetch_all(&self.pool)
             .await
             .map_err(ConfigError::from)?;
@@ -2006,17 +2118,40 @@ impl ConfigStore {
 
         let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
 
-        // Require the referenced prompt to exist.
-        let prompt_exists: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM prompts WHERE id = ?")
-            .bind(&normalized.stored_prompt_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(ConfigError::from)?;
+        // Require the referenced prompt to exist and be usable (supported
+        // schema, decodable payload).
+        let prompt_row: Option<(i64, String)> =
+            sqlx::query_as("SELECT schema_version, payload FROM prompts WHERE id = ?")
+                .bind(&normalized.stored_prompt_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(ConfigError::from)?;
 
-        if prompt_exists.is_none() {
-            return Err(ConfigError::UnknownStoredPrompt(
-                normalized.stored_prompt_id.clone(),
-            ));
+        match prompt_row {
+            None => {
+                return Err(ConfigError::UnknownStoredPrompt(
+                    normalized.stored_prompt_id.clone(),
+                ));
+            }
+            Some((schema_version, payload_str))
+                if schema_version == crate::stored_prompt::LEGACY_STORED_PROMPT_SCHEMA_VERSION
+                    || schema_version == crate::stored_prompt::STORED_PROMPT_SCHEMA_VERSION =>
+            {
+                let payload: serde_json::Value = serde_json::from_str(&payload_str)?;
+                let prompt: crate::stored_prompt::StoredPrompt = serde_json::from_value(payload)?;
+                if prompt.instructions.trim().is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "Referenced prompt '{}' has empty instructions",
+                        normalized.stored_prompt_id
+                    )));
+                }
+            }
+            Some((schema_version, _)) => {
+                return Err(ConfigError::Validation(format!(
+                    "Referenced prompt '{}' has unsupported schema version {}",
+                    normalized.stored_prompt_id, schema_version
+                )));
+            }
         }
 
         // Reject normalized-name collisions with a different task ID.
@@ -2201,10 +2336,61 @@ impl ConfigStore {
 
     /// Delete an automation task by ID. Does not affect the referenced prompt.
     ///
-    /// Returns `ConfigError::TaskReferencedBySchedules` if one or more
-    /// schedules reference this task.
+    /// Performs all integrity and reference checks within a single transaction.
+    /// Returns `ConfigError::TaskReferencedBySchedules` if schedules reference
+    /// this task, or `ConfigError::IntegrityUnknown` if malformed schedule
+    /// records prevent reliable reference checking.
     pub async fn delete_automation_task(&self, id: &str) -> Result<(), ConfigError> {
+        use crate::scheduled_task::SCHEDULED_TASK_SCHEMA_VERSION;
+
         let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
+
+        // Verify all schedule records have the current schema version.
+        let unsupported: Vec<(String,)> =
+            sqlx::query_as("SELECT id FROM schedule WHERE schema_version != ? ORDER BY id ASC")
+                .bind(SCHEDULED_TASK_SCHEMA_VERSION)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|e| ConfigError::IntegrityUnknown {
+                    details: format!("Cannot verify schedule integrity: {}", e),
+                })?;
+        if !unsupported.is_empty() {
+            let ids: Vec<String> = unsupported.into_iter().map(|(id,)| id).collect();
+            return Err(ConfigError::IntegrityUnknown {
+                details: format!(
+                    "Schedules with unsupported schema versions: {}",
+                    ids.join(", ")
+                ),
+            });
+        }
+
+        // Verify all schedule payloads are structurally valid so that
+        // json_extract-based reference checks are reliable. A schedule with
+        // valid JSON but missing required fields could silently bypass the
+        // reference check below.
+        let rows = sqlx::query("SELECT id, payload FROM schedule ORDER BY id ASC")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| ConfigError::IntegrityUnknown {
+                details: format!("Cannot verify schedule integrity: {}", e),
+            })?;
+        let mut malformed: Vec<String> = Vec::new();
+        for row in &rows {
+            let sid: String = row.get("id");
+            let payload: String = row.get("payload");
+            let malformed_ids = check_schedule_payload_structure(&sid, &payload);
+            if !malformed_ids.is_empty() {
+                malformed.push(malformed_ids);
+            }
+        }
+        if !malformed.is_empty() {
+            return Err(ConfigError::IntegrityUnknown {
+                details: format!(
+                    "Schedules with structurally malformed payloads: {}",
+                    malformed.join(", ")
+                ),
+            });
+        }
 
         let referencing_schedules = fetch_referencing_schedule_ids(&mut *tx, id).await?;
         if !referencing_schedules.is_empty() {
@@ -2224,6 +2410,84 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// List all automation-task IDs sorted by ID ascending.
+    pub async fn list_automation_task_ids(&self) -> Result<Vec<String>, ConfigError> {
+        let rows = sqlx::query("SELECT id FROM automation_tasks ORDER BY id ASC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+        Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
+    }
+
+    /// Get an automation task by its normalized handle (case-insensitive).
+    ///
+    /// Normalizes the input handle using the task-name normalizer before
+    /// querying. Returns `Ok(None)` if no task matches.
+    pub async fn get_automation_task_by_normalized_name(
+        &self,
+        handle: &str,
+    ) -> Result<Option<crate::automation_task::AutomationTask>, ConfigError> {
+        let normalized = crate::automation_task::normalize_task_name(handle);
+        let row = sqlx::query(
+            "SELECT id, name, normalized_name, stored_prompt_id, expected_outcome, project_root, timeout_seconds, schema_version, created_at, updated_at FROM automation_tasks WHERE normalized_name = ? ORDER BY id ASC LIMIT 1",
+        )
+        .bind(&normalized)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+
+        match row {
+            Some(row) => {
+                use crate::automation_task::AUTOMATION_TASK_SCHEMA_VERSION;
+                let id: String = row.get("id");
+                let schema_version: i64 = row.get("schema_version");
+                if !(1..=AUTOMATION_TASK_SCHEMA_VERSION).contains(&schema_version) {
+                    return Err(ConfigError::Deserialization(format!(
+                        "automation task '{}' has unsupported schema version {} (supported 1..={})",
+                        id, schema_version, AUTOMATION_TASK_SCHEMA_VERSION
+                    )));
+                }
+                let timeout_i64: i64 = row.get("timeout_seconds");
+                if timeout_i64 < 0 {
+                    return Err(ConfigError::Deserialization(format!(
+                        "automation task '{}' has negative timeout {}",
+                        id, timeout_i64
+                    )));
+                }
+                Ok(Some(crate::automation_task::AutomationTask {
+                    id,
+                    display_name: row.get("name"),
+                    normalized_name: row.get("normalized_name"),
+                    stored_prompt_id: row.get("stored_prompt_id"),
+                    expected_outcome: row.get("expected_outcome"),
+                    project_root: std::path::PathBuf::from(row.get::<String, _>("project_root")),
+                    timeout_seconds: timeout_i64 as u64,
+                    created_at: parse_datetime(row.get::<String, _>("created_at"))?,
+                    updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get just the record ID for an automation task by normalized handle,
+    /// without deserializing columns. Used for error reporting when full
+    /// deserialization fails during handle lookup.
+    pub async fn get_automation_task_id_by_normalized_name(
+        &self,
+        handle: &str,
+    ) -> Result<Option<String>, ConfigError> {
+        let normalized = crate::automation_task::normalize_task_name(handle);
+        let row = sqlx::query(
+            "SELECT id FROM automation_tasks WHERE normalized_name = ? ORDER BY id ASC LIMIT 1",
+        )
+        .bind(&normalized)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+        Ok(row.map(|r| r.get::<String, _>("id")))
+    }
+
     /// List task IDs that reference a given stored prompt.
     pub async fn tasks_referencing_prompt(
         &self,
@@ -2236,12 +2500,14 @@ impl ConfigStore {
     // Typed Stored-Prompt Management APIs
     // ============================================================================
 
-    /// Store or replace a typed stored prompt with normalized identity.
+    /// Update an existing typed stored prompt with normalized identity.
     ///
     /// Validates the input, derives the normalized handle from `display_name`,
     /// checks handle uniqueness transactionally, and persists using the current
-    /// prompt schema version. On replacement, the original creation timestamp
-    /// is preserved and the update timestamp advances.
+    /// prompt schema version. The original creation timestamp is preserved and
+    /// the update timestamp advances. Returns
+    /// [`ConfigError::UnknownStoredPrompt`] if the ID does not exist, ensuring
+    /// a concurrent deletion cannot be silently undone by an upsert.
     pub async fn set_typed_prompt(
         &self,
         id: &str,
@@ -2249,21 +2515,115 @@ impl ConfigStore {
     ) -> Result<(), ConfigError> {
         use crate::stored_prompt::{normalize_prompt_name, STORED_PROMPT_SCHEMA_VERSION};
 
-        let trimmed_id = id.trim();
-        if trimmed_id.is_empty() {
+        if id.is_empty() {
             return Err(ConfigError::Validation(
                 "Prompt ID must not be empty".to_string(),
             ));
         }
         prompt.validate().map_err(ConfigError::Validation)?;
         let normalized = normalize_prompt_name(&prompt.display_name);
+        if crate::stored_prompt::is_reserved_handle(&normalized) {
+            return Err(ConfigError::Validation(
+                "Display name uses reserved 'legacy-' handle prefix".to_string(),
+            ));
+        }
 
         let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
 
         let conflicting: Option<(String,)> =
             sqlx::query_as("SELECT id FROM prompts WHERE normalized_name = ? AND id != ?")
                 .bind(&normalized)
-                .bind(trimmed_id)
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(ConfigError::from)?;
+
+        if let Some((existing_id,)) = conflicting {
+            return Err(ConfigError::PromptNameConflict {
+                normalized_name: normalized,
+                existing_id,
+            });
+        }
+
+        // Verify the record exists within the same transaction so a concurrent
+        // deletion between the management-layer existence check and this call
+        // cannot be silently undone.
+        let existing_created_at: Option<(String,)> =
+            sqlx::query_as("SELECT created_at FROM prompts WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(ConfigError::from)?;
+
+        let created_at = match existing_created_at {
+            Some((ca,)) => ca,
+            None => {
+                tx.rollback().await.map_err(ConfigError::from)?;
+                return Err(ConfigError::UnknownStoredPrompt(id.to_string()));
+            }
+        };
+
+        let now = Utc::now().to_rfc3339();
+        let payload = serde_json::to_string_pretty(&prompt)?;
+
+        sqlx::query(
+            r#"
+            UPDATE prompts SET
+                schema_version = ?,
+                payload = ?,
+                display_name = ?,
+                normalized_name = ?,
+                identity_state = 'ready',
+                created_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(STORED_PROMPT_SCHEMA_VERSION)
+        .bind(&payload)
+        .bind(&prompt.display_name)
+        .bind(&normalized)
+        .bind(&created_at)
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(ConfigError::from)?;
+
+        tx.commit().await.map_err(ConfigError::from)?;
+        Ok(())
+    }
+
+    /// Insert a new typed stored prompt. Fails if the ID already exists.
+    ///
+    /// Used by the management service's `create_prompt` to guarantee
+    /// core-generated IDs never silently replace existing records.
+    pub async fn insert_typed_prompt(
+        &self,
+        id: &str,
+        prompt: &crate::stored_prompt::StoredPrompt,
+    ) -> Result<(), ConfigError> {
+        use crate::stored_prompt::{normalize_prompt_name, STORED_PROMPT_SCHEMA_VERSION};
+
+        if id.is_empty() {
+            return Err(ConfigError::Validation(
+                "Prompt ID must not be empty".to_string(),
+            ));
+        }
+        prompt.validate().map_err(ConfigError::Validation)?;
+        let normalized = normalize_prompt_name(&prompt.display_name);
+        if crate::stored_prompt::is_reserved_handle(&normalized) {
+            return Err(ConfigError::Validation(
+                "Display name uses reserved 'legacy-' handle prefix".to_string(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
+
+        let conflicting: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM prompts WHERE normalized_name = ? AND id != ?")
+                .bind(&normalized)
+                .bind(id)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(ConfigError::from)?;
@@ -2278,41 +2638,31 @@ impl ConfigStore {
         let now = Utc::now().to_rfc3339();
         let payload = serde_json::to_string_pretty(&prompt)?;
 
-        let existing_created_at: Option<(String,)> =
-            sqlx::query_as("SELECT created_at FROM prompts WHERE id = ?")
-                .bind(trimmed_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(ConfigError::from)?;
-
-        let created_at = existing_created_at
-            .map(|(ca,)| ca)
-            .unwrap_or_else(|| now.clone());
-
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, 'ready', ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                schema_version = excluded.schema_version,
-                payload = excluded.payload,
-                display_name = excluded.display_name,
-                normalized_name = excluded.normalized_name,
-                identity_state = 'ready',
-                created_at = excluded.created_at,
-                updated_at = excluded.updated_at
+            ON CONFLICT(id) DO NOTHING
             "#,
         )
-        .bind(trimmed_id)
+        .bind(id)
         .bind(STORED_PROMPT_SCHEMA_VERSION)
         .bind(&payload)
         .bind(&prompt.display_name)
         .bind(&normalized)
-        .bind(&created_at)
+        .bind(&now)
         .bind(&now)
         .execute(&mut *tx)
         .await
         .map_err(ConfigError::from)?;
+
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(ConfigError::from)?;
+            return Err(ConfigError::Validation(format!(
+                "Prompt ID '{}' already exists",
+                id
+            )));
+        }
 
         tx.commit().await.map_err(ConfigError::from)?;
         Ok(())
@@ -2353,6 +2703,27 @@ impl ConfigStore {
         }
     }
 
+    /// Get just the record ID for a prompt by normalized handle, without
+    /// deserializing the payload. Used for error reporting when full
+    /// deserialization fails during handle lookup.
+    pub async fn get_prompt_id_by_normalized_name(
+        &self,
+        normalized_name: &str,
+    ) -> Result<Option<String>, ConfigError> {
+        let normalized = crate::stored_prompt::normalize_prompt_name(normalized_name);
+        if normalized.is_empty() {
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            "SELECT id FROM prompts WHERE normalized_name = ? AND identity_state != 'needs_rename'",
+        )
+        .bind(&normalized)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+        Ok(row.map(|r| r.get::<String, _>("id")))
+    }
+
     /// List all prompt IDs sorted by ID ascending.
     pub async fn list_prompt_ids_sorted(&self) -> Result<Vec<String>, ConfigError> {
         let rows = sqlx::query("SELECT id FROM prompts ORDER BY id ASC")
@@ -2362,34 +2733,119 @@ impl ConfigStore {
         Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
+    /// List prompt IDs, schema versions, and raw payloads in stable ID order.
+    ///
+    /// Dependency analysis uses this to diagnose malformed and unsupported
+    /// records rather than silently excluding them with SQLite JSON filters.
+    pub async fn list_prompt_records_raw(&self) -> Result<Vec<(String, i64, String)>, ConfigError> {
+        let rows = sqlx::query("SELECT id, schema_version, payload FROM prompts ORDER BY id ASC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("id"),
+                    row.get::<i64, _>("schema_version"),
+                    row.get::<String, _>("payload"),
+                )
+            })
+            .collect())
+    }
+
     /// List prompt IDs that reference a given profile ID.
     pub async fn prompts_referencing_profile(
         &self,
         profile_id: &str,
     ) -> Result<Vec<String>, ConfigError> {
-        let rows = sqlx::query(
-            "SELECT id FROM prompts WHERE json_extract(payload, '$.profile') = ? ORDER BY id ASC",
-        )
-        .bind(profile_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(ConfigError::from)?;
-        Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
+        fetch_prompts_referencing_profile_tx(&self.pool, profile_id).await
     }
 
     /// Delete a profile by ID, blocking if prompts reference it.
     ///
     /// Returns `ConfigError::ProfileReferencedByPrompts` if stored prompts
     /// reference this profile.
+    /// Delete a profile by ID, blocking if prompts reference it.
+    ///
+    /// Performs all integrity and reference checks within a single transaction
+    /// so no concurrent insert can interleave between verification and deletion.
+    /// Returns `ConfigError::ProfileReferencedByPrompts` if stored prompts
+    /// reference this profile, or `ConfigError::IntegrityUnknown` if malformed
+    /// prompt records prevent reliable reference checking.
     pub async fn delete_profile_checked(&self, id: &str) -> Result<(), ConfigError> {
+        use crate::stored_prompt::{
+            LEGACY_STORED_PROMPT_SCHEMA_VERSION, STORED_PROMPT_SCHEMA_VERSION,
+        };
+
         let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
-        let referencing_prompts = fetch_prompts_referencing_profile_tx(&mut *tx, id).await?;
+
+        // Verify all prompts have supported schema versions.
+        let unsupported: Vec<(String,)> = sqlx::query_as(
+            "SELECT id FROM prompts WHERE schema_version NOT IN (?, ?) ORDER BY id ASC",
+        )
+        .bind(LEGACY_STORED_PROMPT_SCHEMA_VERSION)
+        .bind(STORED_PROMPT_SCHEMA_VERSION)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| ConfigError::IntegrityUnknown {
+            details: format!("Cannot verify prompt integrity: {}", e),
+        })?;
+        if !unsupported.is_empty() {
+            let ids: Vec<String> = unsupported.into_iter().map(|(id,)| id).collect();
+            return Err(ConfigError::IntegrityUnknown {
+                details: format!(
+                    "Prompts with unsupported schema versions: {}",
+                    ids.join(", ")
+                ),
+            });
+        }
+
+        // Decode every prompt and check the profile reference directly.
+        // Any decode failure means we cannot prove the target is unreferenced.
+        let rows = sqlx::query("SELECT id, payload FROM prompts ORDER BY id ASC")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| ConfigError::IntegrityUnknown {
+                details: format!("Cannot verify prompt integrity: {}", e),
+            })?;
+
+        let mut referencing_prompts = Vec::new();
+        let mut malformed_prompts = Vec::new();
+        for row in rows {
+            let prompt_id: String = row.get("id");
+            let payload: String = row.get("payload");
+            match serde_json::from_str::<crate::stored_prompt::StoredPrompt>(&payload) {
+                Ok(prompt) => {
+                    if prompt
+                        .profile
+                        .as_ref()
+                        .map(|p| p.as_str())
+                        .is_some_and(|p| p == id)
+                    {
+                        referencing_prompts.push(prompt_id);
+                    }
+                }
+                Err(e) => malformed_prompts.push(format!("{} ({})", prompt_id, e)),
+            }
+        }
+
+        if !malformed_prompts.is_empty() {
+            return Err(ConfigError::IntegrityUnknown {
+                details: format!(
+                    "Cannot decode prompts to verify profile references: {}",
+                    malformed_prompts.join(", ")
+                ),
+            });
+        }
+
         if !referencing_prompts.is_empty() {
             return Err(ConfigError::ProfileReferencedByPrompts {
                 profile_id: id.to_string(),
                 prompt_ids: referencing_prompts,
             });
         }
+
         sqlx::query("DELETE FROM profiles WHERE id = ?")
             .bind(id)
             .execute(&mut *tx)
@@ -2419,17 +2875,32 @@ impl ConfigStore {
 
         let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
 
-        let task_exists: Option<(i64,)> =
-            sqlx::query_as("SELECT 1 FROM automation_tasks WHERE id = ?")
+        // Require the referenced automation task to exist and be usable.
+        let task_row: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM automation_tasks WHERE id = ? AND schema_version = ?")
                 .bind(&normalized.automation_task_id)
+                .bind(crate::automation_task::AUTOMATION_TASK_SCHEMA_VERSION)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(ConfigError::from)?;
 
-        if task_exists.is_none() {
-            return Err(ConfigError::UnknownAutomationTask(
-                normalized.automation_task_id.clone(),
-            ));
+        if task_row.is_none() {
+            // Distinguish missing from unsupported for a clearer error.
+            let any_row: Option<(i64,)> =
+                sqlx::query_as("SELECT 1 FROM automation_tasks WHERE id = ?")
+                    .bind(&normalized.automation_task_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(ConfigError::from)?;
+            if any_row.is_none() {
+                return Err(ConfigError::UnknownAutomationTask(
+                    normalized.automation_task_id.clone(),
+                ));
+            }
+            return Err(ConfigError::Validation(format!(
+                "Referenced automation task '{}' has an unsupported schema version",
+                normalized.automation_task_id
+            )));
         }
 
         let now = Utc::now().to_rfc3339();
@@ -2563,6 +3034,56 @@ impl ConfigStore {
     ) -> Result<Vec<String>, ConfigError> {
         fetch_referencing_schedule_ids(&self.pool, task_id).await
     }
+
+    /// Check whether any schedule records have a schema version other than the
+    /// current typed-schedule version.
+    ///
+    /// When `true`, structural-delete integrity checks cannot rely on
+    /// `json_extract` reference queries alone because unsupported-schema
+    /// records are invisible to those queries.
+    pub async fn has_unsupported_schedule_records(&self) -> Result<bool, ConfigError> {
+        use crate::scheduled_task::SCHEDULED_TASK_SCHEMA_VERSION;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM schedule WHERE schema_version != ?")
+                .bind(SCHEDULED_TASK_SCHEMA_VERSION)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(ConfigError::from)?;
+        Ok(count > 0)
+    }
+
+    /// Check whether a schedule row exists, regardless of schema version.
+    pub async fn unsupported_schedules_referencing_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<String>, ConfigError> {
+        use crate::scheduled_task::SCHEDULED_TASK_SCHEMA_VERSION;
+        let rows = sqlx::query(
+            "SELECT id, schema_version FROM schedule WHERE json_extract(payload, '$.automation_task_id') = ? ORDER BY id ASC",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(ConfigError::from)?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| {
+                let schema_version: i64 = row.get("schema_version");
+                schema_version != SCHEDULED_TASK_SCHEMA_VERSION
+            })
+            .map(|row| row.get::<String, _>("id"))
+            .collect())
+    }
+
+    /// Check whether a schedule row exists, regardless of schema version.
+    pub async fn schedule_exists(&self, id: &str) -> Result<bool, ConfigError> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schedule WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(ConfigError::from)?;
+        Ok(count > 0)
+    }
 }
 
 /// Fetch the IDs of automation tasks referencing a stored prompt, ordered by
@@ -2602,6 +3123,7 @@ where
     let rows = sqlx::query(
         "SELECT id FROM schedule \
          WHERE schema_version = ? \
+         AND json_valid(payload) = 1 \
          AND json_extract(payload, '$.automation_task_id') = ? \
          ORDER BY id ASC",
     )
@@ -2628,7 +3150,7 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     let rows = sqlx::query(
-        "SELECT id FROM prompts WHERE json_extract(payload, '$.profile') = ? ORDER BY id ASC",
+        "SELECT id FROM prompts WHERE json_valid(payload) = 1 AND json_extract(payload, '$.profile') = ? ORDER BY id ASC",
     )
     .bind(profile_id)
     .fetch_all(executor)
@@ -2673,7 +3195,12 @@ fn deserialize_schedule_row(
     let enabled = payload
         .get("enabled")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .ok_or_else(|| {
+            ConfigError::Deserialization(format!(
+                "schedule '{}' missing or non-boolean 'enabled' field",
+                id
+            ))
+        })?;
 
     Ok(Some(crate::scheduled_task::ScheduledTask {
         id,
@@ -2683,6 +3210,44 @@ fn deserialize_schedule_row(
         created_at: parse_datetime(row.get::<String, _>("created_at"))?,
         updated_at: parse_datetime(row.get::<String, _>("updated_at"))?,
     }))
+}
+
+/// Check that a schedule payload has the required structural fields.
+///
+/// Returns a diagnostic string identifying the schedule and its issues if the
+/// payload is not valid JSON or is missing `automation_task_id`,
+/// `cron_expression`, or a boolean `enabled` field. Returns an empty string
+/// when the structure is valid.
+fn check_schedule_payload_structure(id: &str, payload: &str) -> String {
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(e) => {
+            return format!("{} (malformed JSON: {})", id, e);
+        }
+    };
+    let mut issues = Vec::new();
+    if value
+        .get("automation_task_id")
+        .and_then(|v| v.as_str())
+        .is_none()
+    {
+        issues.push("missing automation_task_id".to_string());
+    }
+    if value
+        .get("cron_expression")
+        .and_then(|v| v.as_str())
+        .is_none()
+    {
+        issues.push("missing cron_expression".to_string());
+    }
+    if value.get("enabled").and_then(|v| v.as_bool()).is_none() {
+        issues.push("missing or non-boolean enabled".to_string());
+    }
+    if issues.is_empty() {
+        String::new()
+    } else {
+        format!("{} ({})", id, issues.join(", "))
+    }
 }
 
 /// Resolve the platform-default config path.

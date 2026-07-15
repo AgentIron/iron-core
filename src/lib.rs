@@ -258,7 +258,8 @@ pub use management::{
     ConfigManagementService, CredentialSummary, DependencyDirection, DependencyEntity,
     DependencyImpactReport, DependencyLink, DependencyProximity, DiagnosticCategory,
     ManagedAutomationTaskRecord, ManagedProfileEntry, ManagedProfileRecord, ManagedPromptEntry,
-    ManagedPromptRecord, ManagedRecord, ManagementError, RecordDiagnostic, ScheduleDeletionOutcome,
+    ManagedPromptRecord, ManagedRecord, ManagedScheduledTaskRecord, ManagementError,
+    RecordDiagnostic, ScheduleDeletionOutcome,
 };
 
 pub use builtin::{

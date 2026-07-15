@@ -21,7 +21,9 @@
 
 use crate::automation_task::{AutomationTask, AutomationTaskInput};
 use crate::config::{ConfigError, ConfigStore};
-use crate::profile::{AgentProfile, AgentProfileId, AgentProfileProvider, PROFILE_SCHEMA_VERSION};
+use crate::profile::{
+    AgentProfile, AgentProfileId, AgentProfileProvider, SkillFilter, PROFILE_SCHEMA_VERSION,
+};
 use crate::provider_credential::domain::{CredentialMode, ProviderAuthStatus};
 use crate::scheduled_task::host::{HostScheduler, SchedulerInstallContext};
 use crate::scheduled_task::manager::ScheduleManager;
@@ -68,8 +70,11 @@ pub enum ManagementError {
     #[error("Scheduler error: {0}")]
     Scheduler(String),
 
-    #[error("Partial operation: durable_succeeded={durable_succeeded}, error={error}")]
+    #[error(
+        "Partial operation for '{target}': durable_succeeded={durable_succeeded}, error={error}"
+    )]
     Partial {
+        target: String,
         durable_succeeded: bool,
         error: String,
     },
@@ -79,6 +84,19 @@ impl From<ConfigError> for ManagementError {
     fn from(e: ConfigError) -> Self {
         match e {
             ConfigError::Validation(msg) => ManagementError::Validation(msg),
+            ConfigError::UnknownStoredPrompt(id) => {
+                ManagementError::Reference(format!("Stored prompt '{}' does not exist", id))
+            }
+            ConfigError::UnknownAutomationTask(id) => {
+                ManagementError::Reference(format!("Automation task '{}' does not exist", id))
+            }
+            ConfigError::TaskNameConflict {
+                normalized_name,
+                existing_id,
+            } => ManagementError::Conflict {
+                target: normalized_name,
+                referrers: vec![existing_id],
+            },
             ConfigError::PromptReferencedByTasks {
                 prompt_id,
                 task_ids,
@@ -129,6 +147,7 @@ pub enum DiagnosticCategory {
     UnavailableSkill,
     NeedsRename,
     ReadOnlyRejected,
+    UnknownIdentityState,
 }
 
 /// A diagnostic for a single managed record.
@@ -199,6 +218,9 @@ pub struct DependencyLink {
 pub struct DependencyImpactReport {
     pub target: DependencyEntity,
     pub links: Vec<DependencyLink>,
+    /// Warnings about malformed or unsupported records that may have caused
+    /// the report to omit dependency paths.
+    pub diagnostics: Vec<String>,
 }
 
 // ============================================================================
@@ -225,12 +247,83 @@ pub struct CredentialSummary {
 // ============================================================================
 
 /// Result of a combined schedule deletion (host + desired state).
+///
+/// When host removal succeeds but deleting the desired ConfigStore row fails,
+/// `drift` contains the post-failure status of the schedule so callers can
+/// see the remaining desired-state drift and any host/diagnostic state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleDeletionOutcome {
     pub schedule_id: String,
     pub host_removed: bool,
     pub desired_deleted: bool,
-    pub error: Option<String>,
+    pub drift: Option<crate::scheduled_task::ScheduleStatus>,
+}
+
+/// Fallible registry abstraction for profile synchronization.
+///
+/// Implementations are typically an `Arc<RwLock<HashMap<AgentProfileId,
+/// AgentProfile>>>` shared with a runtime. The trait is object-safe so the
+/// management service can hold either implementation without generics.
+pub trait ProfileRegistry: Send + Sync {
+    fn insert(&self, id: AgentProfileId, profile: AgentProfile) -> Result<(), String>;
+    fn remove(&self, id: &AgentProfileId) -> Result<(), String>;
+    fn find_by_normalized_name(
+        &self,
+        name: &str,
+        excluding_id: &AgentProfileId,
+    ) -> Option<AgentProfileId>;
+}
+
+impl ProfileRegistry for RwLock<HashMap<AgentProfileId, AgentProfile>> {
+    fn insert(&self, id: AgentProfileId, profile: AgentProfile) -> Result<(), String> {
+        let mut map = self.write();
+        map.insert(id, profile);
+        Ok(())
+    }
+
+    fn remove(&self, id: &AgentProfileId) -> Result<(), String> {
+        let mut map = self.write();
+        map.remove(id);
+        Ok(())
+    }
+
+    fn find_by_normalized_name(
+        &self,
+        name: &str,
+        excluding_id: &AgentProfileId,
+    ) -> Option<AgentProfileId> {
+        let map = self.read();
+        for (id, profile) in map.iter() {
+            if id == excluding_id {
+                continue;
+            }
+            if let Some(normalized) = crate::profile::normalize_profile_name(&profile.name) {
+                if normalized == name {
+                    return Some(id.clone());
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Fallible registry abstraction for stored-prompt synchronization.
+pub trait PromptRegistry: Send + Sync {
+    fn register(&self, id: String, prompt: StoredPrompt) -> Result<(), String>;
+    fn unregister(&self, id: &str) -> Result<(), String>;
+}
+
+impl PromptRegistry for RwLock<StoredPromptRegistry> {
+    fn register(&self, id: String, prompt: StoredPrompt) -> Result<(), String> {
+        let mut reg = self.write();
+        reg.register(id, prompt)
+    }
+
+    fn unregister(&self, id: &str) -> Result<(), String> {
+        let mut reg = self.write();
+        reg.unregister(id);
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -244,10 +337,13 @@ pub struct ScheduleDeletionOutcome {
 /// management remain available when host scheduling is not attached.
 pub struct ConfigManagementService {
     store: ConfigStore,
-    profile_registry: Option<Arc<RwLock<HashMap<AgentProfileId, AgentProfile>>>>,
-    prompt_registry: Option<Arc<RwLock<StoredPromptRegistry>>>,
+    profile_registry: Option<Arc<dyn ProfileRegistry>>,
+    prompt_registry: Option<Arc<dyn PromptRegistry>>,
     host_scheduler: Option<Arc<dyn HostScheduler>>,
     install_context: Option<SchedulerInstallContext>,
+    /// Optional snapshot of available skill names for best-effort validation.
+    /// When absent, skill-availability checks are skipped.
+    skill_inventory: Option<HashSet<String>>,
 }
 
 impl ConfigManagementService {
@@ -259,6 +355,7 @@ impl ConfigManagementService {
             prompt_registry: None,
             host_scheduler: None,
             install_context: None,
+            skill_inventory: None,
         }
     }
 
@@ -267,12 +364,30 @@ impl ConfigManagementService {
         mut self,
         registry: Arc<RwLock<HashMap<AgentProfileId, AgentProfile>>>,
     ) -> Self {
-        self.profile_registry = Some(registry);
+        self.profile_registry = Some(registry as Arc<dyn ProfileRegistry>);
         self
     }
 
     /// Attach a prompt registry for post-persistence synchronization.
     pub fn with_prompt_registry(mut self, registry: Arc<RwLock<StoredPromptRegistry>>) -> Self {
+        self.prompt_registry = Some(registry as Arc<dyn PromptRegistry>);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_profile_registry_for_test(
+        mut self,
+        registry: Arc<dyn ProfileRegistry>,
+    ) -> Self {
+        self.profile_registry = Some(registry);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_prompt_registry_for_test(
+        mut self,
+        registry: Arc<dyn PromptRegistry>,
+    ) -> Self {
         self.prompt_registry = Some(registry);
         self
     }
@@ -285,6 +400,16 @@ impl ConfigManagementService {
     ) -> Self {
         self.host_scheduler = Some(host);
         self.install_context = Some(context);
+        self
+    }
+
+    /// Attach a snapshot of available skill names for best-effort validation.
+    ///
+    /// When attached, prompt writes reject skills unavailable to the selected
+    /// profile, and reads report diagnostics for persisted skills no longer in
+    /// the inventory. When absent, skill-availability checks are skipped.
+    pub fn with_skill_inventory(mut self, skills: HashSet<String>) -> Self {
+        self.skill_inventory = Some(skills);
         self
     }
 
@@ -321,7 +446,39 @@ impl ConfigManagementService {
         })?;
 
         let mut durable = profile.clone();
-        durable.name = normalized_name;
+        durable.name = normalized_name.clone();
+
+        // Validate managed provider context.
+        if let AgentProfileProvider::Managed {
+            provider_slug,
+            model,
+        } = &durable.provider
+        {
+            if provider_slug.as_str().trim().is_empty() {
+                return Err(ManagementError::Validation(
+                    "Managed profile provider_slug must not be empty".to_string(),
+                ));
+            }
+            if model.trim().is_empty() {
+                return Err(ManagementError::Validation(
+                    "Managed profile model must not be empty".to_string(),
+                ));
+            }
+        }
+
+        // Check attached registry for a same-named profile with a different ID
+        // before durable persistence, so the registry's normal collision rules
+        // are not bypassed.
+        if let Some(registry) = &self.profile_registry {
+            let self_id = AgentProfileId::from(trimmed_id);
+            if let Some(existing_id) = registry.find_by_normalized_name(&normalized_name, &self_id)
+            {
+                return Err(ManagementError::Conflict {
+                    target: trimmed_id.to_string(),
+                    referrers: vec![existing_id.as_str().to_string()],
+                });
+            }
+        }
 
         let payload = serde_json::to_value(&durable)
             .map_err(|e| ManagementError::Storage(ConfigError::Serialization(e.to_string())))?;
@@ -332,13 +489,21 @@ impl ConfigManagementService {
             payload,
         };
 
-        self.store.set_profile(&input).await?;
+        // Transactional name-uniqueness enforcement.
+        self.store
+            .set_profile_checked(&input, &normalized_name)
+            .await?;
 
         // Sync attached registry after durable success. The same normalized
         // name is used for both the durable payload and the registry entry.
         if let Some(registry) = &self.profile_registry {
-            let mut reg = registry.write();
-            reg.insert(AgentProfileId::from(trimmed_id), durable);
+            registry
+                .insert(AgentProfileId::from(trimmed_id), durable)
+                .map_err(|e| ManagementError::Partial {
+                    target: trimmed_id.to_string(),
+                    durable_succeeded: true,
+                    error: e,
+                })?;
         }
 
         Ok(())
@@ -349,40 +514,57 @@ impl ConfigManagementService {
         &self,
         id: &str,
     ) -> Result<Option<ManagedProfileRecord>, ManagementError> {
-        let record = self.store.get_profile(id).await?;
-        match record {
-            None => Ok(None),
-            Some(record) => {
-                if record.schema_version != PROFILE_SCHEMA_VERSION {
-                    return Ok(Some(ManagedProfileRecord::NeedsAttention {
-                        id: record.id,
-                        decoded: None,
-                        diagnostics: vec![RecordDiagnostic {
-                            category: DiagnosticCategory::UnsupportedSchemaVersion,
-                            message: format!(
-                                "Profile schema version {} is not supported",
-                                record.schema_version
-                            ),
-                        }],
-                    }));
-                }
-                match serde_json::from_value::<AgentProfile>(record.payload.clone()) {
-                    Ok(profile) => Ok(Some(ManagedProfileRecord::Ready(ManagedProfileEntry {
+        let record = match self.store.get_profile(id).await {
+            Ok(None) => return Ok(None),
+            Ok(Some(r)) => r,
+            Err(ConfigError::Deserialization(msg)) => {
+                return Ok(Some(ManagedProfileRecord::NeedsAttention {
+                    id: id.to_string(),
+                    decoded: None,
+                    diagnostics: vec![RecordDiagnostic {
+                        category: DiagnosticCategory::InvalidPayload,
+                        message: msg,
+                    }],
+                }));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if record.schema_version != PROFILE_SCHEMA_VERSION {
+            return Ok(Some(ManagedProfileRecord::NeedsAttention {
+                id: record.id,
+                decoded: None,
+                diagnostics: vec![RecordDiagnostic {
+                    category: DiagnosticCategory::UnsupportedSchemaVersion,
+                    message: format!(
+                        "Profile schema version {} is not supported",
+                        record.schema_version
+                    ),
+                }],
+            }));
+        }
+        match serde_json::from_value::<AgentProfile>(record.payload.clone()) {
+            Ok(profile) => {
+                let diagnostics = Self::validate_decoded_profile(&record.id, &profile);
+                if diagnostics.is_empty() {
+                    Ok(Some(ManagedProfileRecord::Ready(ManagedProfileEntry {
                         id: AgentProfileId::from(record.id),
                         profile,
                         created_at: record.created_at,
                         updated_at: record.updated_at,
-                    }))),
-                    Err(_) => Ok(Some(ManagedProfileRecord::NeedsAttention {
+                    })))
+                } else {
+                    Ok(Some(ManagedProfileRecord::NeedsAttention {
                         id: record.id,
                         decoded: None,
-                        diagnostics: vec![RecordDiagnostic {
-                            category: DiagnosticCategory::InvalidPayload,
-                            message: "Profile payload could not be decoded".to_string(),
-                        }],
-                    })),
+                        diagnostics,
+                    }))
                 }
             }
+            Err(e) => Ok(Some(ManagedProfileRecord::NeedsAttention {
+                id: record.id,
+                decoded: None,
+                diagnostics: Self::profile_decode_diagnostics(&record.payload, e),
+            })),
         }
     }
 
@@ -391,40 +573,60 @@ impl ConfigManagementService {
         let ids = self.store.list_profile_ids().await?;
         let mut results = Vec::new();
         for id in ids {
-            if let Some(record) = self.store.get_profile(&id).await? {
-                if record.schema_version != PROFILE_SCHEMA_VERSION {
+            let record = match self.store.get_profile(&id).await {
+                Ok(None) => continue,
+                Ok(Some(r)) => r,
+                Err(ConfigError::Deserialization(msg)) => {
                     results.push(ManagedProfileRecord::NeedsAttention {
-                        id: record.id,
+                        id,
                         decoded: None,
                         diagnostics: vec![RecordDiagnostic {
-                            category: DiagnosticCategory::UnsupportedSchemaVersion,
-                            message: format!(
-                                "Profile schema version {} is not supported",
-                                record.schema_version
-                            ),
+                            category: DiagnosticCategory::InvalidPayload,
+                            message: msg,
                         }],
                     });
                     continue;
                 }
-                match serde_json::from_value::<AgentProfile>(record.payload.clone()) {
-                    Ok(profile) => {
+                Err(e) => return Err(e.into()),
+            };
+            if record.schema_version != PROFILE_SCHEMA_VERSION {
+                results.push(ManagedProfileRecord::NeedsAttention {
+                    id: record.id,
+                    decoded: None,
+                    diagnostics: vec![RecordDiagnostic {
+                        category: DiagnosticCategory::UnsupportedSchemaVersion,
+                        message: format!(
+                            "Profile schema version {} is not supported",
+                            record.schema_version
+                        ),
+                    }],
+                });
+                continue;
+            }
+            match serde_json::from_value::<AgentProfile>(record.payload.clone()) {
+                Ok(profile) => {
+                    let diagnostics = Self::validate_decoded_profile(&record.id, &profile);
+                    if diagnostics.is_empty() {
                         results.push(ManagedProfileRecord::Ready(ManagedProfileEntry {
                             id: AgentProfileId::from(record.id),
                             profile,
                             created_at: record.created_at,
                             updated_at: record.updated_at,
                         }));
-                    }
-                    Err(_) => {
+                    } else {
                         results.push(ManagedProfileRecord::NeedsAttention {
                             id: record.id,
                             decoded: None,
-                            diagnostics: vec![RecordDiagnostic {
-                                category: DiagnosticCategory::InvalidPayload,
-                                message: "Profile payload could not be decoded".to_string(),
-                            }],
+                            diagnostics,
                         });
                     }
+                }
+                Err(e) => {
+                    results.push(ManagedProfileRecord::NeedsAttention {
+                        id: record.id,
+                        decoded: None,
+                        diagnostics: Self::profile_decode_diagnostics(&record.payload, e),
+                    });
                 }
             }
         }
@@ -435,46 +637,27 @@ impl ConfigManagementService {
     ///
     /// Returns `ManagementError::Conflict` if prompts reference this profile.
     /// Returns `ManagementError::IntegrityUnknown` if malformed records
-    /// prevent safe reference checking.
+    /// prevent safe reference checking. All checks are transactional in the
+    /// store layer.
     pub async fn delete_profile(&self, id: &str) -> Result<(), ManagementError> {
-        // Check for malformed records that could obscure references.
-        let prompt_ids = self.store.list_prompt_ids_sorted().await?;
-        for pid in &prompt_ids {
-            match self.store.get_prompt(pid).await {
-                Ok(Some(record)) => {
-                    // Only v1 (legacy) and v2 (current) prompt records can be
-                    // reliably inspected for profile references.
-                    if record.schema_version
-                        != crate::stored_prompt::LEGACY_STORED_PROMPT_SCHEMA_VERSION
-                        && record.schema_version
-                            != crate::stored_prompt::STORED_PROMPT_SCHEMA_VERSION
-                    {
-                        return Err(ManagementError::IntegrityUnknown {
-                            details: format!(
-                                "Prompt '{}' has unsupported schema version {}",
-                                pid, record.schema_version
-                            ),
-                        });
-                    }
-                }
-                Ok(None) => {}
-                Err(_) => {
-                    return Err(ManagementError::IntegrityUnknown {
-                        details: format!(
-                            "Prompt '{}' could not be read to verify referential integrity",
-                            pid
-                        ),
-                    });
-                }
-            }
+        let trimmed_id = id.trim();
+        if trimmed_id.eq_ignore_ascii_case("default") {
+            return Err(ManagementError::Validation(
+                "The default profile cannot be deleted".to_string(),
+            ));
         }
 
-        self.store.delete_profile_checked(id).await?;
+        self.store.delete_profile_checked(trimmed_id).await?;
 
         // Sync attached registry.
         if let Some(registry) = &self.profile_registry {
-            let mut reg = registry.write();
-            reg.remove(&AgentProfileId::from(id));
+            registry
+                .remove(&AgentProfileId::from(trimmed_id))
+                .map_err(|e| ManagementError::Partial {
+                    target: trimmed_id.to_string(),
+                    durable_succeeded: true,
+                    error: e,
+                })?;
         }
 
         Ok(())
@@ -493,12 +676,17 @@ impl ConfigManagementService {
         instructions: &str,
         skills: Vec<String>,
         profile: Option<AgentProfileId>,
-    ) -> Result<String, ManagementError> {
+    ) -> Result<(String, StoredPrompt), ManagementError> {
         let id = format!("prompt-{}", Uuid::new_v4());
         let normalized = normalize_prompt_name(display_name);
         if normalized.is_empty() {
             return Err(ManagementError::Validation(
                 "Display name must produce a non-empty normalized handle".to_string(),
+            ));
+        }
+        if crate::stored_prompt::is_reserved_handle(&normalized) {
+            return Err(ManagementError::Validation(
+                "Display name uses reserved 'legacy-' handle prefix".to_string(),
             ));
         }
 
@@ -512,21 +700,70 @@ impl ConfigManagementService {
         prompt.validate().map_err(ManagementError::Validation)?;
         self.validate_prompt_references(&prompt).await?;
 
-        self.store.set_typed_prompt(&id, &prompt).await?;
-        self.sync_prompt_registry(&id, &prompt)?;
-        Ok(id)
+        self.store.insert_typed_prompt(&id, &prompt).await?;
+        if let Some(registry) = &self.prompt_registry {
+            registry.register(id.clone(), prompt.clone()).map_err(|e| {
+                ManagementError::Partial {
+                    target: id.clone(),
+                    durable_succeeded: true,
+                    error: e,
+                }
+            })?;
+        }
+        Ok((id, prompt))
     }
 
-    /// Save (create or replace) a stored prompt by stable ID.
+    /// Save (replace) a stored prompt by stable ID.
+    ///
+    /// The prompt must already exist; use [`create_prompt`](Self::create_prompt)
+    /// to generate a new prompt with a core-generated ID. The normalized handle
+    /// is derived from the display name inside core so callers do not need to
+    /// reproduce identity logic.
     pub async fn save_prompt(
         &self,
         id: &str,
         prompt: &StoredPrompt,
     ) -> Result<(), ManagementError> {
+        let existing = self.store.get_prompt(id).await?.ok_or_else(|| {
+            ManagementError::Reference(format!(
+                "Prompt '{}' not found; use create_prompt to generate a new prompt",
+                id
+            ))
+        })?;
+        if !matches!(
+            existing.schema_version,
+            crate::stored_prompt::LEGACY_STORED_PROMPT_SCHEMA_VERSION
+                | crate::stored_prompt::STORED_PROMPT_SCHEMA_VERSION
+        ) {
+            return Err(ManagementError::Validation(format!(
+                "Prompt '{}' uses unsupported schema version {} and cannot be overwritten",
+                id, existing.schema_version
+            )));
+        }
+        let mut prompt = prompt.clone();
+        prompt.normalized_name = normalize_prompt_name(&prompt.display_name);
+        if prompt.normalized_name.is_empty() {
+            return Err(ManagementError::Validation(
+                "Display name must produce a non-empty normalized handle".to_string(),
+            ));
+        }
+        if crate::stored_prompt::is_reserved_handle(&prompt.normalized_name) {
+            return Err(ManagementError::Validation(
+                "Display name uses reserved 'legacy-' handle prefix".to_string(),
+            ));
+        }
         prompt.validate().map_err(ManagementError::Validation)?;
-        self.validate_prompt_references(prompt).await?;
-        self.store.set_typed_prompt(id, prompt).await?;
-        self.sync_prompt_registry(id, prompt)?;
+        self.validate_prompt_references(&prompt).await?;
+        self.store.set_typed_prompt(id, &prompt).await?;
+        if let Some(registry) = &self.prompt_registry {
+            registry
+                .register(id.to_string(), prompt.clone())
+                .map_err(|e| ManagementError::Partial {
+                    target: id.to_string(),
+                    durable_succeeded: true,
+                    error: e,
+                })?;
+        }
         Ok(())
     }
 
@@ -535,11 +772,25 @@ impl ConfigManagementService {
         &self,
         id: &str,
     ) -> Result<Option<ManagedPromptRecord>, ManagementError> {
-        let record = self.store.get_prompt(id).await?;
-        match record {
-            None => Ok(None),
-            Some(record) => Ok(Some(self.decode_prompt_record(record))),
-        }
+        let record = match self.store.get_prompt(id).await {
+            Ok(None) => return Ok(None),
+            Ok(Some(r)) => r,
+            Err(ConfigError::Deserialization(msg)) => {
+                return Ok(Some(ManagedPromptRecord::NeedsAttention {
+                    id: id.to_string(),
+                    decoded: None,
+                    diagnostics: vec![RecordDiagnostic {
+                        category: DiagnosticCategory::InvalidPayload,
+                        message: msg,
+                    }],
+                }));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        Ok(Some(
+            self.with_reference_diagnostics(self.decode_prompt_record(record))
+                .await?,
+        ))
     }
 
     /// Get a single stored prompt by normalized handle.
@@ -547,11 +798,30 @@ impl ConfigManagementService {
         &self,
         handle: &str,
     ) -> Result<Option<ManagedPromptRecord>, ManagementError> {
-        let record = self.store.get_prompt_by_normalized_name(handle).await?;
-        match record {
-            None => Ok(None),
-            Some(record) => Ok(Some(self.decode_prompt_record(record))),
-        }
+        let record = match self.store.get_prompt_by_normalized_name(handle).await {
+            Ok(None) => return Ok(None),
+            Ok(Some(r)) => r,
+            Err(ConfigError::Deserialization(msg)) => {
+                let id = self
+                    .store
+                    .get_prompt_id_by_normalized_name(handle)
+                    .await?
+                    .unwrap_or_else(|| handle.to_string());
+                return Ok(Some(ManagedPromptRecord::NeedsAttention {
+                    id,
+                    decoded: None,
+                    diagnostics: vec![RecordDiagnostic {
+                        category: DiagnosticCategory::InvalidPayload,
+                        message: msg,
+                    }],
+                }));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        Ok(Some(
+            self.with_reference_diagnostics(self.decode_prompt_record(record))
+                .await?,
+        ))
     }
 
     /// List all stored prompts with per-record diagnostics.
@@ -559,30 +829,59 @@ impl ConfigManagementService {
         let ids = self.store.list_prompt_ids_sorted().await?;
         let mut results = Vec::new();
         for id in ids {
-            if let Some(record) = self.store.get_prompt(&id).await? {
-                results.push(self.decode_prompt_record(record));
-            }
+            let record = match self.store.get_prompt(&id).await {
+                Ok(None) => continue,
+                Ok(Some(r)) => r,
+                Err(ConfigError::Deserialization(msg)) => {
+                    results.push(ManagedPromptRecord::NeedsAttention {
+                        id,
+                        decoded: None,
+                        diagnostics: vec![RecordDiagnostic {
+                            category: DiagnosticCategory::InvalidPayload,
+                            message: msg,
+                        }],
+                    });
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            results.push(
+                self.with_reference_diagnostics(self.decode_prompt_record(record))
+                    .await?,
+            );
         }
         Ok(results)
     }
 
     /// Delete a stored prompt, blocking if automation tasks reference it.
+    ///
+    /// The store-level reference check uses a direct column comparison
+    /// (`stored_prompt_id = ?`) within a transaction, so it is reliable
+    /// regardless of schema version or payload validity. Store failures are
+    /// returned as typed storage errors.
     pub async fn delete_prompt(&self, id: &str) -> Result<(), ManagementError> {
-        // Ensure no malformed automation-task records could obscure references.
-        // The underlying delete_prompt already checks task references; this
-        // guard only refuses to proceed when integrity cannot be verified.
-        if self.store.list_automation_tasks().await.is_err() {
-            return Err(ManagementError::IntegrityUnknown {
-                details: "Malformed automation-task records prevent reference verification"
-                    .to_string(),
-            });
+        match self.store.delete_prompt(id).await {
+            Ok(()) => {}
+            Err(e) => {
+                if matches!(
+                    e,
+                    ConfigError::PromptReferencedByTasks { .. }
+                        | ConfigError::IntegrityUnknown { .. }
+                ) {
+                    return Err(e.into());
+                }
+                return Err(ManagementError::Storage(e));
+            }
         }
 
-        self.store.delete_prompt(id).await?;
-
         if let Some(registry) = &self.prompt_registry {
-            let mut reg = registry.write();
-            reg.unregister(id);
+            registry
+                .unregister(id)
+                .map_err(|e| ManagementError::Partial {
+                    target: id.to_string(),
+                    durable_succeeded: true,
+                    error: e,
+                })?;
         }
 
         Ok(())
@@ -603,12 +902,28 @@ impl ConfigManagementService {
                 "Display name must produce a non-empty normalized handle".to_string(),
             ));
         }
+        if crate::stored_prompt::is_reserved_handle(&normalized) {
+            return Err(ManagementError::Validation(
+                "Display name uses reserved 'legacy-' handle prefix".to_string(),
+            ));
+        }
 
         let existing = self
             .store
             .get_prompt(id)
             .await?
             .ok_or_else(|| ManagementError::Reference(format!("Prompt '{}' not found", id)))?;
+
+        if !matches!(
+            existing.schema_version,
+            crate::stored_prompt::LEGACY_STORED_PROMPT_SCHEMA_VERSION
+                | crate::stored_prompt::STORED_PROMPT_SCHEMA_VERSION
+        ) {
+            return Err(ManagementError::Validation(format!(
+                "Prompt '{}' uses unsupported schema version {} and cannot be renamed",
+                id, existing.schema_version
+            )));
+        }
 
         let prompt: StoredPrompt = match serde_json::from_value(existing.payload) {
             Ok(p) => p,
@@ -627,8 +942,18 @@ impl ConfigManagementService {
             skills: prompt.skills,
             profile: prompt.profile,
         };
+        updated.validate().map_err(ManagementError::Validation)?;
+        self.validate_prompt_references(&updated).await?;
         self.store.set_typed_prompt(id, &updated).await?;
-        self.sync_prompt_registry(id, &updated)?;
+        if let Some(registry) = &self.prompt_registry {
+            registry
+                .register(id.to_string(), updated.clone())
+                .map_err(|e| ManagementError::Partial {
+                    target: id.to_string(),
+                    durable_succeeded: true,
+                    error: e,
+                })?;
+        }
         Ok(())
     }
 
@@ -657,14 +982,77 @@ impl ConfigManagementService {
         id: &str,
     ) -> Result<Option<ManagedAutomationTaskRecord>, ManagementError> {
         match self.store.get_automation_task(id).await {
-            Ok(Some(task)) => Ok(Some(ManagedAutomationTaskRecord::Ready(task))),
+            Ok(Some(task)) => {
+                let diagnostics = self.validate_automation_task_record(&task).await?;
+                if diagnostics.is_empty() {
+                    Ok(Some(ManagedAutomationTaskRecord::Ready(task)))
+                } else {
+                    Ok(Some(ManagedAutomationTaskRecord::NeedsAttention {
+                        id: task.id.clone(),
+                        decoded: Some(task),
+                        diagnostics,
+                    }))
+                }
+            }
             Ok(None) => Ok(None),
             Err(ConfigError::Deserialization(msg)) => {
+                let category = if msg.contains("unsupported schema version") {
+                    DiagnosticCategory::UnsupportedSchemaVersion
+                } else {
+                    DiagnosticCategory::InvalidPayload
+                };
                 Ok(Some(ManagedAutomationTaskRecord::NeedsAttention {
                     id: id.to_string(),
                     decoded: None,
                     diagnostics: vec![RecordDiagnostic {
-                        category: DiagnosticCategory::UnsupportedSchemaVersion,
+                        category,
+                        message: msg,
+                    }],
+                }))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Get an automation task by its normalized handle (case-insensitive).
+    pub async fn get_automation_task_by_handle(
+        &self,
+        handle: &str,
+    ) -> Result<Option<ManagedAutomationTaskRecord>, ManagementError> {
+        match self
+            .store
+            .get_automation_task_by_normalized_name(handle)
+            .await
+        {
+            Ok(Some(task)) => {
+                let diagnostics = self.validate_automation_task_record(&task).await?;
+                if diagnostics.is_empty() {
+                    Ok(Some(ManagedAutomationTaskRecord::Ready(task)))
+                } else {
+                    Ok(Some(ManagedAutomationTaskRecord::NeedsAttention {
+                        id: task.id.clone(),
+                        decoded: Some(task),
+                        diagnostics,
+                    }))
+                }
+            }
+            Ok(None) => Ok(None),
+            Err(ConfigError::Deserialization(msg)) => {
+                let id = self
+                    .store
+                    .get_automation_task_id_by_normalized_name(handle)
+                    .await?
+                    .unwrap_or_else(|| handle.to_string());
+                let category = if msg.contains("unsupported schema version") {
+                    DiagnosticCategory::UnsupportedSchemaVersion
+                } else {
+                    DiagnosticCategory::InvalidPayload
+                };
+                Ok(Some(ManagedAutomationTaskRecord::NeedsAttention {
+                    id,
+                    decoded: None,
+                    diagnostics: vec![RecordDiagnostic {
+                        category,
                         message: msg,
                     }],
                 }))
@@ -675,31 +1063,53 @@ impl ConfigManagementService {
 
     /// List all automation tasks in deterministic order.
     ///
-    /// Records with an unsupported schema version are surfaced through the
-    /// store as errors; valid records are wrapped as `Ready`.
+    /// Records with an unsupported schema version or malformed payload are
+    /// surfaced as `NeedsAttention` rather than failing the whole list.
     pub async fn list_automation_tasks(
         &self,
     ) -> Result<Vec<ManagedAutomationTaskRecord>, ManagementError> {
-        let tasks = self.store.list_automation_tasks().await?;
-        Ok(tasks
-            .into_iter()
-            .map(ManagedAutomationTaskRecord::Ready)
-            .collect())
+        let ids = self.store.list_automation_task_ids().await?;
+        let mut results = Vec::new();
+        for id in &ids {
+            match self.store.get_automation_task(id).await {
+                Ok(Some(task)) => {
+                    let diagnostics = self.validate_automation_task_record(&task).await?;
+                    if diagnostics.is_empty() {
+                        results.push(ManagedAutomationTaskRecord::Ready(task));
+                    } else {
+                        results.push(ManagedAutomationTaskRecord::NeedsAttention {
+                            id: task.id.clone(),
+                            decoded: Some(task),
+                            diagnostics,
+                        });
+                    }
+                }
+                Ok(None) => {} // raced; skip
+                Err(ConfigError::Deserialization(msg)) => {
+                    let category = if msg.contains("unsupported schema version") {
+                        DiagnosticCategory::UnsupportedSchemaVersion
+                    } else {
+                        DiagnosticCategory::InvalidPayload
+                    };
+                    results.push(ManagedAutomationTaskRecord::NeedsAttention {
+                        id: id.clone(),
+                        decoded: None,
+                        diagnostics: vec![RecordDiagnostic {
+                            category,
+                            message: msg,
+                        }],
+                    });
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(results)
     }
 
     /// Delete an automation task, blocking if schedules reference it.
     ///
-    /// Refuses to proceed when scheduled-task records are unreadable, since
-    /// malformed schedule records could obscure task references. The
-    /// underlying store delete already checks schedule references.
+    /// All integrity and reference checks are transactional in the store layer.
     pub async fn delete_automation_task(&self, id: &str) -> Result<(), ManagementError> {
-        if self.store.list_scheduled_tasks().await.is_err() {
-            return Err(ManagementError::IntegrityUnknown {
-                details: "Malformed scheduled-task records prevent reference verification"
-                    .to_string(),
-            });
-        }
-
         self.store
             .delete_automation_task(id)
             .await
@@ -724,9 +1134,55 @@ impl ConfigManagementService {
         let mut report = DependencyImpactReport {
             target,
             links: Vec::new(),
+            diagnostics: Vec::new(),
         };
 
-        let prompt_ids = self.store.prompts_referencing_profile(profile_id).await?;
+        // Direct dependency: the provider credential this profile selects.
+        match self.store.get_profile(profile_id).await {
+            Ok(Some(record)) => {
+                match Self::decode_profile_for_impact(
+                    &record.id,
+                    record.schema_version,
+                    record.payload,
+                ) {
+                    Ok(profile) => {
+                        if let Some(slug) = provider_slug_of(&profile) {
+                            let cred_entity = DependencyEntity::ProviderCredential { slug };
+                            report.links.push(DependencyLink {
+                                entity: cred_entity.clone(),
+                                direction: DependencyDirection::Depends,
+                                proximity: DependencyProximity::Direct,
+                                path: vec![report.target.clone(), cred_entity],
+                            });
+                        }
+                    }
+                    Err(reason) => {
+                        report.diagnostics.push(format!(
+                            "Profile '{}' is not usable for dependency analysis: {}",
+                            profile_id, reason
+                        ));
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(ConfigError::Deserialization(msg)) => {
+                report.diagnostics.push(format!(
+                    "Profile '{}' could not be decoded: {}",
+                    profile_id, msg
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        let (prompt_references, prompt_diagnostics) =
+            self.prompt_profile_references_for_impact().await?;
+        report.diagnostics.extend(prompt_diagnostics);
+        let prompt_ids: Vec<String> = prompt_references
+            .into_iter()
+            .filter_map(|(prompt_id, referenced_profile)| {
+                (referenced_profile.as_str() == profile_id).then_some(prompt_id)
+            })
+            .collect();
         for pid in &prompt_ids {
             let prompt_entity = DependencyEntity::Prompt { id: pid.clone() };
             report.links.push(DependencyLink {
@@ -765,6 +1221,22 @@ impl ConfigManagementService {
                         ],
                     });
                 }
+                match self.store.unsupported_schedules_referencing_task(tid).await {
+                    Ok(unsupported) => {
+                        for sid in unsupported {
+                            report.diagnostics.push(format!(
+                                "Schedule '{}' has unsupported schema and may reference task '{}'",
+                                sid, tid
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        report.diagnostics.push(format!(
+                            "Could not query unsupported schedules referencing task '{}': {}",
+                            tid, e
+                        ));
+                    }
+                }
             }
         }
 
@@ -785,15 +1257,37 @@ impl ConfigManagementService {
         let mut report = DependencyImpactReport {
             target,
             links: Vec::new(),
+            diagnostics: Vec::new(),
         };
 
-        let profiles = self.list_profiles().await?;
-        for entry in profiles {
-            let (pid, profile) = match entry {
-                ManagedProfileRecord::Ready(ManagedProfileEntry { id, profile, .. }) => {
-                    (id, profile)
+        // Scan all profile records directly (including malformed ones) so that
+        // no dependent of the queried credential is silently omitted.
+        let mut profiles = self.store.list_profile_records_raw().await?;
+        profiles.sort_by(|a, b| a.0.cmp(&b.0));
+        let (prompt_references, prompt_diagnostics) =
+            self.prompt_profile_references_for_impact().await?;
+        report.diagnostics.extend(prompt_diagnostics);
+        for (pid, schema_version, payload) in &profiles {
+            let payload_value = match serde_json::from_str::<serde_json::Value>(payload) {
+                Ok(v) => v,
+                Err(e) => {
+                    report.diagnostics.push(format!(
+                        "Profile '{}' could not be decoded; dependency path may be incomplete: {}",
+                        pid, e
+                    ));
+                    continue;
                 }
-                _ => continue,
+            };
+            let profile = match Self::decode_profile_for_impact(pid, *schema_version, payload_value)
+            {
+                Ok(p) => p,
+                Err(reason) => {
+                    report.diagnostics.push(format!(
+                        "Profile '{}' is not usable for dependency analysis; dependency paths may be incomplete: {}",
+                        pid, reason
+                    ));
+                    continue;
+                }
             };
             if let AgentProfileProvider::Managed { provider_slug, .. } = &profile.provider {
                 if provider_slug.as_str() == slug {
@@ -807,7 +1301,12 @@ impl ConfigManagementService {
                         path: vec![report.target.clone(), profile_entity.clone()],
                     });
 
-                    let prompts = self.store.prompts_referencing_profile(pid.as_str()).await?;
+                    let prompts: Vec<String> = prompt_references
+                        .iter()
+                        .filter_map(|(prompt_id, profile_id)| {
+                            (profile_id.as_str() == pid).then_some(prompt_id.clone())
+                        })
+                        .collect();
                     for prompt_id in &prompts {
                         let prompt_entity = DependencyEntity::Prompt {
                             id: prompt_id.clone(),
@@ -855,6 +1354,22 @@ impl ConfigManagementService {
                                     ],
                                 });
                             }
+                            match self.store.unsupported_schedules_referencing_task(tid).await {
+                                Ok(unsupported) => {
+                                    for sid in unsupported {
+                                        report.diagnostics.push(format!(
+                                            "Schedule '{}' has unsupported schema and may reference task '{}'",
+                                            sid, tid
+                                        ));
+                                    }
+                                }
+                                Err(e) => {
+                                    report.diagnostics.push(format!(
+                                        "Could not query unsupported schedules referencing task '{}': {}",
+                                        tid, e
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
@@ -875,23 +1390,88 @@ impl ConfigManagementService {
         let mut report = DependencyImpactReport {
             target,
             links: Vec::new(),
+            diagnostics: Vec::new(),
         };
 
         // Direct dependency: the profile this prompt references (if any).
-        if let Some(prompt_record) = self.store.get_prompt(prompt_id).await? {
-            if let Ok(prompt) = serde_json::from_value::<StoredPrompt>(prompt_record.payload) {
-                if let Some(profile_id) = prompt.profile {
-                    let profile_entity = DependencyEntity::Profile {
-                        id: profile_id.as_str().to_string(),
-                    };
-                    report.links.push(DependencyLink {
-                        entity: profile_entity.clone(),
-                        direction: DependencyDirection::Depends,
-                        proximity: DependencyProximity::Direct,
-                        path: vec![report.target.clone(), profile_entity.clone()],
-                    });
+        match self.store.get_prompt(prompt_id).await {
+            Ok(Some(prompt_record)) => {
+                match Self::decode_prompt_for_impact(
+                    &prompt_record.id,
+                    prompt_record.schema_version,
+                    prompt_record.payload,
+                ) {
+                    Ok(prompt) => {
+                        if let Some(profile_id) = prompt.profile {
+                            let profile_entity = DependencyEntity::Profile {
+                                id: profile_id.as_str().to_string(),
+                            };
+                            report.links.push(DependencyLink {
+                                entity: profile_entity.clone(),
+                                direction: DependencyDirection::Depends,
+                                proximity: DependencyProximity::Direct,
+                                path: vec![report.target.clone(), profile_entity.clone()],
+                            });
+
+                            // Transitive dependency: the profile's provider credential.
+                            match self.store.get_profile(profile_id.as_str()).await {
+                                Ok(Some(profile_record)) => {
+                                    match Self::decode_profile_for_impact(
+                                        &profile_record.id,
+                                        profile_record.schema_version,
+                                        profile_record.payload,
+                                    ) {
+                                        Ok(profile) => {
+                                            if let Some(slug) = provider_slug_of(&profile) {
+                                                let cred_entity =
+                                                    DependencyEntity::ProviderCredential { slug };
+                                                report.links.push(DependencyLink {
+                                                    entity: cred_entity.clone(),
+                                                    direction: DependencyDirection::Depends,
+                                                    proximity: DependencyProximity::Transitive,
+                                                    path: vec![
+                                                        report.target.clone(),
+                                                        profile_entity.clone(),
+                                                        cred_entity,
+                                                    ],
+                                                });
+                                            }
+                                        }
+                                        Err(reason) => {
+                                            report.diagnostics.push(format!(
+                                                "Profile '{}' is not usable for dependency analysis; dependency path may be incomplete: {}",
+                                                profile_id.as_str(), reason
+                                            ));
+                                        }
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(ConfigError::Deserialization(msg)) => {
+                                    report.diagnostics.push(format!(
+                                        "Profile '{}' could not be decoded; dependency path may be incomplete: {}",
+                                        profile_id.as_str(), msg
+                                    ));
+                                }
+                                Err(e) => return Err(e.into()),
+                            }
+                        }
+                    }
+                    Err(reason) => {
+                        report.diagnostics.push(format!(
+                            "Prompt '{}' is not usable for dependency analysis; dependency path may be incomplete: {}",
+                            prompt_id, reason
+                        ));
+                    }
                 }
             }
+            Ok(None) => {}
+            Err(ConfigError::Deserialization(msg)) => {
+                report.diagnostics.push(format!(
+                    "Prompt '{}' could not be decoded; dependency path may be incomplete: {}",
+                    prompt_id, msg
+                ));
+            }
+            Err(e) => return Err(e.into()),
         }
 
         let task_ids = self.store.tasks_referencing_prompt(prompt_id).await?;
@@ -917,6 +1497,22 @@ impl ConfigManagementService {
                     ],
                 });
             }
+            match self.store.unsupported_schedules_referencing_task(tid).await {
+                Ok(unsupported) => {
+                    for sid in unsupported {
+                        report.diagnostics.push(format!(
+                            "Schedule '{}' has unsupported schema and may reference task '{}'",
+                            sid, tid
+                        ));
+                    }
+                }
+                Err(e) => {
+                    report.diagnostics.push(format!(
+                        "Could not query unsupported schedules referencing task '{}': {}",
+                        tid, e
+                    ));
+                }
+            }
         }
 
         Ok(report)
@@ -933,6 +1529,7 @@ impl ConfigManagementService {
         let mut report = DependencyImpactReport {
             target,
             links: Vec::new(),
+            diagnostics: Vec::new(),
         };
 
         let schedule_ids = self.store.schedules_referencing_task(task_id).await?;
@@ -947,39 +1544,137 @@ impl ConfigManagementService {
                 ],
             });
         }
-
-        // Direct dependency: the stored prompt this task references.
-        if let Some(task) = self.store.get_automation_task(task_id).await? {
-            let prompt_entity = DependencyEntity::Prompt {
-                id: task.stored_prompt_id.clone(),
-            };
-            report.links.push(DependencyLink {
-                entity: prompt_entity.clone(),
-                direction: DependencyDirection::Depends,
-                proximity: DependencyProximity::Direct,
-                path: vec![report.target.clone(), prompt_entity.clone()],
-            });
-
-            // Transitive dependency: the prompt's profile (if any).
-            if let Some(prompt_record) = self.store.get_prompt(&task.stored_prompt_id).await? {
-                if let Ok(prompt) = serde_json::from_value::<StoredPrompt>(prompt_record.payload) {
-                    if let Some(profile_id) = prompt.profile {
-                        let profile_entity = DependencyEntity::Profile {
-                            id: profile_id.as_str().to_string(),
-                        };
-                        report.links.push(DependencyLink {
-                            entity: profile_entity.clone(),
-                            direction: DependencyDirection::Depends,
-                            proximity: DependencyProximity::Transitive,
-                            path: vec![
-                                report.target.clone(),
-                                prompt_entity.clone(),
-                                profile_entity.clone(),
-                            ],
-                        });
-                    }
+        match self
+            .store
+            .unsupported_schedules_referencing_task(task_id)
+            .await
+        {
+            Ok(unsupported) => {
+                for sid in unsupported {
+                    report.diagnostics.push(format!(
+                        "Schedule '{}' has unsupported schema and may reference task '{}'",
+                        sid, task_id
+                    ));
                 }
             }
+            Err(e) => {
+                report.diagnostics.push(format!(
+                    "Could not query unsupported schedules referencing task '{}': {}",
+                    task_id, e
+                ));
+            }
+        }
+
+        // Direct dependency: the stored prompt this task references.
+        match self.store.get_automation_task(task_id).await {
+            Ok(Some(task)) => {
+                let prompt_entity = DependencyEntity::Prompt {
+                    id: task.stored_prompt_id.clone(),
+                };
+                report.links.push(DependencyLink {
+                    entity: prompt_entity.clone(),
+                    direction: DependencyDirection::Depends,
+                    proximity: DependencyProximity::Direct,
+                    path: vec![report.target.clone(), prompt_entity.clone()],
+                });
+
+                // Transitive dependency: the prompt's profile (if any).
+                match self.store.get_prompt(&task.stored_prompt_id).await {
+                    Ok(Some(prompt_record)) => {
+                        match Self::decode_prompt_for_impact(
+                            &prompt_record.id,
+                            prompt_record.schema_version,
+                            prompt_record.payload,
+                        ) {
+                            Ok(prompt) => {
+                                if let Some(profile_id) = prompt.profile {
+                                    let profile_entity = DependencyEntity::Profile {
+                                        id: profile_id.as_str().to_string(),
+                                    };
+                                    report.links.push(DependencyLink {
+                                        entity: profile_entity.clone(),
+                                        direction: DependencyDirection::Depends,
+                                        proximity: DependencyProximity::Transitive,
+                                        path: vec![
+                                            report.target.clone(),
+                                            prompt_entity.clone(),
+                                            profile_entity.clone(),
+                                        ],
+                                    });
+
+                                    // Transitive dependency: the profile's credential.
+                                    match self.store.get_profile(profile_id.as_str()).await {
+                                        Ok(Some(profile_record)) => {
+                                            match Self::decode_profile_for_impact(
+                                                &profile_record.id,
+                                                profile_record.schema_version,
+                                                profile_record.payload,
+                                            ) {
+                                                Ok(profile) => {
+                                                    if let Some(slug) = provider_slug_of(&profile) {
+                                                        let cred_entity =
+                                                            DependencyEntity::ProviderCredential {
+                                                                slug,
+                                                            };
+                                                        report.links.push(DependencyLink {
+                                                            entity: cred_entity.clone(),
+                                                            direction: DependencyDirection::Depends,
+                                                            proximity:
+                                                                DependencyProximity::Transitive,
+                                                            path: vec![
+                                                                report.target.clone(),
+                                                                prompt_entity.clone(),
+                                                                profile_entity.clone(),
+                                                                cred_entity,
+                                                            ],
+                                                        });
+                                                    }
+                                                }
+                                                Err(reason) => {
+                                                    report.diagnostics.push(format!(
+                                                        "Profile '{}' is not usable for dependency analysis; dependency path may be incomplete: {}",
+                                                        profile_id.as_str(), reason
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(ConfigError::Deserialization(msg)) => {
+                                            report.diagnostics.push(format!(
+                                                "Profile '{}' could not be decoded; dependency path may be incomplete: {}",
+                                                profile_id.as_str(), msg
+                                            ));
+                                        }
+                                        Err(e) => return Err(e.into()),
+                                    }
+                                }
+                            }
+                            Err(reason) => {
+                                report.diagnostics.push(format!(
+                                    "Prompt '{}' is not usable for dependency analysis; dependency path may be incomplete: {}",
+                                    task.stored_prompt_id, reason
+                                ));
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(ConfigError::Deserialization(msg)) => {
+                        report.diagnostics.push(format!(
+                            "Prompt '{}' could not be decoded; dependency path may be incomplete: {}",
+                            task.stored_prompt_id, msg
+                        ));
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Ok(None) => {}
+            Err(ConfigError::Deserialization(msg)) => {
+                report.diagnostics.push(format!(
+                    "Automation task '{}' could not be decoded; dependency path may be incomplete: {}",
+                    task_id, msg
+                ));
+            }
+            Err(e) => return Err(e.into()),
         }
 
         Ok(report)
@@ -990,19 +1685,71 @@ impl ConfigManagementService {
     // ========================================================================
 
     /// List configured credential summaries without secret material.
+    ///
+    /// For OAuth credentials, the auth status (including `expires_at`) is
+    /// derived from persisted token material when the encryption key is
+    /// available. If the key is unavailable, OAuth rows fall back to
+    /// `ConnectedOAuth { expires_at: None }`.
     pub async fn list_credentials(&self) -> Result<Vec<CredentialSummary>, ManagementError> {
+        use crate::provider_credential::domain::StoredCredential;
+        use std::time::SystemTime;
+
         let slugs = self.store.list_credential_slugs().await?;
         let mut results = Vec::new();
         for slug in &slugs {
             if let Some(record) = self.store.get_credential_metadata(slug).await? {
                 let (mode, auth_status) = match record.credential_mode.as_str() {
                     "api_key" => (CredentialMode::ApiKey, ProviderAuthStatus::ConfiguredApiKey),
-                    "oauth_bearer" => (
-                        CredentialMode::OAuthBearer,
-                        ProviderAuthStatus::ConnectedOAuth { expires_at: None },
+                    "oauth_bearer" => {
+                        let status = match self.store.get_credential(slug).await {
+                            Ok(Some(decrypted)) => {
+                                match serde_json::from_slice::<StoredCredential>(&decrypted) {
+                                    Ok(StoredCredential::OAuthBearer(tokens)) => {
+                                        let now = SystemTime::now();
+                                        match tokens.expires_at {
+                                            Some(exp) if now >= exp => ProviderAuthStatus::Expired,
+                                            _ => ProviderAuthStatus::ConnectedOAuth {
+                                                expires_at: tokens.expires_at,
+                                            },
+                                        }
+                                    }
+                                    // Credential metadata says oauth_bearer but
+                                    // payload is a different type — surface as
+                                    // an error rather than hiding it.
+                                    Ok(_) => {
+                                        return Err(ManagementError::Storage(
+                                            ConfigError::Deserialization(format!(
+                                                "credential '{}' metadata says oauth_bearer but payload is a different type",
+                                                slug
+                                            )),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        return Err(ManagementError::Storage(
+                                            ConfigError::Deserialization(format!(
+                                                "credential '{}' could not be decoded: {}",
+                                                slug, e
+                                            )),
+                                        ));
+                                    }
+                                }
+                            }
+                            // No encryption key available — degrade gracefully.
+                            Err(ConfigError::KeyUnavailable(_)) => {
+                                ProviderAuthStatus::ConnectedOAuth { expires_at: None }
+                            }
+                            Err(e) => return Err(ManagementError::Storage(e)),
+                            Ok(None) => ProviderAuthStatus::NotConfigured,
+                        };
+                        (CredentialMode::OAuthBearer, status)
+                    }
+                    // Unknown modes are surfaced with an explicit unsupported
+                    // status rather than being silently omitted, so callers can
+                    // see that a row is present but not a recognized mode.
+                    _ => (
+                        CredentialMode::Unsupported,
+                        ProviderAuthStatus::UnsupportedCredential,
                     ),
-                    // Unknown modes are skipped rather than failing the list.
-                    _ => continue,
                 };
                 results.push(CredentialSummary {
                     provider_slug: record.provider_slug,
@@ -1072,7 +1819,11 @@ impl ConfigManagementService {
     // Scheduled-task management (Tasks 5.3, 5.5)
     // ========================================================================
 
-    /// Save (create or replace) a scheduled task.
+    /// Save (create or replace) a scheduled task's desired state.
+    ///
+    /// This persists only the ConfigStore desired-state definition. It does
+    /// not reconcile the host scheduler. Use [`reconcile_schedule`](Self::reconcile_schedule)
+    /// separately to install or update the host entry.
     pub async fn save_scheduled_task(
         &self,
         input: &ScheduledTaskInput,
@@ -1084,16 +1835,101 @@ impl ConfigManagementService {
     }
 
     /// Get a scheduled task by ID.
+    ///
+    /// Returns a [`ManagedScheduledTaskRecord`] so records with an unsupported
+    /// schema version or malformed payload are surfaced as `NeedsAttention`.
     pub async fn get_scheduled_task(
         &self,
         id: &str,
-    ) -> Result<Option<ScheduledTask>, ManagementError> {
-        self.store.get_scheduled_task(id).await.map_err(Into::into)
+    ) -> Result<Option<ManagedScheduledTaskRecord>, ManagementError> {
+        match self.store.get_scheduled_task(id).await {
+            Ok(Some(task)) => {
+                let diagnostics = self.validate_scheduled_task_record(&task).await?;
+                if diagnostics.is_empty() {
+                    Ok(Some(ManagedScheduledTaskRecord::Ready(task)))
+                } else {
+                    Ok(Some(ManagedScheduledTaskRecord::NeedsAttention {
+                        id: task.id.clone(),
+                        decoded: Some(task),
+                        diagnostics,
+                    }))
+                }
+            }
+            Ok(None) => {
+                // Distinguish genuinely absent from unsupported-schema.
+                if self.store.schedule_exists(id).await? {
+                    Ok(Some(ManagedScheduledTaskRecord::NeedsAttention {
+                        id: id.to_string(),
+                        decoded: None,
+                        diagnostics: vec![RecordDiagnostic {
+                            category: DiagnosticCategory::UnsupportedSchemaVersion,
+                            message: "Schedule record has an unsupported schema version"
+                                .to_string(),
+                        }],
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(ConfigError::Deserialization(msg)) => {
+                Ok(Some(ManagedScheduledTaskRecord::NeedsAttention {
+                    id: id.to_string(),
+                    decoded: None,
+                    diagnostics: vec![RecordDiagnostic {
+                        category: DiagnosticCategory::InvalidPayload,
+                        message: msg,
+                    }],
+                }))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
-    /// List all scheduled tasks in deterministic order.
-    pub async fn list_scheduled_tasks(&self) -> Result<Vec<ScheduledTask>, ManagementError> {
-        self.store.list_scheduled_tasks().await.map_err(Into::into)
+    /// List all scheduled tasks in deterministic order with per-record diagnostics.
+    pub async fn list_scheduled_tasks(
+        &self,
+    ) -> Result<Vec<ManagedScheduledTaskRecord>, ManagementError> {
+        let ids = self.store.list_schedule_ids().await?;
+        let mut results = Vec::new();
+        for id in &ids {
+            match self.store.get_scheduled_task(id).await {
+                Ok(Some(task)) => {
+                    let diagnostics = self.validate_scheduled_task_record(&task).await?;
+                    if diagnostics.is_empty() {
+                        results.push(ManagedScheduledTaskRecord::Ready(task));
+                    } else {
+                        results.push(ManagedScheduledTaskRecord::NeedsAttention {
+                            id: task.id.clone(),
+                            decoded: Some(task),
+                            diagnostics,
+                        });
+                    }
+                }
+                Ok(None) => {
+                    results.push(ManagedScheduledTaskRecord::NeedsAttention {
+                        id: id.clone(),
+                        decoded: None,
+                        diagnostics: vec![RecordDiagnostic {
+                            category: DiagnosticCategory::UnsupportedSchemaVersion,
+                            message: "Schedule record has an unsupported schema version"
+                                .to_string(),
+                        }],
+                    });
+                }
+                Err(ConfigError::Deserialization(msg)) => {
+                    results.push(ManagedScheduledTaskRecord::NeedsAttention {
+                        id: id.clone(),
+                        decoded: None,
+                        diagnostics: vec![RecordDiagnostic {
+                            category: DiagnosticCategory::InvalidPayload,
+                            message: msg,
+                        }],
+                    });
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(results)
     }
 
     /// Delete a scheduled task by ID (desired state only).
@@ -1107,10 +1943,12 @@ impl ConfigManagementService {
     /// Combined schedule deletion: removes host entry first, then desired state.
     ///
     /// Host-first ordering avoids leaving an orphan entry that can continue
-    /// executing. Returns `Ok(outcome)` only when both host removal and
-    /// desired-state deletion succeed (or desired state is already absent).
-    /// Host removal failure yields [`ManagementError::Scheduler`]; a failure
-    /// after successful host removal yields [`ManagementError::Partial`].
+    /// executing. On success both `host_removed` and `desired_deleted` are
+    /// true. When host removal succeeds but desired-state deletion fails,
+    /// the outcome is returned with `host_removed = true`,
+    /// `desired_deleted = false`, and `drift` containing the post-failure
+    /// schedule status plus a diagnostic describing the deletion error.
+    /// Host removal failure yields [`ManagementError::Scheduler`].
     pub async fn delete_schedule_combined(
         &self,
         schedule_id: &str,
@@ -1125,7 +1963,7 @@ impl ConfigManagementService {
             schedule_id: schedule_id.to_string(),
             host_removed: false,
             desired_deleted: false,
-            error: None,
+            drift: None,
         };
 
         if let Err(e) = host.remove(schedule_id).await {
@@ -1135,32 +1973,35 @@ impl ConfigManagementService {
             )));
         }
 
-        // Check if desired state still exists.
-        match store.get_scheduled_task(schedule_id).await {
-            Ok(None) => {
-                outcome.host_removed = true;
-                outcome.desired_deleted = true;
-                return Ok(outcome);
-            }
-            Ok(Some(_)) => {}
-            Err(e) => {
-                return Err(ManagementError::Partial {
-                    durable_succeeded: false,
-                    error: format!("Failed to read desired state after host removal: {}", e),
-                });
-            }
-        }
-
+        // Unconditionally delete desired state. This removes the row regardless
+        // of schema version, avoiding the case where an unsupported-schema row
+        // is reported as already-deleted but left in the database.
+        outcome.host_removed = true;
         match store.delete_scheduled_task(schedule_id).await {
             Ok(_) => {
-                outcome.host_removed = true;
                 outcome.desired_deleted = true;
                 Ok(outcome)
             }
-            Err(e) => Err(ManagementError::Partial {
-                durable_succeeded: false,
-                error: e.to_string(),
-            }),
+            Err(e) => {
+                outcome.desired_deleted = false;
+                let context = self
+                    .install_context
+                    .as_ref()
+                    .ok_or(ManagementError::SchedulerUnavailable)?;
+                let manager = ScheduleManager::new(store, host.as_ref(), context.clone());
+                let mut status = manager.inspect(schedule_id).await;
+                status
+                    .diagnostics
+                    .push(crate::scheduled_task::ScheduleDiagnostic {
+                        kind: crate::scheduled_task::ScheduleDiagnosticKind::DesiredDeletionFailed,
+                        message: format!(
+                            "Failed to delete desired state after host removal: {}",
+                            e
+                        ),
+                    });
+                outcome.drift = Some(status);
+                Ok(outcome)
+            }
         }
     }
 
@@ -1212,45 +2053,502 @@ impl ConfigManagementService {
         Ok(manager.reconcile(schedule_id).await)
     }
 
+    /// Explicitly reconcile all schedules and optionally remove orphaned host
+    /// entries.
+    pub async fn reconcile_all_schedules(
+        &self,
+        orphan_policy: crate::scheduled_task::manager::OrphanPolicy,
+    ) -> Result<Vec<ScheduleStatus>, ManagementError> {
+        let host = self
+            .host_scheduler
+            .as_ref()
+            .ok_or(ManagementError::SchedulerUnavailable)?;
+        let context = self
+            .install_context
+            .as_ref()
+            .ok_or(ManagementError::SchedulerUnavailable)?;
+        let manager = ScheduleManager::new(&self.store, host.as_ref(), context.clone());
+        Ok(manager.reconcile_all(orphan_policy).await)
+    }
+
     // ========================================================================
     // Internal helpers
     // ========================================================================
 
-    fn decode_prompt_record(&self, record: crate::config::PromptRecord) -> ManagedPromptRecord {
-        let identity_state = if record.identity_state == "needs_rename" {
-            IdentityState::NeedsRename
+    fn decode_profile_for_impact(
+        id: &str,
+        schema_version: i64,
+        payload: serde_json::Value,
+    ) -> Result<AgentProfile, String> {
+        if schema_version != PROFILE_SCHEMA_VERSION {
+            return Err(format!("unsupported schema version {}", schema_version));
+        }
+        let profile = serde_json::from_value::<AgentProfile>(payload)
+            .map_err(|e| format!("could not be decoded: {}", e))?;
+        let diagnostics = Self::validate_decoded_profile(id, &profile);
+        if diagnostics.is_empty() {
+            Ok(profile)
         } else {
-            IdentityState::Ready
+            Err(diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic.message)
+                .collect::<Vec<_>>()
+                .join("; "))
+        }
+    }
+
+    fn decode_prompt_for_impact(
+        id: &str,
+        schema_version: i64,
+        payload: serde_json::Value,
+    ) -> Result<StoredPrompt, String> {
+        let prompt = match schema_version {
+            crate::stored_prompt::LEGACY_STORED_PROMPT_SCHEMA_VERSION => {
+                let legacy = serde_json::from_value::<StoredPrompt>(payload)
+                    .map_err(|e| format!("could not be decoded: {}", e))?;
+                let display_name = crate::stored_prompt::kebab_to_title_case(id);
+                StoredPrompt {
+                    normalized_name: normalize_prompt_name(&display_name),
+                    display_name,
+                    instructions: legacy.instructions,
+                    skills: legacy.skills,
+                    profile: legacy.profile,
+                }
+            }
+            crate::stored_prompt::STORED_PROMPT_SCHEMA_VERSION => {
+                serde_json::from_value::<StoredPrompt>(payload)
+                    .map_err(|e| format!("could not be decoded: {}", e))?
+            }
+            version => return Err(format!("unsupported schema version {}", version)),
+        };
+        prompt
+            .validate()
+            .map_err(|e| format!("failed validation: {}", e))?;
+        Ok(prompt)
+    }
+
+    async fn prompt_profile_references_for_impact(
+        &self,
+    ) -> Result<(Vec<(String, AgentProfileId)>, Vec<String>), ManagementError> {
+        let records = self.store.list_prompt_records_raw().await?;
+        let mut references = Vec::new();
+        let mut diagnostics = Vec::new();
+        for (id, schema_version, payload) in records {
+            let payload = match serde_json::from_str::<serde_json::Value>(&payload) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    diagnostics.push(format!(
+                        "Prompt '{}' has malformed payload; dependency paths may be incomplete: {}",
+                        id, e
+                    ));
+                    continue;
+                }
+            };
+            match Self::decode_prompt_for_impact(&id, schema_version, payload) {
+                Ok(prompt) => {
+                    if let Some(profile_id) = prompt.profile {
+                        references.push((id, profile_id));
+                    }
+                }
+                Err(reason) => diagnostics.push(format!(
+                    "Prompt '{}' is not usable for dependency analysis; dependency paths may be incomplete: {}",
+                    id, reason
+                )),
+            }
+        }
+        Ok((references, diagnostics))
+    }
+
+    /// Validate a decoded profile's fields and return diagnostics for any
+    /// issues found. An empty vector means the profile is valid.
+    fn validate_decoded_profile(id: &str, profile: &AgentProfile) -> Vec<RecordDiagnostic> {
+        let mut diagnostics = Vec::new();
+        if !crate::profile::is_valid_profile_id(id) {
+            diagnostics.push(RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: format!("Profile ID '{}' is invalid or reserved", id),
+            });
+        }
+        if crate::profile::normalize_profile_name(&profile.name).is_none() {
+            diagnostics.push(RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: format!("Profile name '{}' is invalid or reserved", profile.name),
+            });
+        }
+        if let AgentProfileProvider::Managed {
+            provider_slug,
+            model,
+        } = &profile.provider
+        {
+            if provider_slug.as_str().trim().is_empty() || model.trim().is_empty() {
+                diagnostics.push(RecordDiagnostic {
+                    category: DiagnosticCategory::InvalidPayload,
+                    message: "Managed profile has empty provider_slug or model".to_string(),
+                });
+            }
+        }
+        diagnostics
+    }
+
+    /// Build diagnostics for a profile payload that failed deserialization.
+    ///
+    /// Detects unsupported approval values (`ReadOnly`/`RequireApproval`) in
+    /// the raw payload so they surface under [`DiagnosticCategory::ReadOnlyRejected`].
+    /// All other decode failures retain the underlying error message under
+    /// [`DiagnosticCategory::InvalidPayload`].
+    fn profile_decode_diagnostics(
+        payload: &serde_json::Value,
+        error: serde_json::Error,
+    ) -> Vec<RecordDiagnostic> {
+        let rejected = payload
+            .get("approval")
+            .and_then(|v| v.as_str())
+            .filter(|a| matches!(*a, "ReadOnly" | "RequireApproval"));
+        if let Some(approval) = rejected {
+            vec![RecordDiagnostic {
+                category: DiagnosticCategory::ReadOnlyRejected,
+                message: format!(
+                    "{} is not a valid user-facing profile approval value",
+                    approval
+                ),
+            }]
+        } else {
+            vec![RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: format!("Profile payload could not be decoded: {}", error),
+            }]
+        }
+    }
+
+    /// Validate a decoded automation-task record and return diagnostics for any
+    /// structural issues. An empty vector means the record is valid.
+    async fn validate_automation_task_record(
+        &self,
+        task: &crate::automation_task::AutomationTask,
+    ) -> Result<Vec<RecordDiagnostic>, ManagementError> {
+        use crate::automation_task::{normalize_task_name, MAX_TIMEOUT_SECONDS};
+        let mut diagnostics = Vec::new();
+
+        if task.id.trim().is_empty() {
+            diagnostics.push(RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: "Automation task ID is empty".to_string(),
+            });
+        }
+
+        let display_trimmed = task.display_name.trim();
+        if display_trimmed.is_empty() {
+            diagnostics.push(RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: "Automation task display name is empty".to_string(),
+            });
+        } else {
+            let expected = normalize_task_name(&task.display_name);
+            if task.normalized_name.trim().is_empty() {
+                diagnostics.push(RecordDiagnostic {
+                    category: DiagnosticCategory::InvalidPayload,
+                    message: "Automation task normalized name is empty".to_string(),
+                });
+            } else if task.normalized_name != expected {
+                diagnostics.push(RecordDiagnostic {
+                    category: DiagnosticCategory::InvalidPayload,
+                    message: format!(
+                        "Automation task normalized name '{}' does not match display name",
+                        task.normalized_name
+                    ),
+                });
+            }
+        }
+
+        if task.stored_prompt_id.trim().is_empty() {
+            diagnostics.push(RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: "Automation task references an empty stored prompt ID".to_string(),
+            });
+        } else {
+            match self.store.get_prompt(&task.stored_prompt_id).await {
+                Ok(None) => {
+                    diagnostics.push(RecordDiagnostic {
+                        category: DiagnosticCategory::InvalidPayload,
+                        message: format!(
+                            "Referenced stored prompt '{}' does not exist",
+                            task.stored_prompt_id
+                        ),
+                    });
+                }
+                Ok(Some(prompt_record)) => {
+                    let supported = matches!(
+                        prompt_record.schema_version,
+                        crate::stored_prompt::LEGACY_STORED_PROMPT_SCHEMA_VERSION
+                            | crate::stored_prompt::STORED_PROMPT_SCHEMA_VERSION
+                    );
+                    if !supported {
+                        diagnostics.push(RecordDiagnostic {
+                            category: DiagnosticCategory::UnsupportedSchemaVersion,
+                            message: format!(
+                                "Referenced prompt '{}' has unsupported schema version {}",
+                                task.stored_prompt_id, prompt_record.schema_version
+                            ),
+                        });
+                    } else if serde_json::from_value::<StoredPrompt>(prompt_record.payload).is_err()
+                    {
+                        diagnostics.push(RecordDiagnostic {
+                            category: DiagnosticCategory::InvalidPayload,
+                            message: format!(
+                                "Referenced prompt '{}' could not be decoded",
+                                task.stored_prompt_id
+                            ),
+                        });
+                    }
+                }
+                Err(ConfigError::Deserialization(msg)) => {
+                    diagnostics.push(RecordDiagnostic {
+                        category: DiagnosticCategory::InvalidPayload,
+                        message: format!(
+                            "Referenced stored prompt '{}' could not be decoded: {}",
+                            task.stored_prompt_id, msg
+                        ),
+                    });
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        if task.expected_outcome.trim().is_empty() {
+            diagnostics.push(RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: "Automation task expected outcome is empty".to_string(),
+            });
+        }
+
+        if task.project_root.as_os_str().is_empty() {
+            diagnostics.push(RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: "Automation task project root is empty".to_string(),
+            });
+        }
+
+        if task.timeout_seconds == 0 {
+            diagnostics.push(RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: "Automation task timeout must be greater than zero".to_string(),
+            });
+        } else if task.timeout_seconds > MAX_TIMEOUT_SECONDS {
+            diagnostics.push(RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: format!(
+                    "Automation task timeout exceeds {} seconds",
+                    MAX_TIMEOUT_SECONDS
+                ),
+            });
+        }
+
+        Ok(diagnostics)
+    }
+
+    /// Validate a decoded scheduled-task record and return diagnostics for any
+    /// structural issues. An empty vector means the record is valid.
+    async fn validate_scheduled_task_record(
+        &self,
+        task: &crate::scheduled_task::ScheduledTask,
+    ) -> Result<Vec<RecordDiagnostic>, ManagementError> {
+        use crate::scheduled_task::cron::CronExpression;
+        let mut diagnostics = Vec::new();
+
+        if task.id.trim().is_empty() {
+            diagnostics.push(RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: "Schedule ID is empty".to_string(),
+            });
+        }
+
+        if task.automation_task_id.trim().is_empty() {
+            diagnostics.push(RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: "Schedule references an empty automation task ID".to_string(),
+            });
+        } else {
+            match self
+                .store
+                .get_automation_task(&task.automation_task_id)
+                .await
+            {
+                Ok(None) => {
+                    diagnostics.push(RecordDiagnostic {
+                        category: DiagnosticCategory::InvalidPayload,
+                        message: format!(
+                            "Referenced automation task '{}' does not exist",
+                            task.automation_task_id
+                        ),
+                    });
+                }
+                Ok(Some(_)) => {}
+                Err(ConfigError::Deserialization(msg)) => {
+                    diagnostics.push(RecordDiagnostic {
+                        category: DiagnosticCategory::InvalidPayload,
+                        message: format!(
+                            "Referenced automation task '{}' could not be decoded: {}",
+                            task.automation_task_id, msg
+                        ),
+                    });
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        if task.cron_expression.trim().is_empty() {
+            diagnostics.push(RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: "Schedule cron expression is empty".to_string(),
+            });
+        } else if let Err(e) = CronExpression::parse(&task.cron_expression) {
+            diagnostics.push(RecordDiagnostic {
+                category: DiagnosticCategory::InvalidPayload,
+                message: format!("Schedule cron expression is invalid: {}", e),
+            });
+        }
+
+        Ok(diagnostics)
+    }
+
+    /// Parse a persisted identity_state column value. Returns `None` for
+    /// unknown values so callers can surface a diagnostic instead of treating
+    /// them as ready.
+    fn parse_identity_state(state: &str) -> (Option<IdentityState>, Vec<RecordDiagnostic>) {
+        match state {
+            "ready" => (Some(IdentityState::Ready), Vec::new()),
+            "needs_rename" => (Some(IdentityState::NeedsRename), Vec::new()),
+            other => (
+                None,
+                vec![RecordDiagnostic {
+                    category: DiagnosticCategory::UnknownIdentityState,
+                    message: format!("Unknown identity_state value '{}'", other),
+                }],
+            ),
+        }
+    }
+
+    fn decode_prompt_record(&self, record: crate::config::PromptRecord) -> ManagedPromptRecord {
+        let (identity_state, diagnostics) = Self::parse_identity_state(&record.identity_state);
+
+        let make_entry = |prompt: StoredPrompt, identity_state: IdentityState| ManagedPromptEntry {
+            prompt,
+            identity_state,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        };
+
+        let ready = |prompt: StoredPrompt,
+                     identity_state: IdentityState,
+                     diagnostics: Vec<RecordDiagnostic>|
+         -> ManagedPromptRecord {
+            if diagnostics.is_empty() {
+                ManagedPromptRecord::Ready((record.id.clone(), make_entry(prompt, identity_state)))
+            } else {
+                ManagedPromptRecord::NeedsAttention {
+                    id: record.id.clone(),
+                    decoded: Some((record.id.clone(), make_entry(prompt, identity_state))),
+                    diagnostics,
+                }
+            }
+        };
+
+        let needs_attention = |prompt: Option<StoredPrompt>,
+                               identity_state: IdentityState,
+                               mut diagnostics: Vec<RecordDiagnostic>,
+                               mut extra: Vec<RecordDiagnostic>|
+         -> ManagedPromptRecord {
+            diagnostics.append(&mut extra);
+            ManagedPromptRecord::NeedsAttention {
+                id: record.id.clone(),
+                decoded: prompt.map(|p| (record.id.clone(), make_entry(p, identity_state))),
+                diagnostics,
+            }
         };
 
         if record.schema_version == crate::stored_prompt::LEGACY_STORED_PROMPT_SCHEMA_VERSION {
             match serde_json::from_value::<StoredPrompt>(record.payload.clone()) {
                 Ok(p) if !p.instructions.trim().is_empty() => {
                     let display_name = crate::stored_prompt::kebab_to_title_case(&record.id);
-                    let normalized_name = normalize_prompt_name(&display_name);
-                    return ManagedPromptRecord::Ready((
-                        record.id.clone(),
-                        ManagedPromptEntry {
-                            prompt: StoredPrompt {
-                                display_name,
-                                normalized_name,
-                                instructions: p.instructions,
-                                skills: p.skills,
-                                profile: p.profile,
-                            },
-                            identity_state,
-                            created_at: record.created_at,
-                            updated_at: record.updated_at,
-                        },
-                    ));
+                    let normalized_name =
+                        crate::stored_prompt::normalize_prompt_name(&display_name);
+                    let prompt = StoredPrompt {
+                        display_name: display_name.clone(),
+                        normalized_name: normalized_name.clone(),
+                        instructions: p.instructions,
+                        skills: p.skills,
+                        profile: p.profile,
+                    };
+                    if let Err(e) = prompt.validate() {
+                        return needs_attention(
+                            Some(prompt),
+                            identity_state.unwrap_or(IdentityState::Ready),
+                            diagnostics,
+                            vec![RecordDiagnostic {
+                                category: DiagnosticCategory::InvalidPayload,
+                                message: format!("Legacy prompt validation failed: {}", e),
+                            }],
+                        );
+                    }
+                    if normalized_name.is_empty() {
+                        return needs_attention(
+                            Some(prompt),
+                            identity_state.unwrap_or(IdentityState::Ready),
+                            diagnostics,
+                            vec![RecordDiagnostic {
+                                category: DiagnosticCategory::InvalidPayload,
+                                message: "Legacy prompt ID produces an empty normalized handle"
+                                    .to_string(),
+                            }],
+                        );
+                    }
+                    if identity_state == Some(IdentityState::NeedsRename) {
+                        return needs_attention(
+                            Some(prompt),
+                            IdentityState::NeedsRename,
+                            diagnostics,
+                            vec![RecordDiagnostic {
+                                category: DiagnosticCategory::NeedsRename,
+                                message:
+                                    "Normalized name collided during migration; rename required"
+                                        .to_string(),
+                            }],
+                        );
+                    }
+                    return ready(
+                        prompt,
+                        identity_state.unwrap_or(IdentityState::Ready),
+                        diagnostics,
+                    );
                 }
-                _ => {}
+                Ok(_) => {
+                    return needs_attention(
+                        None,
+                        IdentityState::Ready,
+                        diagnostics,
+                        vec![RecordDiagnostic {
+                            category: DiagnosticCategory::InvalidPayload,
+                            message: "Legacy prompt has empty instructions".to_string(),
+                        }],
+                    );
+                }
+                Err(e) => {
+                    return needs_attention(
+                        None,
+                        IdentityState::Ready,
+                        diagnostics,
+                        vec![RecordDiagnostic {
+                            category: DiagnosticCategory::InvalidPayload,
+                            message: format!("Legacy prompt payload could not be decoded: {}", e),
+                        }],
+                    );
+                }
             }
         }
 
         if record.schema_version != crate::stored_prompt::STORED_PROMPT_SCHEMA_VERSION {
             return ManagedPromptRecord::NeedsAttention {
-                id: record.id,
+                id: record.id.clone(),
                 decoded: None,
                 diagnostics: vec![RecordDiagnostic {
                     category: DiagnosticCategory::UnsupportedSchemaVersion,
@@ -1261,99 +2559,260 @@ impl ConfigManagementService {
 
         match serde_json::from_value::<StoredPrompt>(record.payload.clone()) {
             Ok(prompt) => {
-                let mut diagnostics = Vec::new();
-                if identity_state == IdentityState::NeedsRename {
-                    diagnostics.push(RecordDiagnostic {
-                        category: DiagnosticCategory::NeedsRename,
-                        message: "Normalized name collided during migration; rename required"
-                            .to_string(),
+                if let Err(e) = prompt.validate() {
+                    return needs_attention(
+                        Some(prompt),
+                        identity_state.unwrap_or(IdentityState::Ready),
+                        diagnostics,
+                        vec![RecordDiagnostic {
+                            category: DiagnosticCategory::InvalidPayload,
+                            message: format!("Prompt payload validation failed: {}", e),
+                        }],
+                    );
+                }
+
+                let mut identity_mismatch = Vec::new();
+                if prompt.display_name != record.display_name {
+                    identity_mismatch.push(RecordDiagnostic {
+                        category: DiagnosticCategory::InvalidPayload,
+                        message: format!(
+                            "Payload display_name '{}' does not match persisted column '{}'",
+                            prompt.display_name, record.display_name
+                        ),
                     });
                 }
-                if !diagnostics.is_empty() {
-                    ManagedPromptRecord::NeedsAttention {
-                        id: record.id.clone(),
-                        decoded: Some((
-                            record.id,
-                            ManagedPromptEntry {
-                                prompt,
-                                identity_state,
-                                created_at: record.created_at,
-                                updated_at: record.updated_at,
-                            },
-                        )),
-                        diagnostics,
-                    }
-                } else {
-                    ManagedPromptRecord::Ready((
-                        record.id,
-                        ManagedPromptEntry {
-                            prompt,
-                            identity_state,
-                            created_at: record.created_at,
-                            updated_at: record.updated_at,
-                        },
-                    ))
+                if prompt.normalized_name != record.normalized_name {
+                    identity_mismatch.push(RecordDiagnostic {
+                        category: DiagnosticCategory::InvalidPayload,
+                        message: format!(
+                            "Payload normalized_name '{}' does not match persisted column '{}'",
+                            prompt.normalized_name, record.normalized_name
+                        ),
+                    });
                 }
-            }
-            Err(_) => ManagedPromptRecord::NeedsAttention {
-                id: record.id,
-                decoded: None,
-                diagnostics: vec![RecordDiagnostic {
-                    category: DiagnosticCategory::InvalidPayload,
-                    message: "Prompt payload could not be decoded".to_string(),
-                }],
-            },
-        }
-    }
+                if !identity_mismatch.is_empty() {
+                    return needs_attention(
+                        Some(prompt),
+                        identity_state.unwrap_or(IdentityState::Ready),
+                        diagnostics,
+                        identity_mismatch,
+                    );
+                }
 
-    fn sync_prompt_registry(&self, id: &str, prompt: &StoredPrompt) -> Result<(), ManagementError> {
-        if let Some(registry) = &self.prompt_registry {
-            let mut reg = registry.write();
-            reg.register(id.to_string(), prompt.clone())
-                .map_err(|e| ManagementError::Partial {
-                    durable_succeeded: true,
-                    error: e,
-                })?;
+                if identity_state == Some(IdentityState::NeedsRename) {
+                    return needs_attention(
+                        Some(prompt),
+                        IdentityState::NeedsRename,
+                        diagnostics,
+                        vec![RecordDiagnostic {
+                            category: DiagnosticCategory::NeedsRename,
+                            message: "Normalized name collided during migration; rename required"
+                                .to_string(),
+                        }],
+                    );
+                }
+
+                ready(
+                    prompt,
+                    identity_state.unwrap_or(IdentityState::Ready),
+                    diagnostics,
+                )
+            }
+            Err(e) => needs_attention(
+                None,
+                IdentityState::Ready,
+                diagnostics,
+                vec![RecordDiagnostic {
+                    category: DiagnosticCategory::InvalidPayload,
+                    message: format!("Prompt payload could not be decoded: {}", e),
+                }],
+            ),
         }
-        Ok(())
     }
 
     /// Validate that a stored prompt's profile and skill references are sound.
     ///
     /// Ensures any non-`default` profile reference resolves to an existing
-    /// profile record, rejects empty/whitespace skill identifiers, and rejects
-    /// duplicate skills (case-insensitive).
+    /// profile record, rejects empty/whitespace skill identifiers, rejects
+    /// duplicate skills (case-insensitive), and — when a skill inventory is
+    /// attached — rejects skills unavailable to the selected profile.
     async fn validate_prompt_references(
         &self,
         prompt: &StoredPrompt,
     ) -> Result<(), ManagementError> {
         if let Some(ref pid) = prompt.profile {
-            if pid.as_str() != "default" && self.store.get_profile(pid.as_str()).await?.is_none() {
-                return Err(ManagementError::Reference(format!(
-                    "Profile '{}' not found",
-                    pid.as_str()
-                )));
+            if pid.as_str() != "default" {
+                match self.store.get_profile(pid.as_str()).await {
+                    Ok(Some(record)) => {
+                        if record.schema_version != PROFILE_SCHEMA_VERSION {
+                            return Err(ManagementError::Reference(format!(
+                                "Profile '{}' has an unsupported schema version",
+                                pid.as_str()
+                            )));
+                        }
+                        if serde_json::from_value::<AgentProfile>(record.payload).is_err() {
+                            return Err(ManagementError::Reference(format!(
+                                "Profile '{}' could not be decoded",
+                                pid.as_str()
+                            )));
+                        }
+                    }
+                    Ok(None) | Err(ConfigError::Deserialization(_)) => {
+                        return Err(ManagementError::Reference(format!(
+                            "Profile '{}' not found",
+                            pid.as_str()
+                        )));
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             }
         }
 
         let mut seen: HashSet<String> = HashSet::new();
         for skill in &prompt.skills {
-            let trimmed = skill.trim();
-            if trimmed.is_empty() {
-                return Err(ManagementError::Validation(
-                    "Skill identifiers must not be empty or whitespace".to_string(),
-                ));
-            }
-            let key = trimmed.to_ascii_lowercase();
+            crate::stored_prompt::validate_skill_identifier(skill).map_err(|e| {
+                ManagementError::Validation(format!("Invalid skill identifier '{}': {}", skill, e))
+            })?;
+            let key = skill.to_ascii_lowercase();
             if !seen.insert(key) {
                 return Err(ManagementError::Validation(format!(
                     "Duplicate skill identifier: '{}'",
-                    trimmed
+                    skill
                 )));
             }
         }
 
+        // Best-effort skill availability validation against the attached
+        // inventory, scoped by the selected profile's SkillFilter.
+        if let Some(inventory) = &self.skill_inventory {
+            let filter = self.resolve_skill_filter(&prompt.profile).await?;
+            for skill in &prompt.skills {
+                let trimmed = skill.trim();
+                let available = match &filter {
+                    SkillFilter::None => false,
+                    SkillFilter::Inherit => inventory.contains(trimmed),
+                    SkillFilter::Allow(names) => {
+                        names.iter().any(|n| n.trim() == trimmed) && inventory.contains(trimmed)
+                    }
+                };
+                if !available {
+                    return Err(ManagementError::Validation(format!(
+                        "Skill '{}' is not available to the selected profile",
+                        trimmed
+                    )));
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    /// Resolve the SkillFilter for a prompt's profile reference.
+    ///
+    /// Returns `Inherit` for absent or `default` profiles. Returns `None`
+    /// (deny all) for unreadable or undecodable profiles so validation fails
+    /// closed rather than broadening access.
+    async fn resolve_skill_filter(
+        &self,
+        profile: &Option<AgentProfileId>,
+    ) -> Result<SkillFilter, ManagementError> {
+        let pid = match profile {
+            None => return Ok(SkillFilter::Inherit),
+            Some(pid) if pid.as_str() == "default" => return Ok(SkillFilter::Inherit),
+            Some(pid) => pid,
+        };
+        match self.store.get_profile(pid.as_str()).await {
+            Ok(Some(record)) => match serde_json::from_value::<AgentProfile>(record.payload) {
+                Ok(p) => Ok(p.skills),
+                Err(_) => Ok(SkillFilter::None),
+            },
+            Ok(None) => Ok(SkillFilter::None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Async post-processing that adds unavailable-profile and unavailable-skill
+    /// diagnostics to a decoded prompt record. Skill availability is checked
+    /// against both the global inventory and the selected profile's
+    /// `SkillFilter`.
+    async fn with_reference_diagnostics(
+        &self,
+        record: ManagedPromptRecord,
+    ) -> Result<ManagedPromptRecord, ManagementError> {
+        let (id, entry, mut diagnostics) = match record {
+            ManagedRecord::Ready((id, entry)) => (id, entry, Vec::new()),
+            ManagedRecord::NeedsAttention {
+                id: _,
+                decoded: Some((pid, entry)),
+                diagnostics,
+            } => (pid, entry, diagnostics),
+            other => return Ok(other),
+        };
+
+        // Check profile availability.
+        if let Some(profile_id) = &entry.prompt.profile {
+            if profile_id.as_str() != "default" {
+                let usable = match self.store.get_profile(profile_id.as_str()).await {
+                    Ok(Some(record)) => {
+                        record.schema_version == PROFILE_SCHEMA_VERSION
+                            && serde_json::from_value::<AgentProfile>(record.payload).is_ok()
+                    }
+                    Ok(None) | Err(ConfigError::Deserialization(_)) => false,
+                    Err(e) => return Err(e.into()),
+                };
+                if !usable {
+                    diagnostics.push(RecordDiagnostic {
+                        category: DiagnosticCategory::UnavailableProfile,
+                        message: format!("Profile '{}' is not available", profile_id.as_str()),
+                    });
+                }
+            }
+        }
+
+        // Check skill availability with profile filter.
+        if let Some(inventory) = &self.skill_inventory {
+            let filter = self.resolve_skill_filter(&entry.prompt.profile).await?;
+            for skill in &entry.prompt.skills {
+                let trimmed = skill.trim();
+                let available = match &filter {
+                    SkillFilter::None => false,
+                    SkillFilter::Inherit => inventory.contains(trimmed),
+                    SkillFilter::Allow(names) => {
+                        names.iter().any(|n| n.trim() == trimmed) && inventory.contains(trimmed)
+                    }
+                };
+                if !available {
+                    diagnostics.push(RecordDiagnostic {
+                        category: DiagnosticCategory::UnavailableSkill,
+                        message: format!(
+                            "Skill '{}' is not available to the selected profile",
+                            trimmed
+                        ),
+                    });
+                }
+            }
+        }
+
+        if diagnostics.is_empty() {
+            Ok(ManagedRecord::Ready((id, entry)))
+        } else {
+            diagnostics.sort_by(|a, b| a.message.cmp(&b.message));
+            Ok(ManagedRecord::NeedsAttention {
+                id: id.clone(),
+                decoded: Some((id, entry)),
+                diagnostics,
+            })
+        }
+    }
+}
+
+/// Extract the provider slug from a managed profile, if any.
+fn provider_slug_of(profile: &AgentProfile) -> Option<String> {
+    match &profile.provider {
+        AgentProfileProvider::Managed { provider_slug, .. } => {
+            Some(provider_slug.as_str().to_string())
+        }
+        AgentProfileProvider::RuntimeDefault => None,
     }
 }
 
@@ -1375,6 +2834,9 @@ pub type ManagedProfileRecord = ManagedRecord<ManagedProfileEntry>;
 
 /// Outcome of reading an automation-task record.
 pub type ManagedAutomationTaskRecord = ManagedRecord<AutomationTask>;
+
+/// Outcome of reading a scheduled-task record.
+pub type ManagedScheduledTaskRecord = ManagedRecord<ScheduledTask>;
 
 /// A prompt entry with timestamps and identity state.
 #[derive(Debug, Clone, PartialEq)]
@@ -1401,6 +2863,84 @@ impl ManagedPromptRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FailingProfileRegistry;
+    impl ProfileRegistry for FailingProfileRegistry {
+        fn insert(&self, _id: AgentProfileId, _profile: AgentProfile) -> Result<(), String> {
+            Err("simulated profile registry failure".to_string())
+        }
+        fn remove(&self, _id: &AgentProfileId) -> Result<(), String> {
+            Ok(())
+        }
+        fn find_by_normalized_name(
+            &self,
+            _name: &str,
+            _excluding_id: &AgentProfileId,
+        ) -> Option<AgentProfileId> {
+            None
+        }
+    }
+
+    struct FailingPromptRegistry;
+    impl PromptRegistry for FailingPromptRegistry {
+        fn register(&self, _id: String, _prompt: StoredPrompt) -> Result<(), String> {
+            Err("simulated prompt registry failure".to_string())
+        }
+        fn unregister(&self, _id: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct DesiredDeleteFailureHost {
+        store: ConfigStore,
+        removed: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl HostScheduler for DesiredDeleteFailureHost {
+        fn platform(&self) -> &'static str {
+            "test"
+        }
+
+        async fn install(
+            &self,
+            _request: &crate::scheduled_task::host::HostInstallRequest,
+        ) -> Result<(), crate::scheduled_task::host::HostSchedulerError> {
+            Ok(())
+        }
+
+        async fn remove(
+            &self,
+            _schedule_id: &str,
+        ) -> Result<(), crate::scheduled_task::host::HostSchedulerError> {
+            self.removed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            sqlx::query("ALTER TABLE schedule RENAME TO schedule_after_host_removal")
+                .execute(self.store.pool())
+                .await
+                .map_err(|e| crate::scheduled_task::host::HostSchedulerError::Io(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn list_owned(
+            &self,
+        ) -> Result<
+            Vec<crate::scheduled_task::host::ObservedHostEntry>,
+            crate::scheduled_task::host::HostSchedulerError,
+        > {
+            Ok(Vec::new())
+        }
+
+        async fn inspect(
+            &self,
+            _schedule_id: &str,
+        ) -> Result<
+            Option<crate::scheduled_task::host::ObservedHostEntry>,
+            crate::scheduled_task::host::HostSchedulerError,
+        > {
+            Ok(None)
+        }
+    }
 
     #[test]
     fn credential_summary_debug_does_not_contain_secrets() {
@@ -1472,11 +3012,11 @@ mod tests {
         let store = ConfigStore::open_in_memory().await.unwrap();
         let svc = ConfigManagementService::new(store);
 
-        let id1 = svc
+        let (id1, _) = svc
             .create_prompt("Check Email", "Check inbox", vec![], None)
             .await
             .unwrap();
-        let id2 = svc
+        let (id2, _) = svc
             .create_prompt("Daily Report", "Generate report", vec![], None)
             .await
             .unwrap();
@@ -1490,7 +3030,7 @@ mod tests {
         let store = ConfigStore::open_in_memory().await.unwrap();
         let svc = ConfigManagementService::new(store);
 
-        let id = svc
+        let (id, _) = svc
             .create_prompt("Check Email", "Check inbox", vec![], None)
             .await
             .unwrap();
@@ -1524,10 +3064,21 @@ mod tests {
         let store = ConfigStore::open_in_memory().await.unwrap();
         let svc = ConfigManagementService::new(store);
 
-        let id = svc
+        let (id, _) = svc
             .create_prompt("Check Email", "Check inbox", vec![], None)
             .await
             .unwrap();
+
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "task".to_string(),
+            display_name: "Task".to_string(),
+            stored_prompt_id: id.clone(),
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
 
         svc.rename_prompt(&id, "Process Inbox").await.unwrap();
 
@@ -1539,6 +3090,74 @@ mod tests {
         } else {
             panic!("Expected Ready record");
         }
+        let task = svc.get_automation_task("task").await.unwrap().unwrap();
+        assert!(matches!(
+            task,
+            ManagedAutomationTaskRecord::Ready(task) if task.stored_prompt_id == id
+        ));
+        assert!(svc
+            .get_prompt_by_handle("process-inbox")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(svc
+            .get_prompt_by_handle("check-email")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_prompt_upgrades_on_save_without_rewriting_task_reference() {
+        use crate::config::PromptInput;
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        store
+            .set_prompt(&PromptInput {
+                id: "old-prompt".to_string(),
+                schema_version: crate::stored_prompt::LEGACY_STORED_PROMPT_SCHEMA_VERSION,
+                payload: serde_json::json!({"instructions": "Do legacy work"}),
+                display_name: "old-prompt".to_string(),
+                normalized_name: "old-prompt".to_string(),
+            })
+            .await
+            .unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "legacy-task".to_string(),
+            display_name: "Legacy Task".to_string(),
+            stored_prompt_id: "old-prompt".to_string(),
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
+
+        let prompt = match svc.get_prompt("old-prompt").await.unwrap().unwrap() {
+            ManagedPromptRecord::Ready((id, entry)) => {
+                assert_eq!(id, "old-prompt");
+                entry.prompt
+            }
+            other => panic!("expected ready legacy prompt, got {:?}", other),
+        };
+        svc.save_prompt("old-prompt", &prompt).await.unwrap();
+
+        let record = store.get_prompt("old-prompt").await.unwrap().unwrap();
+        assert_eq!(
+            record.schema_version,
+            crate::stored_prompt::STORED_PROMPT_SCHEMA_VERSION
+        );
+        let task = svc
+            .get_automation_task("legacy-task")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            task,
+            ManagedAutomationTaskRecord::Ready(task)
+                if task.stored_prompt_id == "old-prompt"
+        ));
     }
 
     #[tokio::test]
@@ -1567,6 +3186,81 @@ mod tests {
 
         let list = svc.list_credentials().await.unwrap();
         assert!(list.is_empty());
+    }
+
+    #[tokio::test]
+    async fn oauth_summary_is_redacted_and_replaceable_by_api_key() {
+        use crate::provider_credential::domain::{OAuthTokenSet, StoredCredential};
+        use std::time::{Duration, SystemTime};
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+        let oauth = StoredCredential::OAuthBearer(OAuthTokenSet {
+            access_token: "ACCESS_TOKEN_SENTINEL".to_string(),
+            refresh_token: "REFRESH_TOKEN_SENTINEL".to_string(),
+            expires_at: Some(SystemTime::now() + Duration::from_secs(3600)),
+            id_token: Some("ID_TOKEN_SENTINEL".to_string()),
+        });
+        store
+            .set_credential(
+                "oauth-provider",
+                "oauth_bearer",
+                &serde_json::to_vec(&oauth).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let summaries = svc.list_credentials().await.unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].credential_mode, CredentialMode::OAuthBearer);
+        assert!(matches!(
+            summaries[0].auth_status,
+            ProviderAuthStatus::ConnectedOAuth { .. }
+        ));
+        let output = format!(
+            "{:?}\n{}",
+            summaries,
+            serde_json::to_string(&summaries).unwrap()
+        );
+        for secret in [
+            "ACCESS_TOKEN_SENTINEL",
+            "REFRESH_TOKEN_SENTINEL",
+            "ID_TOKEN_SENTINEL",
+        ] {
+            assert!(!output.contains(secret));
+        }
+
+        svc.set_api_key("oauth-provider", "API_KEY_SENTINEL")
+            .await
+            .unwrap();
+        let stored = store
+            .get_credential("oauth-provider")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<StoredCredential>(&stored).unwrap(),
+            StoredCredential::ApiKey("API_KEY_SENTINEL".to_string())
+        );
+
+        assert!(matches!(
+            svc.set_api_key("oauth-provider", "   ").await,
+            Err(ManagementError::Validation(_))
+        ));
+        assert_eq!(
+            serde_json::from_slice::<StoredCredential>(
+                &store
+                    .get_credential("oauth-provider")
+                    .await
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            StoredCredential::ApiKey("API_KEY_SENTINEL".to_string())
+        );
+
+        svc.delete_credential("oauth-provider").await.unwrap();
+        assert!(svc.list_credentials().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1603,6 +3297,481 @@ mod tests {
         } else {
             panic!("Expected Ready record");
         }
+    }
+
+    #[tokio::test]
+    async fn successful_registry_sync_and_profile_rename_preserve_references() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let profile_registry = Arc::new(RwLock::new(HashMap::new()));
+        let prompt_registry = Arc::new(RwLock::new(StoredPromptRegistry::new()));
+        let svc = ConfigManagementService::new(store)
+            .with_profile_registry(profile_registry.clone())
+            .with_prompt_registry(prompt_registry.clone());
+
+        svc.save_profile("profile", &AgentProfile::with_name("Original Name"))
+            .await
+            .unwrap();
+        let (prompt_id, _) = svc
+            .create_prompt(
+                "Prompt",
+                "Instructions",
+                vec![],
+                Some(AgentProfileId::from("profile")),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            profile_registry.read()[&AgentProfileId::from("profile")].name,
+            "Original Name"
+        );
+        assert!(prompt_registry.read().get(&prompt_id).is_some());
+
+        svc.save_profile("profile", &AgentProfile::with_name("Renamed Profile"))
+            .await
+            .unwrap();
+        assert_eq!(
+            profile_registry.read()[&AgentProfileId::from("profile")].name,
+            "Renamed Profile"
+        );
+        let prompt = svc.get_prompt(&prompt_id).await.unwrap().unwrap();
+        assert!(matches!(
+            prompt,
+            ManagedPromptRecord::Ready((_, entry))
+                if entry.prompt.profile == Some(AgentProfileId::from("profile"))
+        ));
+    }
+
+    #[tokio::test]
+    async fn profile_list_reports_rejected_approval_values_without_hiding_valid_siblings() {
+        use crate::config::ProfileInput;
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+        svc.save_profile("valid", &AgentProfile::with_name("Valid"))
+            .await
+            .unwrap();
+
+        for (id, approval) in [
+            ("read-only", "ReadOnly"),
+            ("require-approval", "RequireApproval"),
+        ] {
+            let mut payload = serde_json::to_value(AgentProfile::with_name(id)).unwrap();
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("approval".to_string(), serde_json::json!(approval));
+            store
+                .set_profile(&ProfileInput {
+                    id: id.to_string(),
+                    schema_version: PROFILE_SCHEMA_VERSION,
+                    payload,
+                })
+                .await
+                .unwrap();
+        }
+
+        let records = svc.list_profiles().await.unwrap();
+        assert!(records.iter().any(|record| matches!(
+            record,
+            ManagedProfileRecord::Ready(entry) if entry.id.as_str() == "valid"
+        )));
+        for (id, approval) in [
+            ("read-only", "ReadOnly"),
+            ("require-approval", "RequireApproval"),
+        ] {
+            assert!(records.iter().any(|record| matches!(
+                record,
+                ManagedProfileRecord::NeedsAttention {
+                    id: record_id,
+                    decoded: None,
+                    diagnostics,
+                } if record_id == id
+                    && diagnostics.iter().any(|diagnostic|
+                        diagnostic.category == DiagnosticCategory::ReadOnlyRejected
+                            && diagnostic.message.contains(approval))
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn management_reads_propagate_fatal_storage_errors() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+        sqlx::query("DROP TABLE profiles")
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            svc.list_profiles().await,
+            Err(ManagementError::Storage(_))
+        ));
+        assert!(matches!(
+            svc.get_profile("profile").await,
+            Err(ManagementError::Storage(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn schedule_id_with_path_separator_rejected() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+
+        let (prompt_id, _) = svc
+            .create_prompt("Test", "Instructions", vec![], None)
+            .await
+            .unwrap();
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "task".to_string(),
+            display_name: "Task".to_string(),
+            stored_prompt_id: prompt_id,
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
+
+        for bad_id in &["bad/id", "bad\\id", "..", "foo..bar"] {
+            let result = svc
+                .save_scheduled_task(&ScheduledTaskInput {
+                    id: bad_id.to_string(),
+                    automation_task_id: "task".to_string(),
+                    cron_expression: "0 9 * * *".to_string(),
+                    enabled: true,
+                })
+                .await;
+            assert!(
+                matches!(result, Err(ManagementError::Validation(ref msg)) if msg.contains("path")),
+                "schedule ID '{}' should be rejected, got {:?}",
+                bad_id,
+                result
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn future_schema_database_rejected() {
+        use crate::config::migrations::{apply_migrations, CURRENT_SCHEMA_VERSION};
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        sqlx::query("UPDATE schema_version SET version = ? WHERE id = 1")
+            .bind(CURRENT_SCHEMA_VERSION + 1)
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let result = apply_migrations(store.pool()).await;
+        assert!(result.is_err(), "future-schema database should be rejected");
+    }
+
+    #[tokio::test]
+    async fn typed_task_write_rejects_unsupported_prompt_schema() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        let (prompt_id, _) = svc
+            .create_prompt("Test", "Instructions", vec![], None)
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE prompts SET schema_version = 999 WHERE id = ?")
+            .bind(&prompt_id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let result = svc
+            .save_automation_task(&AutomationTaskInput {
+                id: "task".to_string(),
+                display_name: "Task".to_string(),
+                stored_prompt_id: prompt_id,
+                expected_outcome: "Done".to_string(),
+                project_root: std::env::temp_dir(),
+                timeout_seconds: 300,
+            })
+            .await;
+        assert!(
+            matches!(result, Err(ManagementError::Validation(ref msg)) if msg.contains("unsupported schema")),
+            "task referencing unsupported prompt should be rejected, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_schedule_write_rejects_unsupported_task_schema() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        let (prompt_id, _) = svc
+            .create_prompt("Test", "Instructions", vec![], None)
+            .await
+            .unwrap();
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "task".to_string(),
+            display_name: "Task".to_string(),
+            stored_prompt_id: prompt_id,
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
+
+        sqlx::query("UPDATE automation_tasks SET schema_version = 999 WHERE id = 'task'")
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let result = svc
+            .save_scheduled_task(&ScheduledTaskInput {
+                id: "sched".to_string(),
+                automation_task_id: "task".to_string(),
+                cron_expression: "0 9 * * *".to_string(),
+                enabled: true,
+            })
+            .await;
+        assert!(
+            matches!(result, Err(ManagementError::Validation(ref msg)) if msg.contains("unsupported schema")),
+            "schedule referencing unsupported task should be rejected, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_deletion_preserves_dependent_definitions() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+
+        svc.set_api_key("test-provider", "sk-key").await.unwrap();
+
+        let profile = AgentProfile {
+            name: "Automation".to_string(),
+            provider: AgentProfileProvider::Managed {
+                provider_slug: crate::provider_credential::domain::ProviderSlug::from(
+                    "test-provider",
+                ),
+                model: "test-model".to_string(),
+            },
+            ..AgentProfile::with_name("Automation")
+        };
+        svc.save_profile("auto-prof", &profile).await.unwrap();
+
+        let (prompt_id, _) = svc
+            .create_prompt(
+                "Daily Report",
+                "Generate a daily report",
+                vec![],
+                Some(AgentProfileId::from("auto-prof")),
+            )
+            .await
+            .unwrap();
+
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "daily-task".to_string(),
+            display_name: "Daily Task".to_string(),
+            stored_prompt_id: prompt_id.clone(),
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
+
+        svc.save_scheduled_task(&ScheduledTaskInput {
+            id: "daily-sched".to_string(),
+            automation_task_id: "daily-task".to_string(),
+            cron_expression: "0 9 * * *".to_string(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+
+        svc.delete_credential("test-provider").await.unwrap();
+        assert!(svc.list_credentials().await.unwrap().is_empty());
+
+        assert!(svc.get_profile("auto-prof").await.unwrap().is_some());
+        assert!(svc.get_prompt(&prompt_id).await.unwrap().is_some());
+        assert!(svc
+            .get_automation_task("daily-task")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(svc
+            .get_scheduled_task("daily-sched")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn profile_deletion_conflict_returns_sorted_referrer_ids() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+
+        svc.save_profile("prof", &AgentProfile::with_name("Profile"))
+            .await
+            .unwrap();
+
+        // Create prompts; IDs are generated UUIDs.
+        let mut prompt_ids = Vec::new();
+        for name in &["zeta", "alpha", "mid"] {
+            let (id, _) = svc
+                .create_prompt(
+                    name,
+                    "Instructions",
+                    vec![],
+                    Some(AgentProfileId::from("prof")),
+                )
+                .await
+                .unwrap();
+            prompt_ids.push(id);
+        }
+        prompt_ids.sort();
+
+        let result = svc.delete_profile("prof").await;
+        match result {
+            Err(ManagementError::Conflict { referrers, .. }) => {
+                assert_eq!(referrers, prompt_ids);
+            }
+            other => panic!("expected sorted conflict, got {:?}", other),
+        }
+        assert!(svc.get_profile("prof").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn scheduler_unavailable_for_reconcile_and_combined_deletion() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+
+        assert!(matches!(
+            svc.reconcile_schedule("sched").await,
+            Err(ManagementError::SchedulerUnavailable)
+        ));
+        assert!(matches!(
+            svc.reconcile_all_schedules(
+                crate::scheduled_task::manager::OrphanPolicy::RemoveOrphans
+            )
+            .await,
+            Err(ManagementError::SchedulerUnavailable)
+        ));
+        assert!(matches!(
+            svc.delete_schedule_combined("sched").await,
+            Err(ManagementError::SchedulerUnavailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dependency_report_exact_paths_and_ordering() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+
+        let profile = AgentProfile {
+            name: "Automation".to_string(),
+            provider: AgentProfileProvider::Managed {
+                provider_slug: crate::provider_credential::domain::ProviderSlug::from("provider"),
+                model: "model".to_string(),
+            },
+            ..AgentProfile::with_name("Automation")
+        };
+        svc.save_profile("profile", &profile).await.unwrap();
+
+        let (prompt_id, _) = svc
+            .create_prompt(
+                "Daily Report",
+                "Generate a daily report",
+                vec![],
+                Some(AgentProfileId::from("profile")),
+            )
+            .await
+            .unwrap();
+
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "task".to_string(),
+            display_name: "Task".to_string(),
+            stored_prompt_id: prompt_id.clone(),
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
+
+        svc.save_scheduled_task(&ScheduledTaskInput {
+            id: "sched".to_string(),
+            automation_task_id: "task".to_string(),
+            cron_expression: "0 9 * * *".to_string(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+
+        let report = svc.profile_impact("profile").await.unwrap();
+
+        // Assert exact link entities, directions, and proximity.
+        let expected_links = vec![
+            (
+                DependencyEntity::ProviderCredential {
+                    slug: "provider".to_string(),
+                },
+                DependencyDirection::Depends,
+                DependencyProximity::Direct,
+            ),
+            (
+                DependencyEntity::Prompt {
+                    id: prompt_id.clone(),
+                },
+                DependencyDirection::Dependent,
+                DependencyProximity::Direct,
+            ),
+            (
+                DependencyEntity::AutomationTask {
+                    id: "task".to_string(),
+                },
+                DependencyDirection::Dependent,
+                DependencyProximity::Transitive,
+            ),
+            (
+                DependencyEntity::ScheduledTask {
+                    id: "sched".to_string(),
+                },
+                DependencyDirection::Dependent,
+                DependencyProximity::Transitive,
+            ),
+        ];
+
+        for (entity, direction, proximity) in &expected_links {
+            assert!(
+                report.links.iter().any(|link| {
+                    &link.entity == entity
+                        && &link.direction == direction
+                        && &link.proximity == proximity
+                }),
+                "expected link {:?} {:?} {:?} not found in {:?}",
+                entity,
+                direction,
+                proximity,
+                report.links
+            );
+        }
+
+        // No duplicate links.
+        assert_eq!(
+            report.links.len(),
+            expected_links.len(),
+            "link count should match expected without duplicates"
+        );
+
+        // All paths start at the report target.
+        assert!(report
+            .links
+            .iter()
+            .all(|link| { !link.path.is_empty() && link.path[0] == report.target }));
+
+        // Repeated query produces identical results.
+        let report2 = svc.profile_impact("profile").await.unwrap();
+        assert_eq!(report.links, report2.links);
     }
 
     #[tokio::test]
@@ -1677,7 +3846,7 @@ mod tests {
         let store = ConfigStore::open_in_memory().await.unwrap();
         let svc = ConfigManagementService::new(store);
 
-        let id = svc
+        let (id, _) = svc
             .create_prompt("Check Email", "Check inbox", vec![], None)
             .await
             .unwrap();
@@ -1704,12 +3873,12 @@ mod tests {
         let store = ConfigStore::open_in_memory().await.unwrap();
         let svc = ConfigManagementService::new(store.clone());
 
-        let id = svc
+        let (id, _) = svc
             .create_prompt("Check Email", "Check inbox", vec![], None)
             .await
             .unwrap();
 
-        let repair_handle = format!("~legacy-{}", id);
+        let repair_handle = "legacy-a1b2c3d4e5f67890".to_string();
         sqlx::query(
             "UPDATE prompts SET identity_state = 'needs_rename', normalized_name = ? WHERE id = ?",
         )
@@ -1733,7 +3902,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credential_list_skips_unknown_mode() {
+    async fn credential_list_surfaces_unknown_mode() {
         let store = ConfigStore::open_in_memory().await.unwrap();
         let svc = ConfigManagementService::new(store.clone());
 
@@ -1755,8 +3924,16 @@ mod tests {
         .unwrap();
 
         let list = svc.list_credentials().await.unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].provider_slug, "test");
+        assert_eq!(list.len(), 2);
+        let unknown = list
+            .into_iter()
+            .find(|s| s.provider_slug == "unknown-provider")
+            .expect("unknown provider should be listed");
+        assert_eq!(unknown.credential_mode, CredentialMode::Unsupported);
+        assert_eq!(
+            unknown.auth_status,
+            ProviderAuthStatus::UnsupportedCredential
+        );
     }
 
     #[tokio::test]
@@ -1781,6 +3958,413 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn profile_save_partial_when_registry_fails() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone())
+            .with_profile_registry_for_test(Arc::new(FailingProfileRegistry));
+
+        let profile = AgentProfile::with_name("Test Profile");
+        let result = svc.save_profile("test-prof", &profile).await;
+        assert!(
+            matches!(
+                result,
+                Err(ManagementError::Partial {
+                    durable_succeeded: true,
+                    ..
+                })
+            ),
+            "registry failure should yield partial operation, got {:?}",
+            result
+        );
+
+        // Durable state is committed despite registry failure.
+        let persisted = svc.get_profile("test-prof").await.unwrap();
+        assert!(persisted.is_some(), "profile should be persisted");
+    }
+
+    #[tokio::test]
+    async fn create_prompt_partial_when_registry_fails() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone())
+            .with_prompt_registry_for_test(Arc::new(FailingPromptRegistry));
+
+        let result = svc
+            .create_prompt("Check Email", "Check inbox", vec![], None)
+            .await;
+        let committed_id = match result {
+            Err(ManagementError::Partial {
+                target,
+                durable_succeeded: true,
+                ..
+            }) => target,
+            other => panic!(
+                "prompt registry failure should yield partial operation, got {:?}",
+                other
+            ),
+        };
+
+        let list = svc.list_prompts().await.unwrap();
+        assert_eq!(list.len(), 1, "prompt should be persisted");
+        assert_eq!(list[0].id(), committed_id);
+        assert!(svc.get_prompt(&committed_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn legacy_prefix_rejected_for_prompt_name() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+
+        let result = svc
+            .create_prompt("legacy-foo", "Instructions", vec![], None)
+            .await;
+        assert!(
+            matches!(result, Err(ManagementError::Validation(_))),
+            "legacy- prefix should be rejected, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_profile_reference_returns_reference_error() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        // Save a profile, then corrupt its payload so it cannot be decoded.
+        svc.save_profile("good-profile", &AgentProfile::with_name("Good Profile"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE profiles SET payload = 'not-json' WHERE id = ?")
+            .bind("good-profile")
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let result = svc
+            .create_prompt(
+                "Test",
+                "Instructions",
+                vec![],
+                Some(AgentProfileId::from("good-profile")),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(ManagementError::Reference(_))),
+            "malformed profile should be treated as missing reference, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_schema_profile_reference_rejected() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        svc.save_profile("good-profile", &AgentProfile::with_name("Good Profile"))
+            .await
+            .unwrap();
+        // Corrupt the schema version so the profile exists but is unusable.
+        sqlx::query("UPDATE profiles SET schema_version = 999 WHERE id = ?")
+            .bind("good-profile")
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let result = svc
+            .create_prompt(
+                "Test",
+                "Instructions",
+                vec![],
+                Some(AgentProfileId::from("good-profile")),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(ManagementError::Reference(_))),
+            "unsupported-schema profile should be treated as missing reference, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_needs_rename_prompt_returns_needs_attention() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        // Insert a legacy schema-v1 prompt and mark it needs_rename (simulating
+        // a collision during migration).
+        let legacy_payload = serde_json::json!({
+            "instructions": "Do something"
+        });
+        sqlx::query(
+            "INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at) \
+             VALUES (?, 1, ?, '', 'legacy-deadbeef', 'needs_rename', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind("check-email")
+        .bind(legacy_payload.to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = svc.get_prompt("check-email").await.unwrap().unwrap();
+        match result {
+            ManagedPromptRecord::NeedsAttention {
+                decoded,
+                diagnostics,
+                ..
+            } => {
+                assert!(decoded.is_some(), "legacy prompt should be decoded");
+                assert!(
+                    diagnostics
+                        .iter()
+                        .any(|d| d.category == crate::management::DiagnosticCategory::NeedsRename),
+                    "should include NeedsRename diagnostic, got {:?}",
+                    diagnostics
+                );
+            }
+            other => panic!("Expected NeedsAttention, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_impact_includes_malformed_prompt_diagnostic() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        svc.save_profile("test-prof", &AgentProfile::with_name("Test Profile"))
+            .await
+            .unwrap();
+
+        // Insert a prompt with invalid JSON payload.
+        sqlx::query(
+            "INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at) \
+             VALUES ('bad-prompt', 2, 'not-json', 'Bad', 'bad', 'ready', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let report = svc.profile_impact("test-prof").await.unwrap();
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("bad-prompt") && d.contains("malformed")),
+            "should include diagnostic about malformed prompt, got {:?}",
+            report.diagnostics
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_impact_rejects_unsupported_and_structurally_invalid_records() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        let profile = AgentProfile {
+            provider: AgentProfileProvider::Managed {
+                provider_slug: crate::provider_credential::domain::ProviderSlug::from("provider"),
+                model: "model".to_string(),
+            },
+            ..AgentProfile::with_name("Profile")
+        };
+        svc.save_profile("profile", &profile).await.unwrap();
+
+        let valid_prompt_payload = serde_json::json!({
+            "display_name": "Future Prompt",
+            "normalized_name": "future-prompt",
+            "instructions": "Do work",
+            "profile": "profile"
+        });
+        sqlx::query(
+            "INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at) \
+             VALUES ('future-prompt', 999, ?, 'Future Prompt', 'future-prompt', 'ready', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind(valid_prompt_payload.to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at) \
+             VALUES ('invalid-prompt', 2, ?, 'Invalid Prompt', 'invalid-prompt', 'ready', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind(r#"{"display_name":"Invalid Prompt","normalized_name":"invalid-prompt","instructions":"Do work","profile":123}"#)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let report = svc.profile_impact("profile").await.unwrap();
+        assert!(report.links.iter().all(|link| {
+            !matches!(
+                &link.entity,
+                DependencyEntity::Prompt { id }
+                    if id == "future-prompt" || id == "invalid-prompt"
+            )
+        }));
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("future-prompt")
+                && diagnostic.contains("unsupported schema version")));
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("invalid-prompt")
+                && diagnostic.contains("could not be decoded")));
+
+        sqlx::query("UPDATE profiles SET schema_version = 999 WHERE id = 'profile'")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let report = svc.credential_impact("provider").await.unwrap();
+        assert!(report.links.iter().all(|link| {
+            !matches!(&link.entity, DependencyEntity::Profile { id } if id == "profile")
+        }));
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("profile")
+                && diagnostic.contains("unsupported schema version")));
+    }
+
+    #[tokio::test]
+    async fn unsupported_prompt_schema_cannot_be_saved_or_renamed() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+        let (id, prompt) = svc
+            .create_prompt("Future", "Instructions", vec![], None)
+            .await
+            .unwrap();
+
+        let future_payload = serde_json::json!({
+            "display_name": "Future",
+            "normalized_name": "future",
+            "instructions": "Instructions",
+            "future_field": "preserve-me"
+        });
+        sqlx::query("UPDATE prompts SET schema_version = 999, payload = ? WHERE id = ?")
+            .bind(future_payload.to_string())
+            .bind(&id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            svc.save_prompt(&id, &prompt).await,
+            Err(ManagementError::Validation(_))
+        ));
+        assert!(matches!(
+            svc.rename_prompt(&id, "Renamed").await,
+            Err(ManagementError::Validation(_))
+        ));
+
+        let row = sqlx::query("SELECT schema_version, payload FROM prompts WHERE id = ?")
+            .bind(&id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        use sqlx::Row;
+        assert_eq!(row.get::<i64, _>("schema_version"), 999);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&row.get::<String, _>("payload")).unwrap(),
+            future_payload
+        );
+    }
+
+    #[tokio::test]
+    async fn save_prompt_does_not_recreate_deleted_prompt() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+
+        let (id, _) = svc
+            .create_prompt("Test", "Instructions", vec![], None)
+            .await
+            .unwrap();
+
+        svc.delete_prompt(&id).await.unwrap();
+
+        let prompt = StoredPrompt {
+            display_name: "Updated".to_string(),
+            normalized_name: "updated".to_string(),
+            instructions: "New".to_string(),
+            skills: Vec::new(),
+            profile: None,
+        };
+        let result = svc.save_prompt(&id, &prompt).await;
+        assert!(
+            matches!(result, Err(ManagementError::Reference(_))),
+            "save_prompt on deleted ID should fail, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_rename_does_not_revoke_valid_handle() {
+        use crate::config::migrations::apply_migrations;
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+
+        // Drop the unique index so we can insert colliding data.
+        sqlx::query("DROP INDEX IF EXISTS idx_prompts_normalized_name")
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        // Insert two legacy prompts whose IDs normalize to the same handle.
+        for id in &["check-email", "Check-Email"] {
+            sqlx::query(
+                "INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at) \
+                 VALUES (?, 1, ?, ?, ?, 'ready', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+            )
+            .bind(id)
+            .bind(r#"{"instructions":"x"}"#)
+            .bind(id)
+            .bind(id.to_lowercase())
+            .execute(store.pool())
+            .await
+            .unwrap();
+        }
+
+        // First canonicalization: both should be marked needs_rename.
+        apply_migrations(store.pool()).await.unwrap();
+        for id in &["check-email", "Check-Email"] {
+            let row = sqlx::query("SELECT identity_state FROM prompts WHERE id = ?")
+                .bind(id)
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            use sqlx::Row;
+            let state: String = row.get("identity_state");
+            assert_eq!(
+                state, "needs_rename",
+                "both collision participants should be needs_rename after first pass"
+            );
+        }
+
+        // Rename one participant to claim the freed handle.
+        let svc = ConfigManagementService::new(store.clone());
+        svc.rename_prompt("check-email", "Check Email")
+            .await
+            .unwrap();
+
+        // Re-run migrations: the renamed prompt should NOT be re-quarantined.
+        apply_migrations(store.pool()).await.unwrap();
+        let row = sqlx::query("SELECT identity_state, normalized_name FROM prompts WHERE id = ?")
+            .bind("check-email")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        use sqlx::Row;
+        let state: String = row.get("identity_state");
+        let handle: String = row.get("normalized_name");
+        assert_eq!(
+            state, "ready",
+            "renamed prompt should remain ready after re-canonicalization"
+        );
+        assert_eq!(
+            handle, "check-email",
+            "renamed prompt should keep its valid handle"
+        );
+    }
+
+    #[tokio::test]
     async fn profile_save_normalizes_name_in_payload() {
         let store = ConfigStore::open_in_memory().await.unwrap();
         let svc = ConfigManagementService::new(store);
@@ -1801,7 +4385,7 @@ mod tests {
         let store = ConfigStore::open_in_memory().await.unwrap();
         let svc = ConfigManagementService::new(store.clone());
 
-        let prompt_id = svc
+        let (prompt_id, _) = svc
             .create_prompt("Test Prompt", "Instructions", vec![], None)
             .await
             .unwrap();
@@ -1823,11 +4407,10 @@ mod tests {
             .await
             .unwrap();
 
+        // The task references the prompt via stored_prompt_id column, which is
+        // schema-independent. Deletion is blocked by Conflict, not IntegrityUnknown.
         let result = svc.delete_prompt(&prompt_id).await;
-        assert!(matches!(
-            result,
-            Err(ManagementError::IntegrityUnknown { .. })
-        ));
+        assert!(matches!(result, Err(ManagementError::Conflict { .. })));
     }
 
     #[tokio::test]
@@ -1835,7 +4418,7 @@ mod tests {
         let store = ConfigStore::open_in_memory().await.unwrap();
         let svc = ConfigManagementService::new(store.clone());
 
-        let prompt_id = svc
+        let (prompt_id, _) = svc
             .create_prompt("Test Prompt", "Instructions", vec![], None)
             .await
             .unwrap();
@@ -1878,7 +4461,7 @@ mod tests {
         let store = ConfigStore::open_in_memory().await.unwrap();
         let svc = ConfigManagementService::new(store);
 
-        let prompt_id = svc
+        let (prompt_id, _) = svc
             .create_prompt("Test", "Instructions", vec![], None)
             .await
             .unwrap();
@@ -1916,7 +4499,7 @@ mod tests {
         let profile = AgentProfile::with_name("Test Profile");
         svc.save_profile("test-prof", &profile).await.unwrap();
 
-        let prompt_id = svc
+        let (prompt_id, _) = svc
             .create_prompt(
                 "Test",
                 "Instructions",
@@ -1950,7 +4533,7 @@ mod tests {
         *fake.force_error.lock() =
             Some(HostSchedulerError::PlatformUnavailable("test".to_string()));
 
-        let svc = ConfigManagementService::new(store).with_scheduler(
+        let svc = ConfigManagementService::new(store.clone()).with_scheduler(
             Arc::new(fake),
             SchedulerInstallContext {
                 runner_executable: std::path::PathBuf::from("/usr/local/bin/agent-iron"),
@@ -1958,7 +4541,7 @@ mod tests {
             },
         );
 
-        let prompt_id = svc
+        let (prompt_id, _) = svc
             .create_prompt("Test", "Instructions", vec![], None)
             .await
             .unwrap();
@@ -1985,6 +4568,68 @@ mod tests {
 
         let result = svc.delete_schedule_combined("test-sched").await;
         assert!(matches!(result, Err(ManagementError::Scheduler(_))));
+        assert!(store
+            .get_scheduled_task("test-sched")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn combined_schedule_deletion_reports_desired_state_failure_after_host_removal() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let host = Arc::new(DesiredDeleteFailureHost {
+            store: store.clone(),
+            removed: std::sync::atomic::AtomicBool::new(false),
+        });
+        let svc = ConfigManagementService::new(store.clone()).with_scheduler(
+            host.clone(),
+            SchedulerInstallContext {
+                runner_executable: std::path::PathBuf::from("/usr/local/bin/agent-iron"),
+                config_store_path: std::path::PathBuf::from("/tmp/config.db"),
+            },
+        );
+        let (prompt_id, _) = svc
+            .create_prompt("Test", "Instructions", vec![], None)
+            .await
+            .unwrap();
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "test-task".to_string(),
+            display_name: "Test Task".to_string(),
+            stored_prompt_id: prompt_id,
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
+        svc.save_scheduled_task(&ScheduledTaskInput {
+            id: "test-sched".to_string(),
+            automation_task_id: "test-task".to_string(),
+            cron_expression: "0 9 * * *".to_string(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+
+        let outcome = svc.delete_schedule_combined("test-sched").await.unwrap();
+        assert!(outcome.host_removed);
+        assert!(!outcome.desired_deleted);
+        assert!(host.removed.load(std::sync::atomic::Ordering::SeqCst));
+        let drift = outcome.drift.expect("partial deletion should report drift");
+        assert!(drift.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == crate::scheduled_task::ScheduleDiagnosticKind::DesiredDeletionFailed
+        }));
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM schedule_after_host_removal WHERE id = 'test-sched'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            count, 1,
+            "desired state should remain after deletion failure"
+        );
     }
 
     #[tokio::test]
@@ -1992,7 +4637,7 @@ mod tests {
         let store = ConfigStore::open_in_memory().await.unwrap();
         let svc = ConfigManagementService::new(store);
 
-        let prompt_id = svc
+        let (prompt_id, _) = svc
             .create_prompt("Test", "Instructions", vec![], None)
             .await
             .unwrap();
@@ -2018,7 +4663,7 @@ mod tests {
         let store = ConfigStore::open_in_memory().await.unwrap();
         let svc = ConfigManagementService::new(store);
 
-        let prompt_id = svc
+        let (prompt_id, _) = svc
             .create_prompt("Test", "Instructions", vec![], None)
             .await
             .unwrap();
@@ -2040,5 +4685,855 @@ mod tests {
             result.unwrap(),
             ManagedAutomationTaskRecord::Ready(_)
         ));
+    }
+
+    // ---- F2: Profile validation tests ----
+
+    #[tokio::test]
+    async fn profile_name_uniqueness_enforced() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+        svc.save_profile("prof-a", &AgentProfile::with_name("My Profile"))
+            .await
+            .unwrap();
+        let result = svc
+            .save_profile("prof-b", &AgentProfile::with_name("My Profile"))
+            .await;
+        assert!(matches!(result, Err(ManagementError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn default_profile_deletion_rejected() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+        let result = svc.delete_profile("default").await;
+        assert!(matches!(result, Err(ManagementError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn managed_profile_rejects_empty_provider_slug() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+        let profile = AgentProfile {
+            name: "Test".to_string(),
+            provider: AgentProfileProvider::Managed {
+                provider_slug: crate::provider_credential::domain::ProviderSlug::from(""),
+                model: "gpt-4".to_string(),
+            },
+            ..AgentProfile::with_name("Test")
+        };
+        let result = svc.save_profile("prof-a", &profile).await;
+        assert!(matches!(result, Err(ManagementError::Validation(_))));
+    }
+
+    // ---- F1: Skill availability tests ----
+
+    #[tokio::test]
+    async fn skill_unavailable_rejected_on_write() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store)
+            .with_skill_inventory(HashSet::from(["email".to_string()]));
+        let result = svc
+            .create_prompt(
+                "Test",
+                "Instructions",
+                vec!["email".to_string(), "missing-skill".to_string()],
+                None,
+            )
+            .await;
+        assert!(matches!(result, Err(ManagementError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn skill_available_accepted_on_write() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store)
+            .with_skill_inventory(HashSet::from(["email".to_string()]));
+        let result = svc
+            .create_prompt("Test", "Instructions", vec!["email".to_string()], None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn unavailable_skill_reported_on_read() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+        let (id, _) = svc
+            .create_prompt("Test", "Instructions", vec!["skill-a".to_string()], None)
+            .await
+            .unwrap();
+
+        // Attach an inventory that doesn't include skill-a.
+        let svc2 =
+            ConfigManagementService::new(store).with_skill_inventory(HashSet::<String>::new());
+        let record = svc2.get_prompt(&id).await.unwrap().unwrap();
+        match record {
+            ManagedPromptRecord::NeedsAttention { diagnostics, .. } => {
+                assert!(diagnostics
+                    .iter()
+                    .any(|d| { d.category == DiagnosticCategory::UnavailableSkill }));
+            }
+            _ => panic!("Expected NeedsAttention for unavailable skill"),
+        }
+    }
+
+    // ---- F3: Dependency impact credential edge tests ----
+
+    #[tokio::test]
+    async fn profile_impact_includes_credential_dependency() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+        let profile = AgentProfile {
+            name: "Managed".to_string(),
+            provider: AgentProfileProvider::Managed {
+                provider_slug: crate::provider_credential::domain::ProviderSlug::from(
+                    "test-provider",
+                ),
+                model: "test-model".to_string(),
+            },
+            ..AgentProfile::with_name("Managed")
+        };
+        svc.save_profile("managed-prof", &profile).await.unwrap();
+
+        let report = svc.profile_impact("managed-prof").await.unwrap();
+        assert!(report.links.iter().any(|l| {
+            l.direction == DependencyDirection::Depends
+                && l.proximity == DependencyProximity::Direct
+                && matches!(
+                    &l.entity,
+                    DependencyEntity::ProviderCredential { slug } if slug == "test-provider"
+                )
+        }));
+    }
+
+    #[tokio::test]
+    async fn task_impact_includes_credential_dependency() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+        let profile = AgentProfile {
+            name: "Managed".to_string(),
+            provider: AgentProfileProvider::Managed {
+                provider_slug: crate::provider_credential::domain::ProviderSlug::from(
+                    "test-provider",
+                ),
+                model: "test-model".to_string(),
+            },
+            ..AgentProfile::with_name("Managed")
+        };
+        svc.save_profile("managed-prof", &profile).await.unwrap();
+
+        let (prompt_id, _) = svc
+            .create_prompt(
+                "Test",
+                "Instructions",
+                vec![],
+                Some(AgentProfileId::from("managed-prof")),
+            )
+            .await
+            .unwrap();
+
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "task-1".to_string(),
+            display_name: "Task 1".to_string(),
+            stored_prompt_id: prompt_id,
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
+
+        let report = svc.task_impact("task-1").await.unwrap();
+        assert!(report.links.iter().any(|l| {
+            l.direction == DependencyDirection::Depends
+                && matches!(
+                    &l.entity,
+                    DependencyEntity::ProviderCredential { slug } if slug == "test-provider"
+                )
+        }));
+    }
+
+    // ---- F7: Automation-task handle lookup ----
+
+    #[tokio::test]
+    async fn automation_task_handle_lookup() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+        let (prompt_id, _) = svc
+            .create_prompt("Test", "Instructions", vec![], None)
+            .await
+            .unwrap();
+
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "task-1".to_string(),
+            display_name: "My Task".to_string(),
+            stored_prompt_id: prompt_id,
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
+
+        let result = svc.get_automation_task_by_handle("MY TASK").await.unwrap();
+        assert!(result.is_some());
+        assert!(matches!(
+            result.unwrap(),
+            ManagedAutomationTaskRecord::Ready(task) if task.id == "task-1"
+        ));
+    }
+
+    // ---- F5: v2 invalid prompt decode ----
+
+    #[tokio::test]
+    async fn v2_prompt_with_invalid_payload_reported_as_needs_attention() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        // Insert a v2 prompt with a mismatched normalized_name directly,
+        // bypassing store validation, so we can test the decode path.
+        let payload = serde_json::json!({
+            "display_name": "Check Email",
+            "normalized_name": "wrong-handle",
+            "instructions": "do thing",
+            "skills": [],
+            "profile": null,
+        });
+        let payload_str = serde_json::to_string(&payload).unwrap();
+        sqlx::query(
+            "INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at) VALUES ('bad-prompt', 2, ?, 'Check Email', 'wrong-handle', 'ready', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind(&payload_str)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let record = svc.get_prompt("bad-prompt").await.unwrap().unwrap();
+        assert!(matches!(record, ManagedPromptRecord::NeedsAttention { .. }));
+    }
+
+    // ---- F5: Automation-task list tolerates malformed records ----
+
+    #[tokio::test]
+    async fn automation_task_list_tolerates_unsupported_schema() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+        let (prompt_id, _) = svc
+            .create_prompt("Test", "Instructions", vec![], None)
+            .await
+            .unwrap();
+
+        // Save a valid task.
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "valid-task".to_string(),
+            display_name: "Valid".to_string(),
+            stored_prompt_id: prompt_id.clone(),
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
+
+        // Insert a task with an unsupported schema version directly.
+        sqlx::query(
+            "INSERT INTO automation_tasks (id, name, normalized_name, stored_prompt_id, expected_outcome, project_root, timeout_seconds, schema_version, created_at, updated_at) VALUES ('bad-task', 'Bad', 'bad', ?, 'x', '/tmp', 0, 99, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind(&prompt_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let list = svc.list_automation_tasks().await.unwrap();
+        let has_ready = list
+            .iter()
+            .any(|r| matches!(r, ManagedAutomationTaskRecord::Ready(t) if t.id == "valid-task"));
+        let has_needs_attention = list.iter().any(|r| {
+            matches!(r, ManagedAutomationTaskRecord::NeedsAttention { id, .. } if id == "bad-task")
+        });
+        assert!(has_ready, "valid task should be Ready");
+        assert!(has_needs_attention, "bad task should be NeedsAttention");
+    }
+
+    #[tokio::test]
+    async fn malformed_skill_identifier_with_whitespace_rejected() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+
+        let result = svc
+            .create_prompt("Test", "instructions", vec!["bad skill".to_string()], None)
+            .await;
+        assert!(matches!(result, Err(ManagementError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn automation_task_missing_prompt_returns_needs_attention() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        // Insert a dummy prompt so the FK is satisfied, then remove it.
+        sqlx::query(
+            "INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at) VALUES (?, 2, ?, 'Test', 'test', 'ready', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind("nonexistent-prompt")
+        .bind(r#"{"instructions":"x"}"#)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO automation_tasks (id, name, normalized_name, stored_prompt_id, expected_outcome, project_root, timeout_seconds, schema_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("task-1")
+        .bind("Task 1")
+        .bind("task-1")
+        .bind("nonexistent-prompt")
+        .bind("Done")
+        .bind(std::env::temp_dir().to_string_lossy().as_ref())
+        .bind(300_i64)
+        .bind(1_i64)
+        .bind("2024-01-01T00:00:00Z")
+        .bind("2024-01-01T00:00:00Z")
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM prompts WHERE id = ?")
+            .bind("nonexistent-prompt")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let result = svc.get_automation_task("task-1").await.unwrap();
+        assert!(
+            matches!(
+                result,
+                Some(ManagedAutomationTaskRecord::NeedsAttention { .. })
+            ),
+            "task referencing missing prompt should be NeedsAttention"
+        );
+    }
+
+    #[tokio::test]
+    async fn schedule_missing_task_returns_needs_attention() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        // Insert a schedule referencing a missing automation task directly.
+        sqlx::query(
+            "INSERT INTO schedule (id, schema_version, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("sched-1")
+        .bind(1_i64)
+        .bind(r#"{"automation_task_id":"nonexistent-task","cron_expression":"0 9 * * *","enabled":true}"#)
+        .bind("2024-01-01T00:00:00Z")
+        .bind("2024-01-01T00:00:00Z")
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = svc.get_scheduled_task("sched-1").await.unwrap();
+        assert!(
+            matches!(
+                result,
+                Some(ManagedScheduledTaskRecord::NeedsAttention { .. })
+            ),
+            "schedule referencing missing task should be NeedsAttention"
+        );
+    }
+
+    #[tokio::test]
+    async fn schedule_invalid_cron_returns_needs_attention() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        let (prompt_id, _) = svc
+            .create_prompt("Test", "instructions", vec![], None)
+            .await
+            .unwrap();
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "task-1".to_string(),
+            display_name: "Task 1".to_string(),
+            stored_prompt_id: prompt_id,
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
+
+        // Insert schedule with malformed cron directly.
+        sqlx::query(
+            "INSERT INTO schedule (id, schema_version, payload, created_at, updated_at) VALUES (?, 1, ?, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind("bad-sched")
+        .bind(r#"{"automation_task_id":"task-1","cron_expression":"not a cron","enabled":true}"#)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = svc.get_scheduled_task("bad-sched").await.unwrap();
+        assert!(
+            matches!(
+                result,
+                Some(ManagedScheduledTaskRecord::NeedsAttention { .. })
+            ),
+            "schedule with invalid cron should be NeedsAttention"
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_deletion_blocked_by_malformed_prompt_payload() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        let profile = AgentProfile::with_name("Test Profile");
+        svc.save_profile("test-prof", &profile).await.unwrap();
+
+        // Insert a malformed prompt that claims to reference the profile.
+        sqlx::query(
+            "INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at) VALUES (?, 2, ?, '', '', 'ready', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind("bad-prompt")
+        .bind(r#"{"profile": 123}"#)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = svc.delete_profile("test-prof").await;
+        assert!(
+            matches!(result, Err(ManagementError::IntegrityUnknown { .. })),
+            "malformed prompt should yield IntegrityUnknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_impact_reports_malformed_profile() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        // Insert a malformed profile with a provider slug.
+        sqlx::query(
+            "INSERT INTO profiles (id, schema_version, payload, created_at, updated_at) VALUES (?, 2, ?, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind("bad-prof")
+        .bind(r#"{"name":"Bad","provider":{"provider_slug":"test-provider","model":"m"},"approval":"PerTool"}"#)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        // Corrupt the payload so it no longer decodes.
+        sqlx::query("UPDATE profiles SET payload = ? WHERE id = ?")
+            .bind(r#"{"name":"Bad""#)
+            .bind("bad-prof")
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let report = svc.credential_impact("test-provider").await.unwrap();
+        assert!(
+            report.diagnostics.iter().any(|d| d.contains("bad-prof")),
+            "credential impact should report malformed profile"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_v1_prompt_identity_derived_from_record_id() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        // Insert a v1 prompt with a kebab-case ID.
+        sqlx::query(
+            "INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at) VALUES (?, 1, ?, '', '', 'ready', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind("check-email")
+        .bind(r#"{"instructions":"Check inbox"}"#)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = svc.get_prompt("check-email").await.unwrap();
+        if let Some(ManagedPromptRecord::Ready((_, entry))) = result {
+            assert_eq!(entry.prompt.display_name, "Check Email");
+            assert_eq!(entry.prompt.normalized_name, "check-email");
+        } else {
+            panic!("Expected Ready legacy v1 prompt");
+        }
+    }
+
+    #[tokio::test]
+    async fn config_error_reference_maps_to_management_reference() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+
+        let result = svc
+            .save_scheduled_task(&ScheduledTaskInput {
+                id: "sched-1".to_string(),
+                automation_task_id: "missing-task".to_string(),
+                cron_expression: "0 9 * * *".to_string(),
+                enabled: true,
+            })
+            .await;
+        assert!(
+            matches!(result, Err(ManagementError::Reference(_))),
+            "missing automation task should yield Reference error, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_registry_name_conflict_prevents_save() {
+        use std::collections::HashMap;
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let registry = Arc::new(RwLock::new(HashMap::new()));
+        let svc =
+            ConfigManagementService::new(store.clone()).with_profile_registry(registry.clone());
+
+        // Seed the registry with a profile that has the same name but different ID.
+        registry.write().insert(
+            AgentProfileId::from("existing-id"),
+            AgentProfile::with_name("Shared Name"),
+        );
+
+        let result = svc
+            .save_profile("new-id", &AgentProfile::with_name("Shared Name"))
+            .await;
+        assert!(
+            matches!(result, Err(ManagementError::Conflict { .. })),
+            "registry name conflict should yield Conflict"
+        );
+    }
+
+    // ---- F9: create_prompt returns persisted entry ----
+
+    #[tokio::test]
+    async fn create_prompt_returns_persisted_entry() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+        let (id, prompt) = svc
+            .create_prompt("Check Email", "Check inbox", vec![], None)
+            .await
+            .unwrap();
+        assert!(id.starts_with("prompt-"));
+        assert_eq!(prompt.display_name, "Check Email");
+        assert_eq!(prompt.normalized_name, "check-email");
+        assert_eq!(prompt.instructions, "Check inbox");
+    }
+
+    #[tokio::test]
+    async fn duplicate_skills_rejected() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+        let result = svc
+            .create_prompt(
+                "Test",
+                "instructions",
+                vec!["skill-a".to_string(), "Skill-A".to_string()],
+                None,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(ManagementError::Validation(ref msg)) if msg.contains("duplicate")),
+            "duplicate skills should be rejected, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn leading_trailing_whitespace_skill_rejected() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+        let result = svc
+            .create_prompt("Test", "instructions", vec![" skill-a ".to_string()], None)
+            .await;
+        assert!(
+            matches!(result, Err(ManagementError::Validation(ref msg)) if msg.contains("whitespace")),
+            "leading/trailing whitespace skill should be rejected, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_schedule_missing_enabled_returns_needs_attention() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        let (prompt_id, _) = svc
+            .create_prompt("Test", "instructions", vec![], None)
+            .await
+            .unwrap();
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "task-1".to_string(),
+            display_name: "Task 1".to_string(),
+            stored_prompt_id: prompt_id,
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO schedule (id, schema_version, payload, created_at, updated_at) VALUES (?, 1, ?, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind("bad-sched")
+        .bind(r#"{"automation_task_id":"task-1","cron_expression":"0 9 * * *"}"#)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = svc.get_scheduled_task("bad-sched").await.unwrap();
+        assert!(
+            matches!(
+                result,
+                Some(ManagedScheduledTaskRecord::NeedsAttention { .. })
+            ),
+            "schedule missing 'enabled' should be NeedsAttention"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_schedule_blocks_task_deletion() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        let (prompt_id, _) = svc
+            .create_prompt("Test", "instructions", vec![], None)
+            .await
+            .unwrap();
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "task-1".to_string(),
+            display_name: "Task 1".to_string(),
+            stored_prompt_id: prompt_id,
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO schedule (id, schema_version, payload, created_at, updated_at) VALUES (?, 1, ?, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind("bad-sched")
+        .bind(r#"{"foo":"bar"}"#)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = svc.delete_automation_task("task-1").await;
+        assert!(
+            matches!(result, Err(ManagementError::IntegrityUnknown { .. })),
+            "malformed schedule should block task deletion with IntegrityUnknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_impact_tolerates_malformed_prompt_reference() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        let (prompt_id, _) = svc
+            .create_prompt("Test", "instructions", vec![], None)
+            .await
+            .unwrap();
+        svc.save_automation_task(&AutomationTaskInput {
+            id: "task-1".to_string(),
+            display_name: "Task 1".to_string(),
+            stored_prompt_id: prompt_id,
+            expected_outcome: "Done".to_string(),
+            project_root: std::env::temp_dir(),
+            timeout_seconds: 300,
+        })
+        .await
+        .unwrap();
+
+        // Insert a schedule with malformed JSON payload.
+        sqlx::query(
+            "INSERT INTO schedule (id, schema_version, payload, created_at, updated_at) VALUES (?, 1, ?, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind("malformed-sched")
+        .bind(r#"not valid json"#)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        // Credential impact should not fail; it should return a report.
+        let report = svc.credential_impact("test-provider").await.unwrap();
+        assert_eq!(
+            report.target,
+            DependencyEntity::ProviderCredential {
+                slug: "test-provider".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_prompt_with_empty_derived_handle_returns_needs_attention() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        // Insert a v1 prompt whose ID produces an empty normalized handle.
+        sqlx::query(
+            "INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at) VALUES (?, 1, ?, '', '', 'ready', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind("!!!")
+        .bind(r#"{"instructions":"Check inbox"}"#)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = svc.get_prompt("!!!").await.unwrap();
+        assert!(
+            matches!(result, Some(ManagedPromptRecord::NeedsAttention { .. })),
+            "legacy prompt with empty derived handle should be NeedsAttention"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_lookup_uses_record_id_on_deserialization_error() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        // Insert a prompt with a valid handle but malformed JSON payload.
+        sqlx::query(
+            "INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at) VALUES (?, 2, ?, 'Test', 'test', 'ready', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind("stable-prompt-id")
+        .bind(r#"{"display_name":"Test","normalized_name":"test","instructions":"x""#)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = svc.get_prompt_by_handle("test").await.unwrap();
+        match result {
+            Some(ManagedPromptRecord::NeedsAttention { id, .. }) => {
+                assert_eq!(
+                    id, "stable-prompt-id",
+                    "NeedsAttention should use the record ID, not the handle"
+                );
+            }
+            other => panic!("Expected NeedsAttention, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn automation_task_error_categorized_correctly() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        let (prompt_id, _) = svc
+            .create_prompt("Test", "instructions", vec![], None)
+            .await
+            .unwrap();
+
+        // Insert a task with unsupported schema version.
+        sqlx::query(
+            "INSERT INTO automation_tasks (id, name, normalized_name, stored_prompt_id, expected_outcome, project_root, timeout_seconds, schema_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("bad-task")
+        .bind("Bad Task")
+        .bind("bad-task")
+        .bind(&prompt_id)
+        .bind("Done")
+        .bind(std::env::temp_dir().to_string_lossy().as_ref())
+        .bind(300_i64)
+        .bind(99_i64)
+        .bind("2024-01-01T00:00:00Z")
+        .bind("2024-01-01T00:00:00Z")
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let result = svc.get_automation_task("bad-task").await.unwrap();
+        match result {
+            Some(ManagedAutomationTaskRecord::NeedsAttention { diagnostics, .. }) => {
+                assert!(
+                    diagnostics
+                        .iter()
+                        .any(|d| { d.category == DiagnosticCategory::UnsupportedSchemaVersion }),
+                    "unsupported schema should be categorized as UnsupportedSchemaVersion"
+                );
+            }
+            other => panic!("Expected NeedsAttention, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_collision_assigns_repair_handles() {
+        use crate::config::migrations::apply_migrations;
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+
+        // Drop the unique index so we can insert colliding data.
+        sqlx::query("DROP INDEX IF EXISTS idx_prompts_normalized_name")
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        // Insert two prompts whose IDs normalize to the same handle.
+        // "Check-Email" and "check-email" both produce normalized_name "check-email"
+        // when the SQL backfill runs: lower(trim(id)).
+        for id in &["Check-Email", "check-email"] {
+            sqlx::query(
+                "INSERT INTO prompts (id, schema_version, payload, display_name, normalized_name, identity_state, created_at, updated_at) \
+                 VALUES (?, 2, ?, ?, ?, 'ready', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+            )
+            .bind(id)
+            .bind(r#"{"display_name":"Check Email","normalized_name":"check-email","instructions":"x"}"#)
+            .bind("Check Email")
+            .bind("check-email")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        }
+
+        // apply_migrations runs canonicalization and recreates the unique index.
+        // This should succeed because canonicalization assigns repair handles.
+        apply_migrations(store.pool()).await.unwrap();
+
+        // Verify both records are retrievable and marked needs_rename.
+        let result1 = check_prompt_needs_rename(&store, "Check-Email").await;
+        let result2 = check_prompt_needs_rename(&store, "check-email").await;
+        assert!(result1.is_some(), "first colliding record should exist");
+        assert!(result2.is_some(), "second colliding record should exist");
+    }
+
+    #[tokio::test]
+    async fn unicode_normalization_removes_non_ascii() {
+        use crate::stored_prompt::normalize_prompt_name;
+        // Kelvin sign (K, U+212A) lowercases to ASCII 'k' via to_lowercase.
+        // After the fix, it should be removed, not converted to 'k'.
+        let normalized = normalize_prompt_name("Kelvin");
+        assert!(
+            !normalized.contains('k'),
+            "non-ASCII character should be removed, not lowercased to ASCII; got '{}'",
+            normalized
+        );
+    }
+
+    async fn check_prompt_needs_rename(store: &ConfigStore, id: &str) -> Option<()> {
+        let row = sqlx::query("SELECT identity_state FROM prompts WHERE id = ?")
+            .bind(id)
+            .fetch_optional(store.pool())
+            .await
+            .ok()??;
+        use sqlx::Row;
+        let state: String = row.get("identity_state");
+        assert_eq!(
+            state, "needs_rename",
+            "colliding record should be needs_rename"
+        );
+        Some(())
     }
 }

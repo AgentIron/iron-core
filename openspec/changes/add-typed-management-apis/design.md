@@ -93,7 +93,7 @@ Alternative considered: cascade deletes. Rejected because a UI action could sile
 
 ### Reuse scheduler and credential boundaries
 
-Scheduled-task management is available only when a `ScheduleManager` is attached. It delegates desired-state CRUD to existing typed ConfigStore methods and observed-state operations to `ScheduleManager`. Inspection remains read-only and reconciliation remains explicit. Calls requiring an unattached scheduler return `ManagementError::SchedulerUnavailable`. The management layer does not accept installation commands or host-native definitions.
+Scheduled-task desired-state CRUD (save, get, list, delete definitions) is available without a host scheduler because it operates only on ConfigStore. Host scheduler operations—inspection of observed state, reconciliation, and combined deletion—require an attached `ScheduleManager` and return `ManagementError::SchedulerUnavailable` when absent. Inspection remains read-only and reconciliation remains explicit. The management layer does not accept installation commands or host-native definitions.
 
 A combined schedule deletion removes or disables the owned host entry before deleting desired ConfigStore state. If host removal fails, desired state is preserved. If host removal succeeds and desired deletion fails, the operation returns a typed partial outcome with `host_removed = true`, `desired_deleted = false`, and resulting drift diagnostics. Host-first ordering avoids leaving an orphan entry that can continue executing after desired state has disappeared.
 

@@ -44,6 +44,10 @@ pub enum CredentialMode {
     ApiKey,
     /// OAuth bearer credential.
     OAuthBearer,
+    /// Configured credential mode is not recognized. This is surfaced by
+    /// management summaries so an unknown persisted mode is not silently
+    /// hidden, while secret material remains redacted.
+    Unsupported,
 }
 
 /// OAuth token material stored for a provider.

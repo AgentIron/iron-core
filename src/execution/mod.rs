@@ -418,13 +418,17 @@ async fn load_single_prompt(
     if record.schema_version == LEGACY_STORED_PROMPT_SCHEMA_VERSION {
         let display_name = crate::stored_prompt::kebab_to_title_case(&record.id);
         let normalized_name = crate::stored_prompt::normalize_prompt_name(&display_name);
-        return Ok(StoredPrompt {
+        let prompt = StoredPrompt {
             display_name,
             normalized_name,
             instructions: prompt.instructions,
             skills: prompt.skills,
             profile: prompt.profile,
-        });
+        };
+        prompt
+            .validate()
+            .map_err(|_| ResolutionError::InvalidPrompt(prompt_id.to_string()))?;
+        return Ok(prompt);
     }
 
     // For v2 records, validate identity consistency.
@@ -992,5 +996,67 @@ mod tests {
 
         assert_eq!(input.profile_id, AgentProfileId::from("automation"));
         assert_eq!(input.profile.approval, AgentApproval::AutoApprove);
+    }
+
+    // ---- load_single_prompt migration validation ----
+
+    #[tokio::test]
+    async fn load_single_prompt_validates_migrated_legacy_prompt() {
+        use crate::stored_prompt::LEGACY_STORED_PROMPT_SCHEMA_VERSION;
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+
+        // A legacy v1 record whose ID produces an empty normalized handle,
+        // so the migrated identity fails StoredPrompt::validate().
+        let legacy_payload = serde_json::json!({
+            "instructions": "do something",
+            "skills": [],
+            "profile": null,
+        });
+        store
+            .set_prompt(&crate::config::PromptInput {
+                id: "!!!".to_string(),
+                schema_version: LEGACY_STORED_PROMPT_SCHEMA_VERSION,
+                payload: legacy_payload,
+                display_name: String::new(),
+                normalized_name: String::new(),
+            })
+            .await
+            .unwrap();
+
+        let result = load_single_prompt(&store, "!!!").await;
+        assert!(
+            matches!(result, Err(ResolutionError::InvalidPrompt(_))),
+            "malformed legacy prompt should fail before execution, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn load_single_prompt_accepts_valid_legacy_prompt() {
+        use crate::stored_prompt::LEGACY_STORED_PROMPT_SCHEMA_VERSION;
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+
+        let legacy_payload = serde_json::json!({
+            "instructions": "Generate a report",
+            "skills": [],
+            "profile": null,
+        });
+        store
+            .set_prompt(&crate::config::PromptInput {
+                id: "daily-report".to_string(),
+                schema_version: LEGACY_STORED_PROMPT_SCHEMA_VERSION,
+                payload: legacy_payload,
+                display_name: String::new(),
+                normalized_name: String::new(),
+            })
+            .await
+            .unwrap();
+
+        let prompt = load_single_prompt(&store, "daily-report").await.unwrap();
+        assert_eq!(prompt.display_name, "Daily Report");
+        assert_eq!(prompt.normalized_name, "daily-report");
+        assert_eq!(prompt.instructions, "Generate a report");
     }
 }

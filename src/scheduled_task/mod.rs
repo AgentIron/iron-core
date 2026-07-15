@@ -56,7 +56,7 @@ pub struct ScheduledTaskInput {
 /// expression, and returns `Ok` with normalized values or `Err` with a
 /// human-readable message.
 pub fn validate_schedule_input(input: &ScheduledTaskInput) -> Result<ScheduledTaskInput, String> {
-    let id = trim_non_empty(&input.id, "Schedule ID")?;
+    let id = validate_schedule_id(&input.id)?;
     let automation_task_id = trim_non_empty(&input.automation_task_id, "Automation task ID")?;
     let cron_expression = input.cron_expression.trim().to_string();
     if cron_expression.is_empty() {
@@ -85,6 +85,22 @@ fn trim_non_empty(raw: &str, label: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+/// Validate a schedule ID for filesystem safety.
+///
+/// Schedule IDs are embedded in host scheduler paths (launchd plist filenames,
+/// cron comment markers, Windows task paths). Reject path separators and
+/// traversal sequences to prevent escaping the owned namespace.
+fn validate_schedule_id(id: &str) -> Result<String, String> {
+    let trimmed = trim_non_empty(id, "Schedule ID")?;
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err("Schedule ID must not contain path separators".to_string());
+    }
+    if trimmed == "." || trimmed == ".." || trimmed.contains("..") {
+        return Err("Schedule ID must not contain path traversal sequences".to_string());
+    }
+    Ok(trimmed)
+}
+
 // ============================================================================
 // Status and diagnostics (used by ScheduleManager in Group 5)
 // ============================================================================
@@ -107,10 +123,12 @@ pub enum ScheduleHealth {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesiredState {
-    /// Schedule exists in ConfigStore.
+    /// Schedule exists in ConfigStore and is readable.
     Present,
     /// Schedule does not exist in ConfigStore.
     Missing,
+    /// Schedule row exists but has an unsupported or malformed schema.
+    Unsupported,
 }
 
 /// Automation-task reference status.
@@ -201,6 +219,8 @@ pub enum ScheduleDiagnosticKind {
     PlatformUnavailable,
     /// Runner path differs from installation context.
     RunnerPathDrift,
+    /// Desired-state deletion failed after host removal.
+    DesiredDeletionFailed,
 }
 
 /// A compositional status report for a scheduled task.
