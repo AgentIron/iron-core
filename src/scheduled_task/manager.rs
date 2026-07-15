@@ -474,7 +474,10 @@ impl<'a> ScheduleManager<'a> {
                 kind: ScheduleDiagnosticKind::UnsafePolicy,
                 message: format!(
                     "automation task '{}' profile does not allow unattended execution",
-                    schedule_id
+                    desired
+                        .as_ref()
+                        .map(|s| s.automation_task_id.as_str())
+                        .unwrap_or(schedule_id)
                 ),
             });
         }
@@ -665,6 +668,11 @@ impl<'a> ScheduleManager<'a> {
 
         let profile_id = match self.store.get_prompt(&task.stored_prompt_id).await {
             Ok(Some(record)) => {
+                if record.schema_version
+                    != crate::stored_prompt::STORED_PROMPT_SCHEMA_VERSION
+                {
+                    return ExecutionState::Unknown;
+                }
                 match serde_json::from_value::<crate::stored_prompt::StoredPrompt>(record.payload) {
                     Ok(prompt) => prompt
                         .profile
@@ -685,6 +693,10 @@ impl<'a> ScheduleManager<'a> {
             Ok(Some(r)) => r,
             _ => return ExecutionState::Unknown,
         };
+
+        if record.schema_version != crate::profile::PROFILE_SCHEMA_VERSION {
+            return ExecutionState::Unknown;
+        }
 
         match serde_json::from_value::<AgentProfile>(record.payload) {
             Ok(profile) => {

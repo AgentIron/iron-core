@@ -3052,14 +3052,18 @@ impl ConfigStore {
         Ok(count > 0)
     }
 
-    /// Check whether a schedule row exists, regardless of schema version.
+    /// Return the IDs of schedules with an unsupported schema version that
+    /// reference the specified automation task. Unlike
+    /// [`schedules_referencing_task`], this inspects rows regardless of
+    /// schema version so it can surface unsupported-schema references that
+    /// the typed `json_extract` queries miss.
     pub async fn unsupported_schedules_referencing_task(
         &self,
         task_id: &str,
     ) -> Result<Vec<String>, ConfigError> {
         use crate::scheduled_task::SCHEDULED_TASK_SCHEMA_VERSION;
         let rows = sqlx::query(
-            "SELECT id, schema_version FROM schedule WHERE json_extract(payload, '$.automation_task_id') = ? ORDER BY id ASC",
+            "SELECT id, schema_version FROM schedule WHERE json_valid(payload) = 1 AND json_extract(payload, '$.automation_task_id') = ? ORDER BY id ASC",
         )
         .bind(task_id)
         .fetch_all(&self.pool)
