@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 concurrency:
   group: release-master
@@ -90,10 +91,16 @@ jobs:
           git tag -a "v${VERSION}" -m "v${VERSION}"
           git push origin main "v${VERSION}"
 
-      - name: Skip crates.io publish
+      - name: Authenticate with crates.io
         if: steps.release_gate.outputs.should_release == 'true'
-        run: |
-          printf '%s\n' 'Skipping crates.io publish because Cargo.toml still contains the git-only monty dependency.'
+        id: crates_io_auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish to crates.io
+        if: steps.release_gate.outputs.should_release == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates_io_auth.outputs.token }}
+        run: cargo publish --all-features --locked
 
       - name: Create GitHub release
         if: steps.release_gate.outputs.should_release == 'true'

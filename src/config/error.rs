@@ -126,6 +126,18 @@ pub enum ConfigError {
         /// Human-readable details about the unreadable records.
         details: String,
     },
+
+    /// Policy-aware profile deletion would leave fewer valid persisted
+    /// profiles than the caller requested.
+    #[error(
+        "Cannot delete profile: {remaining} valid profile(s) would remain, below the requested minimum of {minimum}"
+    )]
+    MinimumValidProfiles {
+        /// The minimum valid-profile count the caller requested to remain.
+        minimum: usize,
+        /// The computed valid-profile count that would remain after deletion.
+        remaining: usize,
+    },
 }
 
 impl From<sqlx::Error> for ConfigError {
