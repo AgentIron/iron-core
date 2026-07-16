@@ -387,6 +387,138 @@ pub fn normalize_profile_name(name: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// Opt-in policy governing how many valid persisted profiles must remain after
+/// a profile deletion.
+///
+/// The unrestricted default ([`ProfileDeletePolicy::AllowZero`]) preserves the
+/// original `delete_profile` semantics, which permit zero persisted profiles.
+/// [`ProfileDeletePolicy::RequireMinimumValid`] requests an atomic check that
+/// at least `minimum` valid persisted profiles remain after the deletion
+/// commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileDeletePolicy {
+    /// Permit zero valid persisted profiles after deletion (unrestricted).
+    AllowZero,
+    /// Require at least `minimum` valid persisted profiles to remain.
+    RequireMinimumValid(usize),
+}
+
+impl ProfileDeletePolicy {
+    /// The minimum valid-profile count this policy requires to remain, or zero
+    /// for [`ProfileDeletePolicy::AllowZero`].
+    pub fn minimum(self) -> usize {
+        match self {
+            ProfileDeletePolicy::AllowZero => 0,
+            ProfileDeletePolicy::RequireMinimumValid(minimum) => minimum,
+        }
+    }
+}
+
+/// Why a raw persisted profile record failed record-local validity
+/// classification.
+///
+/// This is the single source of truth used by both management reads (to build
+/// per-record diagnostics) and policy-aware deletion counting (to decide
+/// whether a row counts as a valid profile). A record counts as valid only when
+/// [`classify_profile_record`] returns [`Ok`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProfileRecordError {
+    /// The record's schema version is not the supported profile schema version.
+    UnsupportedSchemaVersion {
+        /// The unsupported schema version stored alongside the payload.
+        actual: i64,
+    },
+    /// The payload decoded far enough to reveal an approval value that is not a
+    /// valid user-facing managed profile approval policy.
+    ReadOnlyRejected {
+        /// The rejected approval value found in the payload.
+        approval: String,
+    },
+    /// The payload could not be decoded as an [`AgentProfile`] for any other
+    /// reason.
+    DecodeFailure {
+        /// The underlying deserialization error message.
+        error: String,
+    },
+    /// The payload decoded but one or more structural fields failed validation.
+    InvalidFields {
+        /// One human-readable message per failed field check.
+        messages: Vec<String>,
+    },
+}
+
+/// Classify a raw persisted profile record using the same rules that decide
+/// whether management listing returns a ready profile record.
+///
+/// A record is valid only when its schema version equals
+/// [`PROFILE_SCHEMA_VERSION`], its payload decodes as [`AgentProfile`], and its
+/// stable ID and decoded fields pass the structural validation shared with
+/// management reads (protected-default identity and supported approval rules).
+///
+/// This function is pure and allocation-bounded; it performs no I/O and does
+/// not consult registry membership, provider credentials, or prompt references.
+pub fn classify_profile_record(
+    id: &str,
+    schema_version: i64,
+    payload: &serde_json::Value,
+) -> Result<AgentProfile, ProfileRecordError> {
+    if schema_version != PROFILE_SCHEMA_VERSION {
+        return Err(ProfileRecordError::UnsupportedSchemaVersion {
+            actual: schema_version,
+        });
+    }
+    match serde_json::from_value::<AgentProfile>(payload.clone()) {
+        Ok(profile) => {
+            let messages = validate_profile_fields(id, &profile);
+            if messages.is_empty() {
+                Ok(profile)
+            } else {
+                Err(ProfileRecordError::InvalidFields { messages })
+            }
+        }
+        Err(error) => {
+            let rejected = payload
+                .get("approval")
+                .and_then(|value| value.as_str())
+                .filter(|approval| matches!(*approval, "ReadOnly" | "RequireApproval"));
+            if let Some(approval) = rejected {
+                Err(ProfileRecordError::ReadOnlyRejected {
+                    approval: approval.to_string(),
+                })
+            } else {
+                Err(ProfileRecordError::DecodeFailure {
+                    error: error.to_string(),
+                })
+            }
+        }
+    }
+}
+
+/// Validate a decoded profile's structural fields, returning one message per
+/// failed check. An empty vector means the profile is structurally valid.
+pub(crate) fn validate_profile_fields(id: &str, profile: &AgentProfile) -> Vec<String> {
+    let mut messages = Vec::new();
+    if !is_valid_profile_id(id) {
+        messages.push(format!("Profile ID '{}' is invalid or reserved", id));
+    }
+    if normalize_profile_name(&profile.name).is_none() {
+        messages.push(format!(
+            "Profile name '{}' is invalid or reserved",
+            profile.name
+        ));
+    }
+    if let AgentProfileProvider::Managed {
+        provider_slug,
+        model,
+    } = &profile.provider
+    {
+        if provider_slug.as_str().trim().is_empty() || model.trim().is_empty() {
+            messages.push("Managed profile has empty provider_slug or model".to_string());
+        }
+    }
+    messages
+}
+
 /// Build a managed `ProviderPromptContext` from a profile without a profile API key.
 pub fn managed_profile_prompt_context(
     provider: &AgentProfileProvider,
@@ -621,5 +753,85 @@ mod tests {
             profile.effective_identity_prompt(),
             default_identity_prompt()
         );
+    }
+
+    #[test]
+    fn classify_valid_profile_record() {
+        let payload = serde_json::to_value(AgentProfile::with_name("Valid")).unwrap();
+        let result = classify_profile_record("prof", PROFILE_SCHEMA_VERSION, &payload);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().name, "Valid");
+    }
+
+    #[test]
+    fn classify_unsupported_schema_version() {
+        let payload = serde_json::to_value(AgentProfile::with_name("Valid")).unwrap();
+        let result = classify_profile_record("prof", 999, &payload);
+        assert_eq!(
+            result,
+            Err(ProfileRecordError::UnsupportedSchemaVersion { actual: 999 })
+        );
+    }
+
+    #[test]
+    fn classify_malformed_json_payload() {
+        let payload = serde_json::json!({"unexpected": true});
+        let result = classify_profile_record("prof", PROFILE_SCHEMA_VERSION, &payload);
+        assert!(matches!(
+            result,
+            Err(ProfileRecordError::DecodeFailure { .. })
+        ));
+    }
+
+    #[test]
+    fn classify_read_only_approval_rejected() {
+        let mut payload = serde_json::to_value(AgentProfile::with_name("Valid")).unwrap();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("approval".to_string(), serde_json::json!("ReadOnly"));
+        let result = classify_profile_record("prof", PROFILE_SCHEMA_VERSION, &payload);
+        assert_eq!(
+            result,
+            Err(ProfileRecordError::ReadOnlyRejected {
+                approval: "ReadOnly".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn classify_reserved_default_id_invalid() {
+        let payload = serde_json::to_value(AgentProfile::with_name("Valid")).unwrap();
+        let result = classify_profile_record("default", PROFILE_SCHEMA_VERSION, &payload);
+        assert!(matches!(
+            result,
+            Err(ProfileRecordError::InvalidFields { .. })
+        ));
+    }
+
+    #[test]
+    fn classify_structurally_invalid_fields() {
+        let profile = AgentProfile {
+            name: String::new(),
+            ..AgentProfile::with_name("placeholder")
+        };
+        let mut payload = serde_json::to_value(profile).unwrap();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("name".to_string(), serde_json::json!(""));
+        let result = classify_profile_record("prof", PROFILE_SCHEMA_VERSION, &payload);
+        match result {
+            Err(ProfileRecordError::InvalidFields { messages }) => {
+                assert!(messages.iter().any(|m| m.contains("Profile name")));
+            }
+            other => panic!("expected InvalidFields, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn delete_policy_minimum_resolves() {
+        assert_eq!(ProfileDeletePolicy::AllowZero.minimum(), 0);
+        assert_eq!(ProfileDeletePolicy::RequireMinimumValid(3).minimum(), 3);
     }
 }

@@ -64,6 +64,11 @@ pub enum ManagementError {
     #[error("Cannot verify referential integrity: {details}")]
     IntegrityUnknown { details: String },
 
+    #[error(
+        "Cannot delete profile: {remaining} valid profile(s) would remain, below the requested minimum of {minimum}"
+    )]
+    MinimumValidProfiles { minimum: usize, remaining: usize },
+
     #[error("Scheduler is not attached")]
     SchedulerUnavailable,
 
@@ -127,6 +132,9 @@ impl From<ConfigError> for ManagementError {
             },
             ConfigError::IntegrityUnknown { details } => {
                 ManagementError::IntegrityUnknown { details }
+            }
+            ConfigError::MinimumValidProfiles { minimum, remaining } => {
+                ManagementError::MinimumValidProfiles { minimum, remaining }
             }
             other => ManagementError::Storage(other),
         }
@@ -529,41 +537,21 @@ impl ConfigManagementService {
             }
             Err(e) => return Err(e.into()),
         };
-        if record.schema_version != PROFILE_SCHEMA_VERSION {
-            return Ok(Some(ManagedProfileRecord::NeedsAttention {
+        match crate::profile::classify_profile_record(
+            &record.id,
+            record.schema_version,
+            &record.payload,
+        ) {
+            Ok(profile) => Ok(Some(ManagedProfileRecord::Ready(ManagedProfileEntry {
+                id: AgentProfileId::from(record.id),
+                profile,
+                created_at: record.created_at,
+                updated_at: record.updated_at,
+            }))),
+            Err(error) => Ok(Some(ManagedProfileRecord::NeedsAttention {
                 id: record.id,
                 decoded: None,
-                diagnostics: vec![RecordDiagnostic {
-                    category: DiagnosticCategory::UnsupportedSchemaVersion,
-                    message: format!(
-                        "Profile schema version {} is not supported",
-                        record.schema_version
-                    ),
-                }],
-            }));
-        }
-        match serde_json::from_value::<AgentProfile>(record.payload.clone()) {
-            Ok(profile) => {
-                let diagnostics = Self::validate_decoded_profile(&record.id, &profile);
-                if diagnostics.is_empty() {
-                    Ok(Some(ManagedProfileRecord::Ready(ManagedProfileEntry {
-                        id: AgentProfileId::from(record.id),
-                        profile,
-                        created_at: record.created_at,
-                        updated_at: record.updated_at,
-                    })))
-                } else {
-                    Ok(Some(ManagedProfileRecord::NeedsAttention {
-                        id: record.id,
-                        decoded: None,
-                        diagnostics,
-                    }))
-                }
-            }
-            Err(e) => Ok(Some(ManagedProfileRecord::NeedsAttention {
-                id: record.id,
-                decoded: None,
-                diagnostics: Self::profile_decode_diagnostics(&record.payload, e),
+                diagnostics: Self::profile_record_diagnostics(error),
             })),
         }
     }
@@ -589,43 +577,24 @@ impl ConfigManagementService {
                 }
                 Err(e) => return Err(e.into()),
             };
-            if record.schema_version != PROFILE_SCHEMA_VERSION {
-                results.push(ManagedProfileRecord::NeedsAttention {
-                    id: record.id,
-                    decoded: None,
-                    diagnostics: vec![RecordDiagnostic {
-                        category: DiagnosticCategory::UnsupportedSchemaVersion,
-                        message: format!(
-                            "Profile schema version {} is not supported",
-                            record.schema_version
-                        ),
-                    }],
-                });
-                continue;
-            }
-            match serde_json::from_value::<AgentProfile>(record.payload.clone()) {
+            match crate::profile::classify_profile_record(
+                &record.id,
+                record.schema_version,
+                &record.payload,
+            ) {
                 Ok(profile) => {
-                    let diagnostics = Self::validate_decoded_profile(&record.id, &profile);
-                    if diagnostics.is_empty() {
-                        results.push(ManagedProfileRecord::Ready(ManagedProfileEntry {
-                            id: AgentProfileId::from(record.id),
-                            profile,
-                            created_at: record.created_at,
-                            updated_at: record.updated_at,
-                        }));
-                    } else {
-                        results.push(ManagedProfileRecord::NeedsAttention {
-                            id: record.id,
-                            decoded: None,
-                            diagnostics,
-                        });
-                    }
+                    results.push(ManagedProfileRecord::Ready(ManagedProfileEntry {
+                        id: AgentProfileId::from(record.id),
+                        profile,
+                        created_at: record.created_at,
+                        updated_at: record.updated_at,
+                    }));
                 }
-                Err(e) => {
+                Err(error) => {
                     results.push(ManagedProfileRecord::NeedsAttention {
                         id: record.id,
                         decoded: None,
-                        diagnostics: Self::profile_decode_diagnostics(&record.payload, e),
+                        diagnostics: Self::profile_record_diagnostics(error),
                     });
                 }
             }
@@ -638,8 +607,27 @@ impl ConfigManagementService {
     /// Returns `ManagementError::Conflict` if prompts reference this profile.
     /// Returns `ManagementError::IntegrityUnknown` if malformed records
     /// prevent safe reference checking. All checks are transactional in the
-    /// store layer.
+    /// store layer. Uses the unrestricted deletion policy, which permits zero
+    /// valid persisted profiles to remain.
     pub async fn delete_profile(&self, id: &str) -> Result<(), ManagementError> {
+        self.delete_profile_with_policy(id, crate::profile::ProfileDeletePolicy::AllowZero)
+            .await
+    }
+
+    /// Delete a profile under a caller-selected minimum-valid-profile policy.
+    ///
+    /// Preserves protected-default validation, prompt-reference and integrity
+    /// checks, and durable-first registry synchronization. Returns
+    /// [`ManagementError::MinimumValidProfiles`] when the computed remaining
+    /// valid persisted profile count is below the requested minimum. Prompt-
+    /// reference and integrity failures retain precedence over the minimum
+    /// check. A registry synchronization failure after durable commit retains
+    /// the existing [`ManagementError::Partial`] behavior.
+    pub async fn delete_profile_with_policy(
+        &self,
+        id: &str,
+        policy: crate::profile::ProfileDeletePolicy,
+    ) -> Result<(), ManagementError> {
         let trimmed_id = id.trim();
         if trimmed_id.eq_ignore_ascii_case("default") {
             return Err(ManagementError::Validation(
@@ -647,9 +635,11 @@ impl ConfigManagementService {
             ));
         }
 
-        self.store.delete_profile_checked(trimmed_id).await?;
+        self.store
+            .delete_profile_with_policy(trimmed_id, policy)
+            .await?;
 
-        // Sync attached registry.
+        // Sync attached registry only after the durable transaction commits.
         if let Some(registry) = &self.profile_registry {
             registry
                 .remove(&AgentProfileId::from(trimmed_id))
@@ -2080,21 +2070,8 @@ impl ConfigManagementService {
         schema_version: i64,
         payload: serde_json::Value,
     ) -> Result<AgentProfile, String> {
-        if schema_version != PROFILE_SCHEMA_VERSION {
-            return Err(format!("unsupported schema version {}", schema_version));
-        }
-        let profile = serde_json::from_value::<AgentProfile>(payload)
-            .map_err(|e| format!("could not be decoded: {}", e))?;
-        let diagnostics = Self::validate_decoded_profile(id, &profile);
-        if diagnostics.is_empty() {
-            Ok(profile)
-        } else {
-            Err(diagnostics
-                .into_iter()
-                .map(|diagnostic| diagnostic.message)
-                .collect::<Vec<_>>()
-                .join("; "))
-        }
+        crate::profile::classify_profile_record(id, schema_version, &payload)
+            .map_err(profile_record_error_to_impact_reason)
     }
 
     fn decode_prompt_for_impact(
@@ -2159,64 +2136,42 @@ impl ConfigManagementService {
         Ok((references, diagnostics))
     }
 
-    /// Validate a decoded profile's fields and return diagnostics for any
-    /// issues found. An empty vector means the profile is valid.
-    fn validate_decoded_profile(id: &str, profile: &AgentProfile) -> Vec<RecordDiagnostic> {
-        let mut diagnostics = Vec::new();
-        if !crate::profile::is_valid_profile_id(id) {
-            diagnostics.push(RecordDiagnostic {
-                category: DiagnosticCategory::InvalidPayload,
-                message: format!("Profile ID '{}' is invalid or reserved", id),
-            });
-        }
-        if crate::profile::normalize_profile_name(&profile.name).is_none() {
-            diagnostics.push(RecordDiagnostic {
-                category: DiagnosticCategory::InvalidPayload,
-                message: format!("Profile name '{}' is invalid or reserved", profile.name),
-            });
-        }
-        if let AgentProfileProvider::Managed {
-            provider_slug,
-            model,
-        } = &profile.provider
-        {
-            if provider_slug.as_str().trim().is_empty() || model.trim().is_empty() {
-                diagnostics.push(RecordDiagnostic {
-                    category: DiagnosticCategory::InvalidPayload,
-                    message: "Managed profile has empty provider_slug or model".to_string(),
-                });
-            }
-        }
-        diagnostics
-    }
-
-    /// Build diagnostics for a profile payload that failed deserialization.
-    ///
-    /// Detects unsupported approval values (`ReadOnly`/`RequireApproval`) in
-    /// the raw payload so they surface under [`DiagnosticCategory::ReadOnlyRejected`].
-    /// All other decode failures retain the underlying error message under
-    /// [`DiagnosticCategory::InvalidPayload`].
-    fn profile_decode_diagnostics(
-        payload: &serde_json::Value,
-        error: serde_json::Error,
+    /// Map a record-local profile classification failure to the same management
+    /// diagnostics that direct reads produced before classification was
+    /// centralized.
+    fn profile_record_diagnostics(
+        error: crate::profile::ProfileRecordError,
     ) -> Vec<RecordDiagnostic> {
-        let rejected = payload
-            .get("approval")
-            .and_then(|v| v.as_str())
-            .filter(|a| matches!(*a, "ReadOnly" | "RequireApproval"));
-        if let Some(approval) = rejected {
-            vec![RecordDiagnostic {
-                category: DiagnosticCategory::ReadOnlyRejected,
-                message: format!(
-                    "{} is not a valid user-facing profile approval value",
-                    approval
-                ),
-            }]
-        } else {
-            vec![RecordDiagnostic {
-                category: DiagnosticCategory::InvalidPayload,
-                message: format!("Profile payload could not be decoded: {}", error),
-            }]
+        use crate::profile::ProfileRecordError;
+        match error {
+            ProfileRecordError::UnsupportedSchemaVersion { actual } => {
+                vec![RecordDiagnostic {
+                    category: DiagnosticCategory::UnsupportedSchemaVersion,
+                    message: format!("Profile schema version {} is not supported", actual),
+                }]
+            }
+            ProfileRecordError::ReadOnlyRejected { approval } => {
+                vec![RecordDiagnostic {
+                    category: DiagnosticCategory::ReadOnlyRejected,
+                    message: format!(
+                        "{} is not a valid user-facing profile approval value",
+                        approval
+                    ),
+                }]
+            }
+            ProfileRecordError::DecodeFailure { error } => {
+                vec![RecordDiagnostic {
+                    category: DiagnosticCategory::InvalidPayload,
+                    message: format!("Profile payload could not be decoded: {}", error),
+                }]
+            }
+            ProfileRecordError::InvalidFields { messages } => messages
+                .into_iter()
+                .map(|message| RecordDiagnostic {
+                    category: DiagnosticCategory::InvalidPayload,
+                    message,
+                })
+                .collect(),
         }
     }
 
@@ -2816,6 +2771,25 @@ fn provider_slug_of(profile: &AgentProfile) -> Option<String> {
     }
 }
 
+/// Render a record-local profile classification failure as the single-line
+/// reason used by dependency-impact diagnostics. Preserves the wording the
+/// pre-centralization impact traversal produced.
+fn profile_record_error_to_impact_reason(error: crate::profile::ProfileRecordError) -> String {
+    use crate::profile::ProfileRecordError;
+    match error {
+        ProfileRecordError::UnsupportedSchemaVersion { actual } => {
+            format!("unsupported schema version {}", actual)
+        }
+        ProfileRecordError::ReadOnlyRejected { approval } => format!(
+            "could not be decoded: {} is not a valid user-facing profile approval value",
+            approval
+        ),
+        ProfileRecordError::DecodeFailure { error } => {
+            format!("could not be decoded: {}", error)
+        }
+        ProfileRecordError::InvalidFields { messages } => messages.join("; "),
+    }
+}
 // ============================================================================
 // Managed entry types
 // ============================================================================
@@ -2864,6 +2838,37 @@ impl ManagedPromptRecord {
 mod tests {
     use super::*;
 
+    #[test]
+    fn config_error_minimum_valid_profiles_maps_to_management_variant() {
+        let config_err = ConfigError::MinimumValidProfiles {
+            minimum: 1,
+            remaining: 0,
+        };
+        let management_err = ManagementError::from(config_err);
+        assert!(
+            matches!(
+                management_err,
+                ManagementError::MinimumValidProfiles {
+                    minimum: 1,
+                    remaining: 0
+                }
+            ),
+            "expected typed MinimumValidProfiles mapping, got {:?}",
+            management_err
+        );
+    }
+
+    #[test]
+    fn config_error_minimum_valid_profiles_display_reports_values() {
+        let err = ConfigError::MinimumValidProfiles {
+            minimum: 2,
+            remaining: 1,
+        };
+        let message = err.to_string();
+        assert!(message.contains("minimum of 2"), "{}", message);
+        assert!(message.contains("1 valid profile"), "{}", message);
+    }
+
     struct FailingProfileRegistry;
     impl ProfileRegistry for FailingProfileRegistry {
         fn insert(&self, _id: AgentProfileId, _profile: AgentProfile) -> Result<(), String> {
@@ -2871,6 +2876,25 @@ mod tests {
         }
         fn remove(&self, _id: &AgentProfileId) -> Result<(), String> {
             Ok(())
+        }
+        fn find_by_normalized_name(
+            &self,
+            _name: &str,
+            _excluding_id: &AgentProfileId,
+        ) -> Option<AgentProfileId> {
+            None
+        }
+    }
+
+    /// Registry that records removals but reports failure, to exercise the
+    /// partial-operation path after a durable policy-aware deletion commits.
+    struct RemoveFailingProfileRegistry;
+    impl ProfileRegistry for RemoveFailingProfileRegistry {
+        fn insert(&self, _id: AgentProfileId, _profile: AgentProfile) -> Result<(), String> {
+            Ok(())
+        }
+        fn remove(&self, _id: &AgentProfileId) -> Result<(), String> {
+            Err("simulated profile registry remove failure".to_string())
         }
         fn find_by_normalized_name(
             &self,
@@ -3638,6 +3662,150 @@ mod tests {
             other => panic!("expected sorted conflict, got {:?}", other),
         }
         assert!(svc.get_profile("prof").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_profile_with_policy_rejects_below_minimum() {
+        use crate::profile::ProfileDeletePolicy;
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+
+        svc.save_profile("prof", &AgentProfile::with_name("Profile"))
+            .await
+            .unwrap();
+
+        let result = svc
+            .delete_profile_with_policy("prof", ProfileDeletePolicy::RequireMinimumValid(1))
+            .await;
+        match result {
+            Err(ManagementError::MinimumValidProfiles { minimum, remaining }) => {
+                assert_eq!(minimum, 1);
+                assert_eq!(remaining, 0);
+            }
+            other => panic!("expected MinimumValidProfiles, got {:?}", other),
+        }
+        assert!(svc.get_profile("prof").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_profile_with_policy_invalid_target_contributes_zero() {
+        use crate::profile::ProfileDeletePolicy;
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone());
+
+        svc.save_profile("valid", &AgentProfile::with_name("Valid"))
+            .await
+            .unwrap();
+        // Persist a structurally invalid profile directly through the store.
+        store
+            .set_profile(&crate::config::ProfileInput {
+                id: "invalid".to_string(),
+                schema_version: crate::profile::PROFILE_SCHEMA_VERSION,
+                payload: serde_json::json!({"name": ""}),
+            })
+            .await
+            .unwrap();
+
+        svc.delete_profile_with_policy("invalid", ProfileDeletePolicy::RequireMinimumValid(1))
+            .await
+            .unwrap();
+        assert!(svc.get_profile("valid").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_profile_with_policy_prompt_conflict_precedes_minimum() {
+        use crate::profile::ProfileDeletePolicy;
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+
+        svc.save_profile("prof", &AgentProfile::with_name("Profile"))
+            .await
+            .unwrap();
+        svc.create_prompt(
+            "Alpha",
+            "Instructions",
+            vec![],
+            Some(AgentProfileId::from("prof")),
+        )
+        .await
+        .unwrap();
+
+        let result = svc
+            .delete_profile_with_policy("prof", ProfileDeletePolicy::RequireMinimumValid(1))
+            .await;
+        assert!(matches!(result, Err(ManagementError::Conflict { .. })));
+        assert!(svc.get_profile("prof").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_profile_with_policy_rejection_leaves_registry_unchanged() {
+        use crate::profile::ProfileDeletePolicy;
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let registry = Arc::new(parking_lot::RwLock::new(HashMap::new()));
+        let svc = ConfigManagementService::new(store).with_profile_registry(registry.clone());
+
+        svc.save_profile("prof", &AgentProfile::with_name("Profile"))
+            .await
+            .unwrap();
+        assert!(registry.read().contains_key(&AgentProfileId::from("prof")));
+
+        let result = svc
+            .delete_profile_with_policy("prof", ProfileDeletePolicy::RequireMinimumValid(1))
+            .await;
+        assert!(matches!(
+            result,
+            Err(ManagementError::MinimumValidProfiles { .. })
+        ));
+        // Pre-commit rejection must leave the registry entry intact.
+        assert!(registry.read().contains_key(&AgentProfileId::from("prof")));
+    }
+
+    #[tokio::test]
+    async fn delete_profile_with_policy_partial_when_registry_remove_fails() {
+        use crate::profile::ProfileDeletePolicy;
+
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store.clone())
+            .with_profile_registry_for_test(Arc::new(RemoveFailingProfileRegistry));
+
+        svc.save_profile("prof", &AgentProfile::with_name("Profile"))
+            .await
+            .unwrap();
+        // Provide a second valid profile so RequireMinimumValid(1) is satisfied.
+        svc.save_profile("other", &AgentProfile::with_name("Other"))
+            .await
+            .unwrap();
+
+        let result = svc
+            .delete_profile_with_policy("prof", ProfileDeletePolicy::RequireMinimumValid(1))
+            .await;
+        assert!(matches!(
+            result,
+            Err(ManagementError::Partial {
+                durable_succeeded: true,
+                ..
+            })
+        ));
+        // Durable deletion committed despite the registry failure.
+        assert!(svc.get_profile("prof").await.unwrap().is_none());
+        assert!(svc.get_profile("other").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn existing_delete_profile_removes_final_valid_profile() {
+        let store = ConfigStore::open_in_memory().await.unwrap();
+        let svc = ConfigManagementService::new(store);
+
+        svc.save_profile("prof", &AgentProfile::with_name("Profile"))
+            .await
+            .unwrap();
+
+        svc.delete_profile("prof").await.unwrap();
+        assert!(svc.get_profile("prof").await.unwrap().is_none());
     }
 
     #[tokio::test]

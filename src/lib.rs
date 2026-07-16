@@ -240,9 +240,10 @@ pub use headless::{
     run_automation, HeadlessBootstrapError, HeadlessRuntime,
 };
 pub use profile::{
-    default_identity_prompt, managed_profile_prompt_context, normalize_profile_name, AgentApproval,
-    AgentProfile, AgentProfileEntry, AgentProfileId, AgentProfileProvider, ProfileLoadDiagnostic,
-    ProfileLoadIssue, ProfileLoadReport, ResolvedProfileProvider, SkillFilter, ToolFilter,
+    classify_profile_record, default_identity_prompt, managed_profile_prompt_context,
+    normalize_profile_name, AgentApproval, AgentProfile, AgentProfileEntry, AgentProfileId,
+    AgentProfileProvider, ProfileDeletePolicy, ProfileLoadDiagnostic, ProfileLoadIssue,
+    ProfileLoadReport, ProfileRecordError, ResolvedProfileProvider, SkillFilter, ToolFilter,
     PROFILE_SCHEMA_VERSION,
 };
 pub use prompt_turn::PromptTurn;

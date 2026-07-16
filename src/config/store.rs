@@ -307,6 +307,10 @@ impl ConfigStore {
     }
 
     /// Delete a profile by ID.
+    ///
+    /// Delegates to [`ConfigStore::delete_profile_checked`] with the
+    /// unrestricted deletion policy, preserving the original behavior that
+    /// permits zero persisted profiles to remain.
     pub async fn delete_profile(&self, id: &str) -> Result<(), ConfigError> {
         self.delete_profile_checked(id).await
     }
@@ -2764,23 +2768,55 @@ impl ConfigStore {
 
     /// Delete a profile by ID, blocking if prompts reference it.
     ///
-    /// Returns `ConfigError::ProfileReferencedByPrompts` if stored prompts
-    /// reference this profile.
-    /// Delete a profile by ID, blocking if prompts reference it.
-    ///
     /// Performs all integrity and reference checks within a single transaction
     /// so no concurrent insert can interleave between verification and deletion.
     /// Returns `ConfigError::ProfileReferencedByPrompts` if stored prompts
     /// reference this profile, or `ConfigError::IntegrityUnknown` if malformed
-    /// prompt records prevent reliable reference checking.
+    /// prompt records prevent reliable reference checking. Uses the unrestricted
+    /// [`crate::profile::ProfileDeletePolicy::AllowZero`] policy.
     pub async fn delete_profile_checked(&self, id: &str) -> Result<(), ConfigError> {
+        self.delete_profile_with_policy(id, crate::profile::ProfileDeletePolicy::AllowZero)
+            .await
+    }
+
+    /// Delete a profile by ID under a caller-selected minimum-valid-profile
+    /// policy.
+    ///
+    /// Acquires the SQLite write reservation before reading prompt or profile
+    /// state (via `BEGIN IMMEDIATE`), then performs prompt integrity checks,
+    /// prompt-reference checks, valid-profile counting, minimum enforcement,
+    /// and deletion within the same transaction.
+    ///
+    /// A persisted profile counts as valid only when its schema version is
+    /// supported, its payload decodes as [`crate::profile::AgentProfile`], and
+    /// its stable ID and decoded fields pass the structural validity rules
+    /// shared with management reads. Malformed, unsupported, structurally
+    /// invalid, and missing target records do not reduce the valid count.
+    ///
+    /// Returns [`ConfigError::MinimumValidProfiles`] when the computed
+    /// remaining valid profile count is below the requested minimum.
+    /// Prompt-reference and integrity failures retain precedence over the
+    /// minimum check.
+    pub async fn delete_profile_with_policy(
+        &self,
+        id: &str,
+        policy: crate::profile::ProfileDeletePolicy,
+    ) -> Result<(), ConfigError> {
         use crate::stored_prompt::{
             LEGACY_STORED_PROMPT_SCHEMA_VERSION, STORED_PROMPT_SCHEMA_VERSION,
         };
 
-        let mut tx = self.pool.begin().await.map_err(ConfigError::from)?;
+        // Acquire the write reservation before any read so concurrent writers
+        // cannot validate against the same snapshot. The configured busy
+        // timeout remains authoritative when another process holds the writer.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(ConfigError::from)?;
 
-        // Verify all prompts have supported schema versions.
+        // Prompt integrity checks take precedence over the minimum-valid-
+        // profile policy: verify every prompt uses a supported schema version.
         let unsupported: Vec<(String,)> = sqlx::query_as(
             "SELECT id FROM prompts WHERE schema_version NOT IN (?, ?) ORDER BY id ASC",
         )
@@ -2801,9 +2837,9 @@ impl ConfigStore {
             });
         }
 
-        // Decode every prompt and check the profile reference directly.
-        // Any decode failure means we cannot prove the target is unreferenced.
-        let rows = sqlx::query("SELECT id, payload FROM prompts ORDER BY id ASC")
+        // Decode every prompt and check the profile reference directly. Any
+        // decode failure means we cannot prove the target is unreferenced.
+        let prompt_rows = sqlx::query("SELECT id, payload FROM prompts ORDER BY id ASC")
             .fetch_all(&mut *tx)
             .await
             .map_err(|e| ConfigError::IntegrityUnknown {
@@ -2812,7 +2848,7 @@ impl ConfigStore {
 
         let mut referencing_prompts = Vec::new();
         let mut malformed_prompts = Vec::new();
-        for row in rows {
+        for row in prompt_rows {
             let prompt_id: String = row.get("id");
             let payload: String = row.get("payload");
             match serde_json::from_str::<crate::stored_prompt::StoredPrompt>(&payload) {
@@ -2844,6 +2880,41 @@ impl ConfigStore {
                 profile_id: id.to_string(),
                 prompt_ids: referencing_prompts,
             });
+        }
+
+        // Count valid persisted profiles and compute the target's contribution.
+        // A row counts only when it classifies as valid; a malformed,
+        // unsupported, structurally invalid, or missing target contributes zero.
+        let rows = sqlx::query("SELECT id, schema_version, payload FROM profiles ORDER BY id ASC")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(ConfigError::from)?;
+
+        let mut total_valid = 0usize;
+        let mut target_is_valid = false;
+        for row in &rows {
+            let row_id: String = row.get("id");
+            let schema_version: i64 = row.get("schema_version");
+            let payload: String = row.get("payload");
+            let is_target = row_id == id;
+            let valid = serde_json::from_str::<serde_json::Value>(&payload)
+                .ok()
+                .and_then(|value| {
+                    crate::profile::classify_profile_record(&row_id, schema_version, &value).ok()
+                })
+                .is_some();
+            if valid {
+                total_valid += 1;
+            }
+            if is_target {
+                target_is_valid = valid;
+            }
+        }
+
+        let remaining = total_valid - usize::from(target_is_valid);
+        let minimum = policy.minimum();
+        if remaining < minimum {
+            return Err(ConfigError::MinimumValidProfiles { minimum, remaining });
         }
 
         sqlx::query("DELETE FROM profiles WHERE id = ?")
