@@ -33,5 +33,5 @@
 - [x] 5.2 Run `cargo clippy --locked --manifest-path Cargo.toml --all-targets --all-features -- -D warnings`
 - [x] 5.3 Run `cargo test --locked --manifest-path Cargo.toml` and the targeted context-management tests
 - [x] 5.4 Run the fresh external `embedded-python` consumer build without a preexisting lockfile
-- [ ] 5.5 Confirm native Windows CI performs a successful link and native macOS CI compiles the launchd adapter
+- [x] 5.5 Confirm native Windows CI performs a successful link and native macOS CI compiles the launchd adapter
 - [x] 5.6 Run `openspec validate fix-published-crate-consumer-regressions --strict`
