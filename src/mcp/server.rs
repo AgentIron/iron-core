@@ -1,3 +1,9 @@
+//! MCP server configuration, discovered tool metadata, and runtime health state.
+//!
+//! [`McpServerRegistry`] is the shared state boundary between configuration,
+//! connection management, session catalogs, and diagnostics. Its mutation
+//! version lets consumers invalidate snapshots when health or tools change.
+
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -31,17 +37,22 @@ impl HttpConfig {
 pub enum McpTransport {
     /// Local stdio transport (spawns subprocess)
     Stdio {
+        /// Executable used to start the MCP server process.
         command: String,
+        /// Command-line arguments passed to the server process.
         args: Vec<String>,
+        /// Explicit environment entries applied after sanitized inheritance.
         env: HashMap<String, String>,
     },
     /// Remote HTTP transport
     Http {
+        /// Endpoint and headers for request/response HTTP transport.
         #[serde(flatten)]
         config: HttpConfig,
     },
     /// Remote HTTP with SSE transport
     HttpSse {
+        /// Endpoint and headers for HTTP POST plus server-sent events transport.
         #[serde(flatten)]
         config: HttpConfig,
     },
@@ -72,7 +83,9 @@ impl McpServerHealth {
 /// Metadata about a discovered MCP tool
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolInfo {
+    /// Server-local tool name.
     pub name: String,
+    /// Description presented to models and diagnostics.
     pub description: String,
     /// JSON schema for the tool's input
     pub input_schema: serde_json::Value,
@@ -105,7 +118,9 @@ pub struct McpServerConfig {
 /// Runtime state for a configured MCP server
 #[derive(Debug, Clone)]
 pub struct McpServerState {
+    /// Immutable connection configuration for the server.
     pub config: McpServerConfig,
+    /// Current connection lifecycle state.
     pub health: McpServerHealth,
     /// Discovered tools from this server, if connected
     pub discovered_tools: Vec<McpToolInfo>,
@@ -114,6 +129,7 @@ pub struct McpServerState {
 }
 
 impl McpServerState {
+    /// Creates configured, disconnected state with no discovered tools or error.
     pub fn new(config: McpServerConfig) -> Self {
         Self {
             config,
@@ -132,6 +148,7 @@ pub struct McpServerRegistry {
 }
 
 impl McpServerRegistry {
+    /// Creates an empty registry with mutation version zero.
     pub fn new() -> Self {
         Self {
             servers: Arc::new(RwLock::new(HashMap::new())),

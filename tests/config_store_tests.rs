@@ -1520,7 +1520,7 @@ fn create_test_handoff_bundle(id: &str) -> iron_core::context::handoff::HandoffB
         model_switch_history: vec![],
         current_model: Some("gpt-4o".to_string()),
         current_provider_slug: Some("openai".to_string()),
-        current_provider_api_key: Some("sk-test-key".to_string()),
+        current_provider_api_key: Some(iron_core::SecretString::new("sk-test-key".to_string())),
         profile_identity: None,
         hidden_tools: vec![],
         profile_id: None,
@@ -1553,8 +1553,12 @@ async fn test_saved_handoff_roundtrip() {
     assert_eq!(loaded.metadata.name, "Test Handoff 1");
     assert_eq!(loaded.bundle, bundle);
     assert_eq!(
-        loaded.bundle.current_provider_api_key,
-        Some("sk-test-key".to_string())
+        loaded
+            .bundle
+            .current_provider_api_key
+            .as_ref()
+            .map(|k| k.reveal()),
+        Some("sk-test-key")
     );
 }
 

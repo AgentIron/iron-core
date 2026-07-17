@@ -1,3 +1,9 @@
+//! Client-facing plugin health, aggregate status, and per-tool availability.
+//!
+//! Health describes runtime loading independently of session enablement.
+//! [`PluginRuntimeStatus`] combines health with canonical tool availability so
+//! clients can render ready, partial, auth-blocked, and failed states.
+
 use crate::plugin::auth::{AuthAvailability, AuthState};
 use crate::plugin::effective_tools::UnavailableReason;
 use crate::plugin::manifest::ExportedTool;
@@ -194,7 +200,7 @@ impl PluginStatus {
         }
     }
 
-    /// Generate a user-facing status message
+    /// Generates a concise user-facing message for an aggregate runtime status.
     pub fn generate_status_message(
         runtime_status: PluginRuntimeStatus,
         plugin_name: &str,

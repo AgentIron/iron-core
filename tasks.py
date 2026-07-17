@@ -108,6 +108,25 @@ def test(ctx):
 
 
 @task
+def docs(ctx):
+    """Run strict documentation checks with a terse summary."""
+    _run_group(
+        ctx,
+        "Docs",
+        [
+            (
+                "cargo doc",
+                f'RUSTDOCFLAGS="-D warnings -D missing-docs" cargo doc --manifest-path {MANIFEST_PATH} --no-deps --all-features',
+            ),
+            (
+                "cargo test --doc",
+                f"cargo test --manifest-path {MANIFEST_PATH} --doc --all-features",
+            ),
+        ],
+    )
+
+
+@task
 def security(ctx):
     """Run security checks with a terse summary."""
     results = []
@@ -132,4 +151,5 @@ def security(ctx):
 ns = Collection()
 ns.add_task(build)
 ns.add_task(test)
+ns.add_task(docs)
 ns.add_task(security)

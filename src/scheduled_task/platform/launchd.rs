@@ -2,7 +2,11 @@
 //!
 //! Manages user-level LaunchAgent plists with `com.agentiron.task.` labels.
 //! Cron expressions are expanded into launchd `StartCalendarInterval`
-//! entries. plist files live in `~/Library/LaunchAgents/`.
+//! entries, capped at [`MAX_INTERVALS`]. When both day-of-month and weekday
+//! are restricted, expansion emits their union to preserve cron OR semantics.
+//! Plist files live in `~/Library/LaunchAgents/`; `launchctl` controls loaded
+//! and enabled state. launchd inspection can recover command and enabled state,
+//! but not the original cron text.
 //!
 //! The plist rendering and cron expansion logic is platform-independent
 //! and tested here. The actual `launchctl` command execution is Linux
@@ -44,12 +48,21 @@ pub const MAX_INTERVALS: usize = 64;
 // ============================================================================
 
 /// A single launchd calendar interval.
+///
+/// `None` omits the corresponding `StartCalendarInterval` key and therefore
+/// leaves that calendar component unrestricted. Cron Sunday (`0`) is converted
+/// to launchd Sunday (`7`) during expansion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarInterval {
+    /// Minute in `0..=59`, or any minute when omitted.
     pub minute: Option<u32>,
+    /// Hour in `0..=23`, or any hour when omitted.
     pub hour: Option<u32>,
+    /// Day of month in `1..=31`, or any day when omitted.
     pub day_of_month: Option<u32>,
+    /// Month in `1..=12`, or any month when omitted.
     pub month: Option<u32>,
+    /// launchd weekday in `1..=7`, or any weekday when omitted.
     pub day_of_week: Option<u32>,
 }
 
@@ -330,6 +343,10 @@ pub struct LaunchdHostScheduler {
 }
 
 impl LaunchdHostScheduler {
+    /// Create a launchd adapter for a user LaunchAgents directory.
+    ///
+    /// Commands run through `runner`; the adapter derives service labels and
+    /// plist paths from validated schedule IDs.
     pub fn new(runner: Box<dyn CommandRunner>, launchagents_dir: PathBuf) -> Self {
         let uid = extern_uid();
         Self {
@@ -521,6 +538,8 @@ fn extern_uid() -> u32 {
     extern "C" {
         fn getuid() -> u32;
     }
+    // SAFETY: POSIX `getuid` takes no arguments, has no preconditions, and
+    // returns the real user ID without exposing borrowed memory.
     unsafe { getuid() }
 }
 

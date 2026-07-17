@@ -11,11 +11,13 @@ use crate::error::RuntimeResult;
 use crate::tool::{Tool, ToolDefinition, ToolFuture};
 use serde_json::Value;
 
+/// Find filesystem entries matching a glob pattern within allowed roots.
 pub struct GlobTool {
     config: Arc<BuiltinToolConfig>,
 }
 
 impl GlobTool {
+    /// Create a glob tool using `config` for root and result-limit enforcement.
     pub fn new(config: BuiltinToolConfig) -> Self {
         Self {
             config: Arc::new(config),
@@ -65,11 +67,16 @@ impl Tool for GlobTool {
     }
 }
 
+/// Search text files with regular expressions within allowed roots.
+///
+/// Binary files are skipped, and traversal respects ignore rules unless an
+/// explicit path, include pattern, or hidden-targeting pattern is supplied.
 pub struct GrepTool {
     config: Arc<BuiltinToolConfig>,
 }
 
 impl GrepTool {
+    /// Create a grep tool using `config` for root and result-limit enforcement.
     pub fn new(config: BuiltinToolConfig) -> Self {
         Self {
             config: Arc::new(config),

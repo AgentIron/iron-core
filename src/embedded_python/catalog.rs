@@ -1,3 +1,5 @@
+//! Internal script-visible catalog of runtime tools and safe Python aliases.
+
 use crate::tool::ToolDefinition;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -11,16 +13,19 @@ const PYTHON_KEYWORDS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone)]
+/// Catalog entry containing a tool definition and optional Python-safe alias.
 pub(crate) struct ToolCatalogEntry {
     definition: ToolDefinition,
     alias: Option<String>,
 }
 
 impl ToolCatalogEntry {
+    /// Returns the registered runtime tool name.
     pub(crate) fn name(&self) -> &str {
         &self.definition.name
     }
 
+    /// Returns public catalog metadata without the input schema.
     pub(crate) fn summary_json(&self) -> Value {
         json!({
             "name": self.definition.name,
@@ -30,6 +35,7 @@ impl ToolCatalogEntry {
         })
     }
 
+    /// Returns complete script-visible metadata, including the input schema.
     pub(crate) fn describe_json(&self) -> Value {
         json!({
             "name": self.definition.name,
@@ -42,6 +48,7 @@ impl ToolCatalogEntry {
 }
 
 #[derive(Debug, Clone, Default)]
+/// Snapshot of tools available to one embedded-Python run.
 pub(crate) struct ToolCatalog {
     entries: Vec<ToolCatalogEntry>,
     by_name: HashMap<String, usize>,
@@ -49,6 +56,7 @@ pub(crate) struct ToolCatalog {
 }
 
 impl ToolCatalog {
+    /// Builds a catalog and assigns non-conflicting Python-safe aliases.
     pub(crate) fn from_definitions(definitions: Vec<ToolDefinition>) -> Self {
         let mut entries = Vec::with_capacity(definitions.len());
         let mut by_name = HashMap::with_capacity(definitions.len());
@@ -76,6 +84,7 @@ impl ToolCatalog {
         }
     }
 
+    /// Creates the frozen `IronTools` object injected as the `tools` global.
     pub(crate) fn namespace_object(&self) -> monty::MontyObject {
         monty::MontyObject::Dataclass {
             name: "IronTools".to_string(),
@@ -86,6 +95,7 @@ impl ToolCatalog {
         }
     }
 
+    /// Returns summaries for all catalog entries in registry order.
     pub(crate) fn available_json(&self) -> Value {
         Value::Array(
             self.entries
@@ -95,15 +105,18 @@ impl ToolCatalog {
         )
     }
 
+    /// Returns full metadata for a registered tool name.
     pub(crate) fn describe_json(&self, name: &str) -> Option<Value> {
         self.entry_by_name(name)
             .map(ToolCatalogEntry::describe_json)
     }
 
+    /// Looks up an entry by its registered runtime name.
     pub(crate) fn entry_by_name(&self, name: &str) -> Option<&ToolCatalogEntry> {
         self.by_name.get(name).map(|idx| &self.entries[*idx])
     }
 
+    /// Looks up an entry by its generated Python method alias.
     pub(crate) fn entry_by_alias(&self, alias: &str) -> Option<&ToolCatalogEntry> {
         self.by_alias.get(alias).map(|idx| &self.entries[*idx])
     }
@@ -143,6 +156,7 @@ fn alias_for_tool(name: &str, assigned_aliases: &HashSet<String>) -> Option<Stri
     Some(alias)
 }
 
+/// Returns whether a Monty object is the injected `IronTools` namespace.
 pub(crate) fn is_tools_namespace(obj: &monty::MontyObject) -> bool {
     matches!(obj, monty::MontyObject::Dataclass { name, .. } if name == "IronTools")
 }

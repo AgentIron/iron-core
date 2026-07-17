@@ -6,11 +6,35 @@
 //!
 //! ## Architecture
 //!
-//! - [`SkillSource`] trait abstracts discovery (filesystem, client-provided, etc.)
-//! - [`SkillCatalog`] unifies discovered skills from all sources
-//! - [`Skill`] represents a loaded skill with metadata and body content
-//! - [`SkillRegistry`] is runtime-owned and manages the lifecycle
-//! - Session-scoped activation is tracked in [`DurableSession`]
+//! - [`SkillSource`] separates discovery from loading owned skill snapshots.
+//! - [`LoadedSkill`] carries metadata, instructions, location, and resources.
+//! - [`SkillCatalog`] merges sources and resolves collisions by origin precedence.
+//! - [`SessionSkillState`] activates snapshots idempotently and injects their
+//!   instructions until deactivation.
+//! - Session state is persisted as part of [`crate::durable::DurableSession`].
+//!
+//! ```
+//! use iron_core::skill::{LoadedSkill, SkillCatalog, SkillMetadata, SkillOrigin};
+//!
+//! let mut catalog = SkillCatalog::new();
+//! catalog.register(LoadedSkill {
+//!     metadata: SkillMetadata {
+//!         id: "review".into(),
+//!         display_name: "Code Review".into(),
+//!         description: "Review changes for correctness.".into(),
+//!         origin: SkillOrigin::ClientProvided,
+//!         auto_activate: false,
+//!         tags: vec!["engineering".into()],
+//!         requires_tools: vec!["read".into()],
+//!         requires_capabilities: vec![],
+//!         requires_trust: false,
+//!     },
+//!     location: None,
+//!     body: "Inspect the diff and report actionable findings.".into(),
+//!     resources: vec![],
+//! });
+//! assert!(catalog.contains("review"));
+//! ```
 
 pub mod catalog;
 pub mod source;
@@ -105,16 +129,22 @@ pub struct LoadedSkill {
 /// Severity level for a skill diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DiagnosticLevel {
+    /// Informational discovery or precedence detail.
     Info,
+    /// Recoverable problem that may reduce the available skill set.
     Warning,
+    /// Skill discovery or loading failure requiring attention.
     Error,
 }
 
 /// A diagnostic message about skill discovery.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SkillDiagnostic {
+    /// Severity of the reported condition.
     pub level: DiagnosticLevel,
+    /// Human-readable discovery or loading detail.
     pub message: String,
+    /// Affected skill identifier, when the condition is skill-specific.
     pub skill_name: Option<String>,
 }
 
@@ -153,14 +183,17 @@ impl SessionSkillState {
         self.active.iter().any(|r| r.name == name)
     }
 
-    /// Activate a skill (idempotent).
+    /// Activate a loaded skill snapshot if its name is not already active.
+    ///
+    /// Re-activation is idempotent and does not refresh an existing snapshot;
+    /// callers must deactivate first to pick up changed instructions/resources.
     pub fn activate(&mut self, record: ActivatedSkillRecord) {
         if !self.is_active(&record.name) {
             self.active.push(record);
         }
     }
 
-    /// Deactivate a skill by name.
+    /// Deactivate a skill by name, leaving other activation order unchanged.
     pub fn deactivate(&mut self, name: &str) {
         self.active.retain(|r| r.name != name);
     }
@@ -170,7 +203,9 @@ impl SessionSkillState {
         self.active.iter().map(|r| r.name.as_str()).collect()
     }
 
-    /// Get the full instruction text for all active skills.
+    /// Render active skill snapshots as model-visible instruction blocks.
+    ///
+    /// Blocks preserve activation order and are separated by a blank line.
     pub fn active_skill_instructions(&self) -> String {
         let mut output = String::new();
         for skill in &self.active {
@@ -183,6 +218,7 @@ impl SessionSkillState {
     }
 }
 
+/// Wrap a snapshotted skill body for injection into session instructions.
 pub(crate) fn render_skill_content(name: &str, body: &str) -> String {
     format!(
         "<skill_content name=\"{}\">\n{}\n</skill_content>",

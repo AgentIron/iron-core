@@ -26,6 +26,9 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Install Python task runner
+        run: python -m pip install invoke
+
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
@@ -40,6 +43,9 @@ jobs:
 
       - name: Test
         run: cargo test --locked --manifest-path Cargo.toml
+
+      - name: Documentation
+        run: inv docs
 
       - name: Security audit
         id: audit

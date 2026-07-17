@@ -1,3 +1,8 @@
+//! Built-in HTTP and HTTPS content retrieval.
+//!
+//! Requests enforce network policy, reject private and special-use addresses
+//! by default, limit redirects, and truncate returned bodies at a UTF-8 boundary.
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
@@ -9,11 +14,13 @@ use crate::error::RuntimeResult;
 use crate::tool::{Tool, ToolDefinition, ToolFuture};
 use serde_json::Value;
 
+/// Fetch textual HTTP content subject to built-in network policy.
 pub struct WebFetchTool {
     config: Arc<BuiltinToolConfig>,
 }
 
 impl WebFetchTool {
+    /// Create a web-fetch tool with the supplied network and size policy.
     pub fn new(config: BuiltinToolConfig) -> Self {
         Self {
             config: Arc::new(config),

@@ -1,3 +1,9 @@
+//! Runtime-owned plugin authentication vocabulary and client interaction types.
+//!
+//! Plugins declare OAuth requirements, while the runtime owns state transitions,
+//! credential bindings, prompts, and interaction messages. Credentials are not
+//! passed directly to plugin code.
+
 use serde::{Deserialize, Serialize};
 
 /// OAuth authentication requirements declared by a plugin
@@ -21,11 +27,17 @@ pub struct OAuthRequirements {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OAuthProvider {
+    /// Google OAuth services.
     Google,
+    /// GitHub OAuth services.
     GitHub,
+    /// Slack OAuth services.
     Slack,
+    /// Discord OAuth services.
     Discord,
+    /// Microsoft OAuth services.
     Microsoft,
+    /// A provider identified by plugin-supplied endpoint metadata.
     Custom,
 }
 

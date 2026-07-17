@@ -25,7 +25,9 @@ pub const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
 /// Supported credential modes for a provider.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CredentialSupport {
+    /// Whether the provider accepts API-key credentials.
     pub api_key: bool,
+    /// Whether the provider accepts OAuth bearer credentials.
     pub oauth_bearer: bool,
 }
 
@@ -179,6 +181,12 @@ impl CredentialResolver {
     /// Otherwise, the credential store is queried for an OAuth credential.
     /// If found and the provider supports OAuth, the token is refreshed if
     /// expired or within `REFRESH_MARGIN` of expiry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderAuthError::NotConfigured`] when no credential exists,
+    /// [`ProviderAuthError::UnsupportedCredential`] when the selected mode is
+    /// not supported, or refresh/store errors from the OAuth lifecycle.
     pub async fn resolve(
         &self,
         context: &ProviderPromptContext,
@@ -398,6 +406,12 @@ impl CredentialResolver {
     ///
     /// This is used after a provider auth failure to obtain a fresh token
     /// before retrying the request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no credential is configured, an API key is not
+    /// supported, OAuth refresh fails, or the durable store cannot be read or
+    /// updated. API keys are returned without a network request.
     pub async fn force_refresh(
         &self,
         slug: &ProviderSlug,

@@ -141,7 +141,9 @@ pub enum HostSchedulerError {
     /// The platform does not support the requested schedule.
     #[error("unsupported schedule for {platform}: {reason}")]
     UnsupportedSchedule {
+        /// Stable name of the rejecting platform adapter.
         platform: &'static str,
+        /// Explanation of the platform representation limit.
         reason: String,
     },
 
@@ -334,17 +336,24 @@ pub trait CommandRunner: Send + Sync {
 /// Output from a command runner invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput {
+    /// Process exit code, or `-1` when the process ended without one.
     pub exit_code: i32,
+    /// Standard output decoded lossily as UTF-8.
     pub stdout: String,
+    /// Standard error decoded lossily as UTF-8.
     pub stderr: String,
 }
 
 /// Injectable filesystem boundary.
 #[async_trait]
 pub trait SchedulerFilesystem: Send + Sync {
+    /// Read an entire scheduler-owned file as UTF-8 text.
     async fn read_to_string(&self, path: &std::path::Path) -> Result<String, std::io::Error>;
+    /// Replace a scheduler-owned file with the supplied text.
     async fn write(&self, path: &std::path::Path, content: &str) -> Result<(), std::io::Error>;
+    /// Report whether a scheduler-owned path currently exists.
     async fn exists(&self, path: &std::path::Path) -> bool;
+    /// Remove a scheduler-owned file.
     async fn remove_file(&self, path: &std::path::Path) -> Result<(), std::io::Error>;
 }
 
@@ -363,6 +372,7 @@ pub struct FakeHostScheduler {
 }
 
 impl FakeHostScheduler {
+    /// Create an empty scheduler with no forced error.
     pub fn new() -> Self {
         Self::default()
     }

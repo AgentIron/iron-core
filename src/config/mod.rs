@@ -61,6 +61,22 @@
 //!
 //! Projection is a snapshot — later mutations to the caller's config do not
 //! affect already-constructed runtimes or agents.
+//!
+//! ## Example
+//!
+//! ```
+//! use iron_core::{ApprovalStrategy, Config, ContextWindowPolicy};
+//!
+//! let config = Config::new()
+//!     .with_model("gpt-4.1")
+//!     .with_max_iterations(6)
+//!     .with_approval_strategy(ApprovalStrategy::PerTool)
+//!     .with_context_window_policy(ContextWindowPolicy::KeepRecent(24));
+//!
+//! config.validate()?;
+//! assert_eq!(config.model, "gpt-4.1");
+//! # Ok::<(), iron_core::RuntimeError>(())
+//! ```
 
 use crate::error::RuntimeError;
 use iron_providers::{GenerationConfig, ToolPolicy};

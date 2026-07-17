@@ -1,3 +1,10 @@
+//! Estimates the context that will be visible to an inference provider.
+//!
+//! Category totals use a four-characters-per-token heuristic. When a session
+//! tracker has a provider-reported input baseline, that baseline plus local
+//! post-response deltas replaces the heuristic total while the heuristic
+//! category breakdown remains available.
+
 use crate::context::models::CompressedBlock;
 use crate::tool::ToolRegistry;
 use iron_providers::Message;
@@ -6,36 +13,57 @@ fn estimate_tokens(text: &str) -> usize {
     (text.len() as f64 * 0.25).ceil() as usize
 }
 
+/// Confidence level attached to a context token count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextQuality {
+    /// The count is an unchanged provider-reported baseline.
     Exact,
+    /// At least part of the count was estimated locally.
     Estimated,
+    /// No countable context was available.
     Unknown,
 }
 
+/// Provider-visible source of context tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextCategory {
+    /// System, identity, and session instructions.
     Instructions,
+    /// Durable summaries replacing compacted history.
     CompressedBlocks,
+    /// Uncompacted recent transcript messages.
     RecentTail,
+    /// Tool schemas supplied to the provider.
     ToolDefinitions,
+    /// User prompt about to be sent.
     CurrentPrompt,
 }
 
+/// Severity derived from the fraction of a model context window in use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextPressure {
+    /// Usage is below the soft threshold.
     None,
+    /// Usage has reached the soft threshold.
     Soft,
+    /// Usage has reached the medium threshold.
     Medium,
+    /// Usage has reached the strong threshold.
     Strong,
+    /// Usage has reached the critical threshold.
     Critical,
 }
 
 impl ContextPressure {
+    /// Classifies `fullness` using the default 50%, 70%, 85%, and 95% thresholds.
     pub fn from_fullness(fullness: f64) -> Self {
         Self::from_fullness_with_thresholds(fullness, 0.50, 0.70, 0.85, 0.95)
     }
 
+    /// Classifies a context-window fraction using caller-supplied thresholds.
+    ///
+    /// Thresholds are tested from `critical` down to `soft`; this method does
+    /// not validate their ordering.
     pub fn from_fullness_with_thresholds(
         fullness: f64,
         soft: f64,
@@ -52,6 +80,7 @@ impl ContextPressure {
         }
     }
 
+    /// Returns the stable lowercase label for this pressure level.
     pub fn as_str(&self) -> &'static str {
         match self {
             ContextPressure::None => "none",
@@ -62,6 +91,7 @@ impl ContextPressure {
         }
     }
 
+    /// Returns operational guidance associated with this pressure level.
     pub fn guidance(&self) -> &'static str {
         match self {
             ContextPressure::None => "Context usage is healthy. No action needed.",
@@ -73,20 +103,29 @@ impl ContextPressure {
     }
 }
 
+/// Token usage attributed to one provider-visible context category.
 #[derive(Debug, Clone)]
 pub struct ContextCategoryUsage {
+    /// Source category represented by this entry.
     pub category: ContextCategory,
+    /// Token count for the category.
     pub tokens: usize,
+    /// Confidence in the category count.
     pub quality: ContextQuality,
 }
 
+/// Point-in-time estimate of the next provider request's context footprint.
 #[derive(Debug, Clone)]
 pub struct ActiveContextSnapshot {
+    /// Best available total token count.
     pub total_tokens: usize,
+    /// Active model's context-window limit, when known.
     pub context_window_limit: Option<usize>,
     /// Token threshold at which automatic context compaction is requested.
     pub compact_threshold_tokens: Option<usize>,
+    /// Confidence in [`Self::total_tokens`].
     pub quality: ContextQuality,
+    /// Heuristic breakdown by context source.
     pub categories: Vec<ContextCategoryUsage>,
     /// Current model identifier for this session
     pub current_model: Option<String>,
@@ -97,16 +136,23 @@ pub struct ActiveContextSnapshot {
 }
 
 impl ActiveContextSnapshot {
+    /// Returns the fraction of the known context window currently occupied.
+    ///
+    /// Returns `None` when the limit is absent or zero. Values may exceed `1.0`.
     pub fn fullness(&self) -> Option<f64> {
         self.context_window_limit
             .filter(|limit| *limit > 0)
             .map(|limit| self.total_tokens as f64 / limit as f64)
     }
 
+    /// Classifies fullness using the default pressure thresholds.
     pub fn pressure(&self) -> ContextPressure {
         self.pressure_with_thresholds(0.50, 0.70, 0.85, 0.95)
     }
 
+    /// Classifies fullness using caller-supplied pressure thresholds.
+    ///
+    /// An unknown context-window limit produces [`ContextPressure::None`].
     pub fn pressure_with_thresholds(
         &self,
         soft: f64,
@@ -122,14 +168,23 @@ impl ActiveContextSnapshot {
     }
 }
 
+/// Model identity and switch history supplied to an accounting snapshot.
 pub struct SessionModelInfo<'a> {
+    /// Current model identifier, when one has been selected.
     pub current_model: Option<&'a str>,
+    /// Number of completed model switches in the session.
     pub model_switch_count: usize,
 }
 
+/// Stateless calculator for provider-visible context estimates.
 pub struct ActiveContextAccountant;
 
 impl ActiveContextAccountant {
+    /// Estimates a context snapshot from rendered request components.
+    ///
+    /// A valid `tracker` baseline supplies the total, with `current_prompt`
+    /// added because it has not yet appeared in provider usage. Without a
+    /// baseline, all components use the local text-length heuristic.
     #[allow(clippy::too_many_arguments)]
     pub fn estimate_snapshot(
         instructions: Option<&str>,
@@ -255,6 +310,9 @@ impl ActiveContextAccountant {
         }
     }
 
+    /// Estimates tokens for transcript messages using text length.
+    ///
+    /// Tool names and their JSON arguments or results are included.
     pub fn estimate_messages_tokens(messages: &[Message]) -> usize {
         let text: String = messages
             .iter()
@@ -276,9 +334,11 @@ impl ActiveContextAccountant {
     }
 }
 
+/// Stateless facade for producing session context telemetry.
 pub struct ContextTelemetry;
 
 impl ContextTelemetry {
+    /// Produces the same snapshot as [`ActiveContextAccountant::estimate_snapshot`].
     #[allow(clippy::too_many_arguments)]
     pub fn for_session(
         instructions: Option<&str>,

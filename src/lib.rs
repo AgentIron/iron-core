@@ -5,8 +5,8 @@
 )]
 //! iron-core: Core AgentIron runtime, ACP-native session management, and tool registry
 //!
-//! This crate provides the ACP-native runtime, session management, tool registration,
-//! and configuration types as described in AGENTS.md.
+//! This crate provides an ACP-native runtime, durable session management, tool
+//! registration, provider integration, and configuration APIs for embedded agents.
 //!
 //! # Quick start
 //!
@@ -18,9 +18,18 @@
 //! `session.prompt_stream(text)` for text-only prompts. Both return the same
 //! `(PromptHandle, PromptEvents)` pair:
 //!
-//! ```ignore
-//! let agent = IronAgent::new(config, provider);
-//! agent.register_tool(my_tool);
+//! ```no_run
+//! use iron_core::{Config, ContentBlock, FunctionTool, IronAgent, PromptEvent};
+//! use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
+//! use serde_json::json;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let provider = ProviderConnection::from_profile(
+//!     ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"),
+//!     RuntimeConfig::new("sk-example"),
+//! )?;
+//! let agent = IronAgent::new(Config::default(), provider);
+//! agent.register_tool(FunctionTool::simple("ping", "Return pong", |_| Ok(json!("pong"))));
 //! let connection = agent.connect();
 //! let session = connection.create_session()?;
 //!
@@ -31,7 +40,7 @@
 //! use iron_core::ContentBlock;
 //! let blocks = vec![
 //!     ContentBlock::text("Describe this image:"),
-//!     ContentBlock::Image { data: img_data, mime_type: "image/png".into() },
+//!     ContentBlock::Image { data: "base64-data".into(), mime_type: "image/png".into() },
 //! ];
 //! let (handle, mut events) = session.prompt_stream_with_blocks(&blocks);
 //!
@@ -45,8 +54,11 @@
 //!         PromptEvent::ToolResult { call_id, status, .. } => { /* show outcome */ }
 //!         PromptEvent::Complete { outcome } => break,
 //!         PromptEvent::Status { message } => { /* advisory */ }
+//!         _ => { /* model switches, compaction, scripts, and auth changes */ }
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! `prompt_stream(&str)` is a convenience wrapper that wraps the text as a single
@@ -63,8 +75,8 @@
 //! - [`AgentConnection`] → one ACP client association (wraps [`IronConnection`])
 //! - [`AgentSession`] → session with prompt/cancel/drain_events (wraps durable state)
 //!
-//! The runtime supports in-process (primary), stdio, and TCP transports via the
-//! `transport` module.
+//! The [`transport`] module provides the operational in-process ACP adapter.
+//! Its reserved stdio and TCP entry points currently return compatibility errors.
 //!
 //! # Session Ownership
 //!
@@ -76,8 +88,8 @@
 //!
 //! `Config.context_window_policy` is applied consistently in both ACP-native and
 //! request paths via a shared request builder (`request_builder` module).
-//! Summarization lives under `context_management`; the context-window policy is
-//! limited to `KeepAll` and `KeepRecent`.
+//! Summarization lives under [`context`]; the context-window policy is limited
+//! to `KeepAll` and `KeepRecent`.
 //!
 //! # Context Management
 //!
@@ -143,9 +155,10 @@
 //!   as the corresponding runtime tool registration or substitution.
 //!
 //! - **Transport support:**
-//!   In-process (primary, for embeddings), stdio (subprocess), TCP (cross-process).
-//!   All transports enforce identical session ownership, durable history, permission
-//!   flow, and cancellation semantics.
+//!   The in-process adapter is operational for embeddings. Stdio and TCP entry
+//!   points are reserved but currently return compatibility errors. The shared
+//!   ACP RPC layer defines session ownership, durable history, permission flow,
+//!   and cancellation semantics independently of transport framing.
 //!
 //! - **Conformance testing:**
 //!   Each supported method has at least one transport-independent unit test
@@ -191,6 +204,7 @@ pub mod request_builder;
 pub mod runtime;
 pub mod scheduled_task;
 pub mod schema;
+pub mod secret;
 pub mod skill;
 pub mod stored_prompt;
 pub mod tool;
@@ -248,6 +262,7 @@ pub use profile::{
 };
 pub use prompt_turn::PromptTurn;
 pub use runtime::{ConnectionId, CreateSessionOptions, IronRuntime};
+pub use secret::SecretString;
 pub use stored_prompt::{
     kebab_to_title_case, load_prompts, normalize_prompt_name, IdentityState, PromptLoadDiagnostic,
     PromptLoadIssue, PromptLoadReport, StoredPrompt, StoredPromptEntry, StoredPromptRegistry,
@@ -316,6 +331,11 @@ pub use debug::{
     ToolDebugEvent,
 };
 
+/// Commonly used runtime, provider, session, and tool types.
+///
+/// Import this module with `use iron_core::prelude::*` when building a typical
+/// embedded agent integration. Specialized management and extension APIs remain
+/// available through their named modules.
 pub mod prelude {
     pub use crate::{
         AgentConnection, AgentSession, ApprovalStrategy, Config, ConfigSource, ContentBlock,
@@ -325,3 +345,8 @@ pub mod prelude {
         RuntimeResult, SessionId, Tool, ToolDefinition, ToolPolicy, ToolRegistry, Transcript,
     };
 }
+
+#[cfg(doctest)]
+/// Compiles the README's Rust examples as crate documentation tests.
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;

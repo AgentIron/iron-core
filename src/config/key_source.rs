@@ -13,6 +13,7 @@ pub struct OsKeyringKeySource {
 }
 
 impl OsKeyringKeySource {
+    /// Create a key source for the keyring entry identified by service and account.
     pub fn new(service: impl Into<String>, account: impl Into<String>) -> Self {
         Self {
             service: service.into(),
@@ -83,6 +84,7 @@ pub struct EnvVarKeySource {
 }
 
 impl EnvVarKeySource {
+    /// Create a key source that reads a base64-encoded 32-byte key from `var_name`.
     pub fn new(var_name: impl Into<String>) -> Self {
         Self {
             var_name: var_name.into(),
@@ -115,6 +117,7 @@ pub struct StaticKeySource {
 }
 
 impl StaticKeySource {
+    /// Create a key source that returns the supplied key material unchanged.
     pub fn new(key: [u8; 32]) -> Self {
         Self { key }
     }

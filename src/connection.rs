@@ -1,3 +1,5 @@
+//! ACP connection handling and connection-scoped session ownership.
+
 use crate::durable::{DurableSession, SessionId};
 use crate::profile::{
     default_identity_prompt, managed_profile_prompt_context, AgentApproval, AgentProfile,
@@ -15,12 +17,27 @@ use std::rc::Rc;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+/// Client callbacks used to deliver ACP updates and request tool permission.
+///
+/// Implementations may also observe script and compaction activity. The
+/// returned futures are deliberately non-`Send` because a connection and its
+/// facade callbacks are local to one executor thread.
 pub trait ClientChannel {
+    /// Delivers one session notification to the connected client.
+    ///
+    /// # Errors
+    ///
+    /// The future reports transport or protocol delivery failures.
     fn send_notification(
         &self,
         notification: acp::SessionNotification,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = agent_client_protocol::Result<()>>>>;
 
+    /// Requests a permission decision from the connected client.
+    ///
+    /// # Errors
+    ///
+    /// The future reports transport or protocol request failures.
     fn request_permission(
         &self,
         request: acp::RequestPermissionRequest,
@@ -32,6 +49,10 @@ pub trait ClientChannel {
         >,
     >;
 
+    /// Reports embedded-script activity to clients that support it.
+    ///
+    /// The default implementation ignores the event. `detail` is an optional
+    /// activity-specific payload.
     fn emit_script_activity(
         &self,
         _script_id: &str,
@@ -43,6 +64,11 @@ pub trait ClientChannel {
         Box::pin(async {})
     }
 
+    /// Reports a compaction lifecycle transition to clients that support it.
+    ///
+    /// `event_type` is `started`, `finished`, or `failed`; token counts may be
+    /// unavailable, and `reason` is populated for failures. The default
+    /// implementation ignores the event.
     fn emit_compaction_event(
         &self,
         _event_type: &str,
@@ -88,8 +114,10 @@ impl ClientChannel for NopClientChannel {
     }
 }
 
+/// Reference-counted client callback channel shared within one local connection.
 pub(crate) type SharedClientChannel = Rc<dyn ClientChannel>;
 
+/// Connection-visible agent profiles keyed by stable profile ID.
 pub(crate) type ProfileRegistry = HashMap<AgentProfileId, AgentProfile>;
 
 fn default_connection_profile_registry() -> ProfileRegistry {
@@ -106,6 +134,11 @@ fn default_connection_profile_registry() -> ProfileRegistry {
     registry
 }
 
+/// An ACP connection with isolated client callbacks and session ownership.
+///
+/// Dropping the value unregisters the connection and closes every session it
+/// owns. The connection is local-thread oriented because its client channel is
+/// stored in [`Rc`].
 pub struct IronConnection {
     id: ConnectionId,
     runtime: IronRuntime,
@@ -114,6 +147,7 @@ pub struct IronConnection {
 }
 
 impl IronConnection {
+    /// Registers a connection backed by `runtime` with a default profile registry.
     pub fn new(runtime: IronRuntime) -> Self {
         Self::new_with_profile_registry(
             runtime,
@@ -121,6 +155,11 @@ impl IronConnection {
         )
     }
 
+    /// Registers a connection backed by a shared profile registry.
+    ///
+    /// Profile changes made through the shared registry are visible when a
+    /// session selects a profile, while selected profile policy is snapshotted
+    /// into the session at prompt time.
     pub fn new_with_profile_registry(
         runtime: IronRuntime,
         profile_registry: Arc<RwLock<ProfileRegistry>>,
@@ -135,18 +174,22 @@ impl IronConnection {
         }
     }
 
+    /// Returns this connection's stable runtime identifier.
     pub fn id(&self) -> ConnectionId {
         self.id
     }
 
+    /// Returns the shared runtime backing this connection.
     pub fn runtime(&self) -> &IronRuntime {
         &self.runtime
     }
 
+    /// Replaces the client callback channel used by subsequent operations.
     pub fn set_client(&self, client: SharedClientChannel) {
         *self.client.borrow_mut() = Some(client);
     }
 
+    /// Returns the shared profile registry used for profile selection.
     pub fn profile_registry(&self) -> &Arc<RwLock<ProfileRegistry>> {
         &self.profile_registry
     }
@@ -235,6 +278,10 @@ impl IronConnection {
 }
 
 impl IronConnection {
+    /// Negotiates ACP protocol version and agent capabilities.
+    ///
+    /// The current implementation accepts initialization without inspecting
+    /// request fields and advertises ACP V1 with default capabilities.
     pub async fn handle_initialize(
         &self,
         _args: acp::InitializeRequest,
@@ -248,6 +295,10 @@ impl IronConnection {
         )
     }
 
+    /// Handles ACP authentication negotiation.
+    ///
+    /// Core authentication is currently a no-op; provider authentication is
+    /// resolved separately when managed prompts run.
     pub async fn handle_authenticate(
         &self,
         _args: acp::AuthenticateRequest,
@@ -255,6 +306,12 @@ impl IronConnection {
         Ok(acp::AuthenticateResponse::new())
     }
 
+    /// Creates a new durable session owned by this connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal ACP error if the runtime is shut down or session
+    /// allocation otherwise fails.
     pub async fn handle_new_session(
         &self,
         _args: acp::NewSessionRequest,
@@ -271,6 +328,21 @@ impl IronConnection {
         )))
     }
 
+    /// Runs one prompt against the profile-selected or runtime-default provider.
+    ///
+    /// The user message is persisted before active-turn admission. A successful
+    /// turn finishes the active prompt, applies deferred workspace roots and
+    /// model switches in that order, then performs optional post-turn
+    /// compaction. Provider failures are recorded in the session and normally
+    /// return an `EndTurn` response rather than an ACP transport error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-parameters ACP error for malformed, missing, foreign,
+    /// or already-active sessions, and when an explicitly selected profile does
+    /// not exist. The user message is already durable when active-turn admission
+    /// or profile selection fails; a profile-selection failure also leaves the
+    /// admitted prompt active until it is explicitly finished or closed.
     pub async fn handle_prompt(
         &self,
         args: acp::PromptRequest,
@@ -347,7 +419,10 @@ impl IronConnection {
                 .map(|slug| ProviderPromptContext {
                     provider_slug: crate::provider_credential::domain::ProviderSlug::new(slug),
                     model: session.current_model.clone().unwrap_or_default(),
-                    api_key: session.current_provider_api_key.clone(),
+                    api_key: session
+                        .current_provider_api_key
+                        .as_ref()
+                        .map(|k| k.reveal().to_string()),
                 })
         };
 
@@ -470,6 +545,20 @@ impl IronConnection {
         Ok(acp::PromptResponse::new(stop_reason))
     }
 
+    /// Runs one prompt using an explicit managed-provider context.
+    ///
+    /// Lifecycle ordering matches [`Self::handle_prompt`]. If provider
+    /// resolution fails, the error is persisted as agent text, the prompt is
+    /// finished, deferred turn-boundary changes are applied, and `EndTurn` is
+    /// returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-parameters ACP error for malformed, missing, foreign,
+    /// or already-active sessions, and when an explicitly selected profile does
+    /// not exist. The user message is already durable when active-turn admission
+    /// or profile selection fails; a profile-selection failure also leaves the
+    /// admitted prompt active until it is explicitly finished or closed.
     pub async fn handle_prompt_managed(
         &self,
         args: acp::PromptRequest,
@@ -647,6 +736,14 @@ impl IronConnection {
         Ok(acp::PromptResponse::new(stop_reason))
     }
 
+    /// Requests cancellation of the active prompt owned by this connection.
+    ///
+    /// Cancellation is cooperative and propagates to registered child sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-parameters ACP error when the session ID is malformed,
+    /// missing, or owned by another connection.
     pub async fn handle_cancel(
         &self,
         args: acp::CancelNotification,
@@ -661,6 +758,14 @@ impl IronConnection {
         Ok(())
     }
 
+    /// Finishes and removes a session owned by this connection.
+    ///
+    /// Registered descendants are cancelled and removed with the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-parameters ACP error when the session ID is malformed,
+    /// missing, or owned by another connection.
     pub async fn handle_close_session(
         &self,
         args: acp::CloseSessionRequest,
@@ -675,6 +780,7 @@ impl IronConnection {
     }
 }
 
+/// Constructs a session notification for `session_id` and `update`.
 pub(crate) fn notification(
     session_id: &acp::SessionId,
     update: acp::SessionUpdate,

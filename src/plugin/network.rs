@@ -1,3 +1,8 @@
+//! Declarative outbound network policy for WASM plugins.
+//!
+//! Policies match exact domains and their subdomains. The default is an empty
+//! allowlist, which grants no network access; wildcard access must be explicit.
+
 use serde::{Deserialize, Serialize};
 
 /// Network access policy declared by a plugin
@@ -13,7 +18,10 @@ pub enum NetworkPolicy {
 }
 
 impl NetworkPolicy {
-    /// Check if a domain is allowed by this policy
+    /// Returns whether a domain is allowed by this policy.
+    ///
+    /// Allowlist and blocklist entries match both the exact domain and any
+    /// subdomain ending in `.{entry}`.
     pub fn allows(&self, domain: &str) -> bool {
         match self {
             Self::Allowlist(domains) => {
@@ -31,7 +39,7 @@ impl NetworkPolicy {
         }
     }
 
-    /// Get a summary description of the policy
+    /// Returns a concise human-readable summary of the policy's breadth.
     pub fn summary(&self) -> String {
         match self {
             Self::Allowlist(domains) => {

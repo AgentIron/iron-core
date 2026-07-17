@@ -18,6 +18,21 @@
 //!   `child_sessions`) are not durable scheduled-run history. Historical
 //!   run browsing requires the follow-up capability tracked in #98.
 //! - Interactive stored-prompt preview is deferred to #97.
+//!
+//! ```no_run
+//! use iron_core::ConfigManagementService;
+//! use iron_core::config::ConfigStore;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let store = ConfigStore::open_in_memory().await?;
+//! let service = ConfigManagementService::new(store);
+//! let profiles = service.list_profiles().await?;
+//! for record in profiles {
+//!     println!("{record:?}");
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::automation_task::{AutomationTask, AutomationTaskInput};
 use crate::config::{ConfigError, ConfigStore};
@@ -46,41 +61,63 @@ use uuid::Uuid;
 /// Fatal errors from management operations.
 #[derive(Debug, Error)]
 pub enum ManagementError {
+    /// A durable configuration operation failed without a more specific mapping.
     #[error("Storage error: {0}")]
     Storage(ConfigError),
 
+    /// Caller input or a decoded record violated a management invariant.
     #[error("Validation error: {0}")]
     Validation(String),
 
+    /// An operation named a related entity that does not exist or is unusable.
     #[error("Reference error: {0}")]
     Reference(String),
 
+    /// Deletion or identity assignment was blocked by existing referrers.
     #[error("Conflict: {target} is referenced by {referrers:?}")]
     Conflict {
+        /// ID or normalized identity that could not be changed.
         target: String,
+        /// Stable IDs of records causing the conflict.
         referrers: Vec<String>,
     },
 
+    /// Malformed or unsupported rows prevented a safe dependency decision.
     #[error("Cannot verify referential integrity: {details}")]
-    IntegrityUnknown { details: String },
+    IntegrityUnknown {
+        /// Records or queries that made the integrity result indeterminate.
+        details: String,
+    },
 
+    /// Profile deletion would violate the requested valid-profile floor.
     #[error(
         "Cannot delete profile: {remaining} valid profile(s) would remain, below the requested minimum of {minimum}"
     )]
-    MinimumValidProfiles { minimum: usize, remaining: usize },
+    MinimumValidProfiles {
+        /// Minimum number of valid persisted profiles requested by the caller.
+        minimum: usize,
+        /// Number of valid profiles that the deletion would leave.
+        remaining: usize,
+    },
 
+    /// A host-scheduler operation was requested without attaching a scheduler.
     #[error("Scheduler is not attached")]
     SchedulerUnavailable,
 
+    /// The attached host scheduler rejected an operation.
     #[error("Scheduler error: {0}")]
     Scheduler(String),
 
+    /// Durable state changed successfully but a secondary synchronization step failed.
     #[error(
         "Partial operation for '{target}': durable_succeeded={durable_succeeded}, error={error}"
     )]
     Partial {
+        /// Stable ID whose operation completed only partially.
         target: String,
+        /// Whether the durable configuration mutation committed.
         durable_succeeded: bool,
+        /// Failure from registry synchronization or another secondary step.
         error: String,
     },
 }
@@ -148,20 +185,30 @@ impl From<ConfigError> for ManagementError {
 /// Diagnostic category for a single record issue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagnosticCategory {
+    /// The record's schema version is not understood by this binary.
     UnsupportedSchemaVersion,
+    /// Serialized data could not be decoded or violated structural invariants.
     InvalidPayload,
+    /// A record named by an earlier listing disappeared before it was read.
     MissingRecord,
+    /// A referenced profile is absent or unusable.
     UnavailableProfile,
+    /// A referenced skill is unavailable to the selected profile.
     UnavailableSkill,
+    /// A migrated prompt is quarantined until its identity is renamed.
     NeedsRename,
+    /// A legacy approval value is not valid for user-facing profiles.
     ReadOnlyRejected,
+    /// A persisted prompt identity-state discriminator is not recognized.
     UnknownIdentityState,
 }
 
 /// A diagnostic for a single managed record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordDiagnostic {
+    /// Stable category suitable for programmatic handling.
     pub category: DiagnosticCategory,
+    /// Record-specific explanation suitable for display or logs.
     pub message: String,
 }
 
@@ -175,8 +222,11 @@ pub enum ManagedRecord<T> {
     Ready(T),
     /// The record exists but has one or more issues requiring attention.
     NeedsAttention {
+        /// Stable ID of the degraded record.
         id: String,
+        /// Partially usable decoded value, when safe decoding was possible.
         decoded: Option<T>,
+        /// Issues preventing the record from being considered ready.
         diagnostics: Vec<RecordDiagnostic>,
     },
 }
@@ -188,11 +238,31 @@ pub enum ManagedRecord<T> {
 /// A typed entity in the dependency graph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DependencyEntity {
-    ProviderCredential { slug: String },
-    Profile { id: String },
-    Prompt { id: String },
-    AutomationTask { id: String },
-    ScheduledTask { id: String },
+    /// Provider credential identified by provider slug.
+    ProviderCredential {
+        /// Provider slug used for credential resolution.
+        slug: String,
+    },
+    /// Agent profile identified by stable record ID.
+    Profile {
+        /// Stable profile ID.
+        id: String,
+    },
+    /// Stored prompt identified by immutable record ID.
+    Prompt {
+        /// Immutable prompt ID.
+        id: String,
+    },
+    /// Automation task identified by stable record ID.
+    AutomationTask {
+        /// Stable automation-task ID.
+        id: String,
+    },
+    /// Desired scheduled task identified by stable record ID.
+    ScheduledTask {
+        /// Stable schedule ID.
+        id: String,
+    },
 }
 
 /// Whether a link points in the dependency or dependent direction.
@@ -207,15 +277,20 @@ pub enum DependencyDirection {
 /// Whether a link is a direct reference or a transitive chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DependencyProximity {
+    /// The target or entity names the other without an intermediate record.
     Direct,
+    /// The relationship passes through one or more intermediate records.
     Transitive,
 }
 
 /// A single link in the dependency graph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DependencyLink {
+    /// Entity reached from the report target.
     pub entity: DependencyEntity,
+    /// Whether the reached entity is required by or depends on the target.
     pub direction: DependencyDirection,
+    /// Whether the relationship is immediate or crosses intermediate records.
     pub proximity: DependencyProximity,
     /// Ordered path from the target to this entity.
     pub path: Vec<DependencyEntity>,
@@ -224,7 +299,9 @@ pub struct DependencyLink {
 /// Result of querying the dependency impact of a target entity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DependencyImpactReport {
+    /// Entity from which dependency traversal began.
     pub target: DependencyEntity,
+    /// Discovered dependencies and dependents, each with an explicit path.
     pub links: Vec<DependencyLink>,
     /// Warnings about malformed or unsupported records that may have caused
     /// the report to omit dependency paths.
@@ -242,11 +319,15 @@ pub struct DependencyImpactReport {
 /// credential material.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CredentialSummary {
+    /// Provider that owns the persisted credential.
     pub provider_slug: String,
+    /// Recognized persisted mode, or [`CredentialMode::Unsupported`].
     pub credential_mode: CredentialMode,
     /// Persisted-state auth status derived from the credential mode.
     pub auth_status: ProviderAuthStatus,
+    /// Time at which a credential was first stored for this provider.
     pub created_at: DateTime<Utc>,
+    /// Time at which the credential was last replaced or refreshed.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -261,9 +342,13 @@ pub struct CredentialSummary {
 /// see the remaining desired-state drift and any host/diagnostic state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleDeletionOutcome {
+    /// Stable ID of the schedule targeted for deletion.
     pub schedule_id: String,
+    /// Whether removal from the host scheduler succeeded.
     pub host_removed: bool,
+    /// Whether deletion of the durable desired-state row succeeded.
     pub desired_deleted: bool,
+    /// Post-failure schedule status when host and desired state diverged.
     pub drift: Option<crate::scheduled_task::ScheduleStatus>,
 }
 
@@ -273,8 +358,17 @@ pub struct ScheduleDeletionOutcome {
 /// AgentProfile>>>` shared with a runtime. The trait is object-safe so the
 /// management service can hold either implementation without generics.
 pub trait ProfileRegistry: Send + Sync {
+    /// Insert or replace a profile after its durable write commits.
+    ///
+    /// Returns a synchronization diagnostic if the registry rejects the value.
     fn insert(&self, id: AgentProfileId, profile: AgentProfile) -> Result<(), String>;
+    /// Remove a profile after its durable deletion commits.
+    ///
+    /// Returns a synchronization diagnostic if the registry cannot remove it.
     fn remove(&self, id: &AgentProfileId) -> Result<(), String>;
+    /// Find another profile that owns `name` after normalization.
+    ///
+    /// `excluding_id` is ignored so an update does not conflict with itself.
     fn find_by_normalized_name(
         &self,
         name: &str,
@@ -317,7 +411,9 @@ impl ProfileRegistry for RwLock<HashMap<AgentProfileId, AgentProfile>> {
 
 /// Fallible registry abstraction for stored-prompt synchronization.
 pub trait PromptRegistry: Send + Sync {
+    /// Validate and insert or replace a prompt after durable persistence.
     fn register(&self, id: String, prompt: StoredPrompt) -> Result<(), String>;
+    /// Remove a prompt after durable deletion.
     fn unregister(&self, id: &str) -> Result<(), String>;
 }
 
@@ -343,6 +439,11 @@ impl PromptRegistry for RwLock<StoredPromptRegistry> {
 /// Constructed from a [`ConfigStore`] with optional attached registries and
 /// scheduler dependencies. Profile, prompt, automation-task, and credential
 /// management remain available when host scheduling is not attached.
+///
+/// Methods map durable failures into [`ManagementError::Storage`] or a more
+/// specific validation, reference, conflict, or integrity variant. Registry
+/// synchronization occurs after durable commits, so a synchronization failure
+/// is reported as [`ManagementError::Partial`] rather than rolled back.
 pub struct ConfigManagementService {
     store: ConfigStore,
     profile_registry: Option<Arc<dyn ProfileRegistry>>,
@@ -383,6 +484,7 @@ impl ConfigManagementService {
     }
 
     #[cfg(test)]
+    /// Attach a type-erased profile registry for management-service tests.
     pub(crate) fn with_profile_registry_for_test(
         mut self,
         registry: Arc<dyn ProfileRegistry>,
@@ -392,6 +494,7 @@ impl ConfigManagementService {
     }
 
     #[cfg(test)]
+    /// Attach a type-erased prompt registry for management-service tests.
     pub(crate) fn with_prompt_registry_for_test(
         mut self,
         registry: Arc<dyn PromptRegistry>,
@@ -2797,9 +2900,13 @@ fn profile_record_error_to_impact_reason(error: crate::profile::ProfileRecordErr
 /// A profile entry with timestamps.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManagedProfileEntry {
+    /// Stable profile record ID.
     pub id: AgentProfileId,
+    /// Decoded and structurally valid profile.
     pub profile: AgentProfile,
+    /// Time at which the profile row was first inserted.
     pub created_at: DateTime<Utc>,
+    /// Time at which the profile row was last replaced.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -2815,9 +2922,13 @@ pub type ManagedScheduledTaskRecord = ManagedRecord<ScheduledTask>;
 /// A prompt entry with timestamps and identity state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManagedPromptEntry {
+    /// Decoded prompt definition.
     pub prompt: StoredPrompt,
+    /// Persisted identity state controlling handle-based availability.
     pub identity_state: IdentityState,
+    /// Time at which the prompt row was first inserted.
     pub created_at: DateTime<Utc>,
+    /// Time at which the prompt row was last replaced or renamed.
     pub updated_at: DateTime<Utc>,
 }
 

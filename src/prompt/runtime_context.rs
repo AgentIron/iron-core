@@ -1,9 +1,17 @@
+//! Rendering of dynamic, non-conversational runtime context.
+
 use crate::capability::CapabilityRegistry;
 use crate::config::{ApprovalStrategy, Config, EmbeddedPythonConfig};
 
+/// Produces the `<runtime_context>` block supplied to the model.
 pub struct RuntimeContextRenderer;
 
 impl RuntimeContextRenderer {
+    /// Renders platform, workspace, approval, protection, and capability facts.
+    ///
+    /// Workspace roots and capabilities preserve their input iteration order.
+    /// Embedded-Python guidance is included only when both configuration and
+    /// effective tool availability enable it.
     pub fn render(
         config: &Config,
         capabilities: Option<&CapabilityRegistry>,

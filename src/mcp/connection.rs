@@ -1,3 +1,9 @@
+//! Connection lifecycle and execution routing for configured MCP servers.
+//!
+//! [`McpConnectionManager`] initializes transports, discovers tools, records
+//! health in the shared registry, and optionally retries failed connections
+//! with bounded exponential backoff until shutdown is requested.
+
 use crate::mcp::client::{create_transport_client, McpTransportClient};
 use crate::mcp::server::{McpServerHealth, McpServerRegistry, McpTransport};
 use std::collections::{HashMap, HashSet};
@@ -18,7 +24,9 @@ pub struct McpConnectionManager {
 
 /// Handle to an active MCP connection
 pub struct McpConnectionHandle {
+    /// Registry ID of the connected server.
     pub server_id: String,
+    /// Transport configuration used by this connection.
     pub transport: McpTransport,
     client: Box<dyn McpTransportClient>,
 }
@@ -41,9 +49,13 @@ impl Clone for McpConnectionHandle {
 /// Configuration for reconnection behavior
 #[derive(Debug, Clone)]
 pub struct ReconnectConfig {
+    /// Maximum consecutive automatic reconnect attempts per server.
     pub max_attempts: u32,
+    /// Initial reconnect delay in milliseconds.
     pub base_delay_ms: u64,
+    /// Upper bound for exponential reconnect delay in milliseconds.
     pub max_delay_ms: u64,
+    /// Interval between connection health scans, in seconds.
     pub health_check_interval_secs: u64,
 }
 
@@ -91,7 +103,10 @@ impl McpConnectionManager {
         self.in_flight_connections.write().await.remove(server_id);
     }
 
-    /// Start the connection manager with background health monitoring
+    /// Connects configured servers, then monitors and reconnects until shutdown.
+    ///
+    /// The method returns when the watched value becomes `true` or all shutdown
+    /// senders are dropped. Callers normally run it in a dedicated task.
     pub async fn start(&self, config: ReconnectConfig, mut shutdown_rx: watch::Receiver<bool>) {
         // Connect to all configured servers
         self.connect_all().await;
@@ -186,7 +201,7 @@ impl McpConnectionManager {
         }
     }
 
-    /// Connect to all configured MCP servers
+    /// Connects every configured server except those marked disabled.
     pub async fn connect_all(&self) {
         let servers = self.registry.list_servers();
         for server in servers {
@@ -197,7 +212,11 @@ impl McpConnectionManager {
         }
     }
 
-    /// Connect to a specific MCP server
+    /// Initializes, registers, and discovers tools for one configured server.
+    ///
+    /// Concurrent or redundant attempts for the same server are ignored.
+    /// Construction, initialization, and discovery failures are recorded in
+    /// the registry rather than returned to the caller.
     pub async fn connect_server(&self, server_id: &str) {
         let server = self.registry.get_server(server_id);
         if let Some(server) = server {
@@ -268,7 +287,7 @@ impl McpConnectionManager {
         }
     }
 
-    /// Disconnect from a specific MCP server
+    /// Closes and removes a server connection, returning its health to configured.
     pub async fn disconnect_server(&self, server_id: &str) {
         let mut connections = self.connections.write().await;
         if let Some(handle) = connections.remove(server_id) {
@@ -279,7 +298,7 @@ impl McpConnectionManager {
         }
     }
 
-    /// Check if a server is currently connected and healthy
+    /// Returns whether a live handle reports that the server is connected.
     pub async fn is_connected(&self, server_id: &str) -> bool {
         let connections = self.connections.read().await;
         if let Some(handle) = connections.get(server_id) {
@@ -289,7 +308,7 @@ impl McpConnectionManager {
         }
     }
 
-    /// Reconnect to a server (force disconnect and reconnect)
+    /// Forces a disconnect, clears automatic retry history, and reconnects.
     pub async fn reconnect_server(&self, server_id: &str) {
         info!("Forcing reconnection of MCP server: {}", server_id);
         self.disconnect_server(server_id).await;
@@ -334,7 +353,16 @@ impl McpConnectionManager {
         }
     }
 
-    /// Call a tool on an MCP server
+    /// Executes a server-local tool through an active MCP connection.
+    ///
+    /// Connection-like failures move the server to error health so the monitor
+    /// can reconnect it. Other tool failures are returned without changing
+    /// connection health.
+    ///
+    /// # Errors
+    ///
+    /// Returns an actionable error when the server is unknown, disabled,
+    /// connecting, unavailable, disconnected, or rejects the tool call.
     pub async fn call_tool(
         &self,
         server_id: &str,
@@ -458,7 +486,7 @@ impl McpConnectionManager {
         }
     }
 
-    /// Shutdown all connections
+    /// Closes all active connections and restores their registry health state.
     pub async fn shutdown(&self) {
         let server_ids: Vec<String> = {
             let connections = self.connections.read().await;
@@ -472,7 +500,7 @@ impl McpConnectionManager {
         info!("All MCP connections shutdown");
     }
 
-    /// Get the registry reference
+    /// Returns the shared server registry used by this manager.
     pub fn registry(&self) -> &McpServerRegistry {
         &self.registry
     }

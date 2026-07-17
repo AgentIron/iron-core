@@ -118,7 +118,9 @@ pub enum AutomationRunErrorCategory {
 /// Structured error carried in a failed, cancelled, or timed-out run result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutomationRunError {
+    /// Stable class used by callers to map the failure to an exit status.
     pub category: AutomationRunErrorCategory,
+    /// Human-readable failure detail.
     pub message: String,
 }
 
@@ -290,14 +292,19 @@ impl AutomationRunResult {
 /// Typed failure during execution-input resolution.
 #[derive(Debug, thiserror::Error)]
 pub enum ResolutionError {
+    /// The requested automation-task ID has no readable current record.
     #[error("automation task '{0}' not found")]
     TaskNotFound(String),
+    /// The task's stored-prompt reference does not exist.
     #[error("stored prompt '{0}' not found")]
     PromptNotFound(String),
+    /// The stored prompt has an unsupported schema or fails validation.
     #[error("stored prompt '{0}' has an unsupported schema version or invalid payload")]
     InvalidPrompt(String),
+    /// The explicit or default profile cannot be found in the supplied snapshot.
     #[error("profile '{}' not found", _0.as_str())]
     ProfileNotFound(AgentProfileId),
+    /// Persistent configuration access failed during resolution.
     #[error(transparent)]
     Store(#[from] ConfigError),
 }

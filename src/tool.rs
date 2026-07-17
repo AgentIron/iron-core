@@ -1,4 +1,4 @@
-//! Tool registry and definitions
+//! Tool registry and definitions.
 //!
 //! Tool registration, execution, and approval management.
 
@@ -10,7 +10,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// Type alias for a tool execution future.
+/// Owned, sendable future returned by asynchronous tool execution.
 pub type ToolFuture = Pin<Box<dyn Future<Output = RuntimeResult<Value>> + Send>>;
 
 /// Executable tool trait.
@@ -27,17 +27,17 @@ pub type ToolFuture = Pin<Box<dyn Future<Output = RuntimeResult<Value>> + Send>>
 /// `spawn_blocking`. Custom async `Tool` implementations that need to call
 /// blocking APIs should do the same.
 pub trait Tool: Send + Sync {
-    /// Get the tool definition (metadata for the model)
+    /// Return the tool definition exposed to the model.
     fn definition(&self) -> ToolDefinition;
 
-    /// Execute the tool with the given arguments.
+    /// Execute one tool call with its identifier and structured arguments.
     ///
     /// The returned future runs on the orchestration runtime.
     /// See the [trait-level contract](Tool#contract-do-not-block-the-orchestration-runtime)
     /// for blocking requirements.
     fn execute(&self, call_id: &str, arguments: Value) -> ToolFuture;
 
-    /// Check if this tool requires human approval
+    /// Return whether calls require human approval before execution.
     fn requires_approval(&self) -> bool;
 }
 
@@ -65,7 +65,7 @@ pub struct ToolDefinition {
 }
 
 impl ToolDefinition {
-    /// Create a new tool definition.
+    /// Create a tool definition that does not require approval by default.
     pub fn new<S1: Into<String>, S2: Into<String>>(
         name: S1,
         description: S2,
@@ -127,6 +127,9 @@ impl ToolRegistry {
     }
 
     /// Register or replace a tool by its definition name.
+    ///
+    /// Registration increments the mutation [`Self::version`], including when
+    /// an existing name is replaced.
     pub fn register<T: Tool + 'static>(&mut self, tool: T) {
         let definition = tool.definition();
         self.tools.insert(definition.name, Arc::new(tool));
@@ -144,6 +147,8 @@ impl ToolRegistry {
     }
 
     /// Return all tool definitions registered in this registry.
+    ///
+    /// Definition order is unspecified because the registry is hash-based.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.values().map(|t| t.definition()).collect()
     }
@@ -166,7 +171,7 @@ impl ToolRegistry {
         self.tools.is_empty()
     }
 
-    /// Remove all registered tools.
+    /// Remove all registered tools and increment the mutation version.
     pub fn clear(&mut self) {
         self.tools.clear();
         self.version += 1;
@@ -196,7 +201,10 @@ impl std::fmt::Debug for FunctionTool {
 }
 
 impl FunctionTool {
-    /// Create a new function-backed tool.
+    /// Create a tool backed by a synchronous function.
+    ///
+    /// The handler is dispatched through [`tokio::task::spawn_blocking`] by
+    /// [`Tool::execute`].
     pub fn new<F>(definition: ToolDefinition, handler: F) -> Self
     where
         F: Fn(Value) -> RuntimeResult<Value> + Send + Sync + 'static,

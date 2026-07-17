@@ -1,3 +1,8 @@
+//! SQLite-backed implementation of the durable configuration store.
+//!
+//! Writes preserve creation timestamps on replacement, migrations run when a
+//! store opens, and credential payloads are encrypted before reaching SQLite.
+
 use super::{
     crypto::{DynCredentialCipher, XChaCha20Poly1305Cipher},
     db,
@@ -14,6 +19,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Durable configuration store for AgentIron.
+///
+/// Clones share the same SQLite pool and credential cipher. Non-secret APIs
+/// remain usable when no cipher can be resolved; secret reads and writes then
+/// return [`ConfigError::KeyUnavailable`].
+///
+/// Unless a method documents a narrower condition, fallible operations can
+/// return [`ConfigError::Query`] for SQLite failures and serialization or
+/// deserialization variants for malformed values. Mutations return
+/// [`ConfigError::Validation`] when their documented invariants are not met.
 #[derive(Clone)]
 pub struct ConfigStore {
     pool: SqlitePool,
@@ -3125,7 +3139,7 @@ impl ConfigStore {
 
     /// Return the IDs of schedules with an unsupported schema version that
     /// reference the specified automation task. Unlike
-    /// [`schedules_referencing_task`], this inspects rows regardless of
+    /// [`Self::schedules_referencing_task`], this inspects rows regardless of
     /// schema version so it can surface unsupported-schema references that
     /// the typed `json_extract` queries miss.
     pub async fn unsupported_schedules_referencing_task(

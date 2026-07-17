@@ -1,5 +1,8 @@
+//! Persisted data produced by context compaction.
+
 use serde::{Deserialize, Serialize};
 
+/// Default approximate size target for an exported handoff bundle.
 pub const HANDOFF_DEFAULT_TARGET_TOKENS: usize = 15_000;
 
 /// A compressed block stores a freeform summary produced by model-driven
@@ -25,6 +28,9 @@ pub struct CompressedBlock {
 }
 
 impl CompressedBlock {
+    /// Creates a compressed block with the current UTC timestamp.
+    ///
+    /// Token estimates remain unset until the compaction caller supplies them.
     pub fn new(
         id: impl Into<String>,
         topic: impl Into<String>,
@@ -42,6 +48,7 @@ impl CompressedBlock {
         }
     }
 
+    /// Renders the summary and its provenance as provider-visible text.
     pub fn render_to_text(&self) -> String {
         format!(
             "[Compressed context: {}]\nID: {}\nSource range: {}\n{}\n",

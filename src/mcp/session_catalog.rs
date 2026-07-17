@@ -1,3 +1,10 @@
+//! Canonical, session-effective catalog of local, MCP, and plugin tools.
+//!
+//! Construction snapshots session enablement, runtime health, authentication,
+//! model-hidden tools, and profile filters. The same catalog supplies provider
+//! definitions, approval policy, diagnostics, and execution routing so model
+//! visibility cannot diverge from runtime availability checks.
+
 use crate::durable::DurableSession;
 use crate::mcp::server::{McpServerHealth, McpServerRegistry};
 use crate::mcp::McpConnectionManager;
@@ -55,11 +62,17 @@ pub struct SessionToolCatalog {
 /// Summary of an MCP server's status for a session.
 #[derive(Debug)]
 pub struct McpServerSummary {
+    /// Stable server ID used in namespaced tool names.
     pub id: String,
+    /// Human-readable configured server label.
     pub label: String,
+    /// Whether the server is enabled for this session.
     pub enabled: bool,
+    /// Current runtime connection health.
     pub health: McpServerHealth,
+    /// Whether session enablement and connection health both permit use.
     pub usable: bool,
+    /// Number of discovered tools usable by this session.
     pub tool_count: usize,
 }
 
@@ -148,7 +161,12 @@ impl SessionToolCatalog {
             .max_by_key(|(plugin_id, _)| plugin_id.len())
     }
 
-    /// Create a new session tool catalog for the given session.
+    /// Builds a snapshot of all tools visible and executable in a session.
+    ///
+    /// Local tools are included first, followed by tools from enabled connected
+    /// MCP servers and enabled healthy plugins whose auth requirements are met.
+    /// Model-hidden tools and the session's effective profile filter are then
+    /// applied to both definitions and execution handles.
     pub fn new(
         local_registry: Arc<ToolRegistry>,
         mcp_registry: Arc<McpServerRegistry>,
@@ -1047,9 +1065,15 @@ pub enum ToolSource {
     /// A tool registered directly in the local tool registry.
     Local,
     /// A tool provided by an MCP server.
-    Mcp { server_id: String },
+    Mcp {
+        /// Registry ID of the server that advertises the tool.
+        server_id: String,
+    },
     /// A tool provided by a WASM plugin.
-    Plugin { plugin_id: String },
+    Plugin {
+        /// Registry ID of the plugin that exports the tool.
+        plugin_id: String,
+    },
 }
 
 /// Diagnostic information about a tool's availability in the session.

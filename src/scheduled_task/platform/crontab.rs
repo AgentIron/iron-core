@@ -37,7 +37,9 @@ pub const MARKER_PREFIX: &str = "# iron-core-task:";
 /// A parsed owned crontab block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronOwnedBlock {
+    /// Stable schedule identifier encoded in the ownership markers.
     pub schedule_id: String,
+    /// Whether the cron line is active rather than commented out.
     pub enabled: bool,
     /// The cron schedule fields (e.g. `"0 9 * * *"`).
     pub cron_schedule: String,
@@ -102,7 +104,12 @@ pub enum CrontabSegment {
     /// Non-owned lines, preserved as-is.
     Other(String),
     /// A malformed owned block (unbalanced or duplicate markers).
-    Malformed { schedule_id: String, raw: String },
+    Malformed {
+        /// Schedule identifier recovered from the opening marker.
+        schedule_id: String,
+        /// Original block text preserved to avoid destructive rewriting.
+        raw: String,
+    },
 }
 
 impl ParsedCrontab {

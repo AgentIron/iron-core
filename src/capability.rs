@@ -4,7 +4,10 @@ use std::collections::HashMap;
 
 /// Stable identifier for a capability family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CapabilityId(pub &'static str);
+pub struct CapabilityId(
+    /// Namespaced identifier text; callers should treat this value as stable.
+    pub &'static str,
+);
 
 impl CapabilityId {
     /// Filesystem capability identifier.
@@ -178,6 +181,8 @@ impl CapabilityRegistry {
     }
 
     /// Return whether a capability requires permission.
+    ///
+    /// Unknown capabilities return `false`.
     pub fn requires_permission(&self, id: CapabilityId) -> bool {
         self.capabilities
             .get(&id)
@@ -186,6 +191,8 @@ impl CapabilityRegistry {
     }
 
     /// Return whether a capability is serviced by an ACP override.
+    ///
+    /// Unknown capabilities return `false`.
     pub fn is_acp_overridden(&self, id: CapabilityId) -> bool {
         self.backend_for(id) == Some(CapabilityBackend::AcpOverride)
     }

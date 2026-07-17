@@ -1,3 +1,9 @@
+//! Session-effective plugin tool availability, definitions, and execution wrappers.
+//!
+//! [`compute_tool_availability`] is the canonical health, authentication, and
+//! OAuth-scope gate. [`EffectivePluginToolView`] combines that result with
+//! session enablement, while [`PluginTool`] routes approved calls to the WASM host.
+
 use crate::durable::DurableSession;
 use crate::plugin::manifest::{ExportedTool, ToolAuthRequirements};
 use crate::plugin::registry::{PluginRegistry, PluginState};
@@ -19,6 +25,11 @@ pub struct PluginTool {
 }
 
 impl PluginTool {
+    /// Creates a namespaced plugin tool definition without an attached WASM host.
+    ///
+    /// The provider-visible name is `plugin_{plugin_id}_{tool_name}` and the
+    /// approval flag is copied from the manifest. Attach a host with
+    /// [`PluginTool::with_wasm_host`] before using the tool for execution.
     pub fn new(
         plugin_id: String,
         tool_name: String,
@@ -42,24 +53,29 @@ impl PluginTool {
         }
     }
 
+    /// Records whether this tool is gated by plugin authentication metadata.
     pub fn with_auth_requirement(mut self, requires_auth: bool) -> Self {
         self.requires_auth = requires_auth;
         self
     }
 
+    /// Attaches the WASM host used when the tool executes.
     pub fn with_wasm_host(mut self, host: Arc<WasmHost>) -> Self {
         self.wasm_host = Some(host);
         self
     }
 
+    /// Returns the registry ID of the exporting plugin.
     pub fn plugin_id(&self) -> &str {
         &self.plugin_id
     }
 
+    /// Returns the plugin-local tool name before runtime namespacing.
     pub fn original_tool_name(&self) -> &str {
         &self.tool_name
     }
 
+    /// Returns whether the manifest declares authentication for this tool.
     pub fn requires_auth(&self) -> bool {
         self.requires_auth
     }
@@ -119,7 +135,9 @@ pub enum UnavailableReason {
     AuthRequired,
     /// Tool requires specific scopes that are not covered by the granted credentials.
     ScopeMissing {
+        /// Complete set of OAuth scopes required by the tool.
         required: Vec<String>,
+        /// Required scopes absent from the current credential binding.
         missing: Vec<String>,
     },
     /// MCP server is not enabled for the current session.
@@ -135,7 +153,9 @@ pub enum UnavailableReason {
 /// Result of canonical per-tool availability computation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolAvailabilityResult {
+    /// Whether health and authentication permit execution now.
     pub available: bool,
+    /// First canonical reason for unavailability, or `None` when available.
     pub reason: Option<UnavailableReason>,
 }
 
@@ -230,6 +250,7 @@ pub struct EffectivePluginToolView {
 }
 
 impl EffectivePluginToolView {
+    /// Creates a view backed by the shared plugin registry and WASM host.
     pub fn new(plugin_registry: Arc<PluginRegistry>, wasm_host: Arc<WasmHost>) -> Self {
         Self {
             plugin_registry,
@@ -402,18 +423,26 @@ impl EffectivePluginToolView {
 /// Summary of plugin tool availability for a session
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SessionPluginToolSummary {
+    /// Status entry for every plugin registered with the runtime.
     pub plugins: Vec<PluginToolSummary>,
 }
 
 /// Summary for a single plugin
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PluginToolSummary {
+    /// Stable plugin registry ID.
     pub id: String,
+    /// Whether the plugin is enabled in the session.
     pub enabled: bool,
+    /// Whether runtime health is [`PluginHealth::Healthy`].
     pub healthy: bool,
+    /// Whether enablement and health permit considering its tools.
     pub usable: bool,
+    /// Number of tools whose health, auth, and scope gates are satisfied.
     pub tool_count: usize,
+    /// Whether the plugin manifest declares OAuth requirements.
     pub requires_auth: bool,
+    /// Whether the runtime currently holds authenticated state for the plugin.
     pub authenticated: bool,
 }
 

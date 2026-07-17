@@ -1,15 +1,39 @@
+//! Security and approval policies enforced by built-in tools.
+
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Resource scope to which a user approval applies.
 pub enum ApprovalScope {
-    Command(String),
-    FilePath(PathBuf),
-    DirectoryPath(PathBuf),
-    Domain(String),
+    /// Exactly one command string.
+    Command(
+        /// Exact command text.
+        String,
+    ),
+    /// Exactly one filesystem path.
+    FilePath(
+        /// Exact file path.
+        PathBuf,
+    ),
+    /// A directory and paths beneath it.
+    DirectoryPath(
+        /// Directory path that anchors the scope.
+        PathBuf,
+    ),
+    /// A domain and all of its subdomains.
+    Domain(
+        /// Domain suffix without a leading wildcard.
+        String,
+    ),
+    /// Every approval context.
     All,
 }
 
 impl ApprovalScope {
+    /// Return whether this scope covers `context`.
+    ///
+    /// Directory-to-directory matching is symmetric for ancestor and
+    /// descendant contexts; domain matching includes exact and subdomains.
     pub fn matches(&self, context: &ApprovalScopeMatch) -> bool {
         match (self, context) {
             (ApprovalScope::All, _) => true,
@@ -32,34 +56,64 @@ impl ApprovalScope {
 }
 
 #[derive(Debug, Clone)]
+/// Concrete resource context tested against an [`ApprovalScope`].
 pub enum ApprovalScopeMatch {
-    Command(String),
-    FilePath(PathBuf),
-    DirectoryPath(PathBuf),
-    Domain(String),
+    /// Command being considered for approval.
+    Command(
+        /// Command text being checked.
+        String,
+    ),
+    /// File path being considered for approval.
+    FilePath(
+        /// File path being checked.
+        PathBuf,
+    ),
+    /// Directory path being considered for approval.
+    DirectoryPath(
+        /// Directory path being checked.
+        PathBuf,
+    ),
+    /// Domain being considered for approval.
+    Domain(
+        /// Domain name being checked.
+        String,
+    ),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Lifetime of a granted approval.
 pub enum ApprovalDuration {
+    /// Consume the approval for one operation.
     Once,
+    /// Retain the approval for the current session.
     Session,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// Coarse network-access policy for built-in tools.
 pub enum NetworkPolicy {
+    /// Permit network operations, subject to private-address restrictions.
     #[default]
     AllowAll,
+    /// Deny all network operations.
     DenyAll,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Command shell available for built-in shell execution.
 pub enum ShellAvailability {
+    /// Bash is available.
     Bash,
+    /// PowerShell or PowerShell Core is available.
     PowerShell,
+    /// No supported shell was detected.
     None,
 }
 
 impl ShellAvailability {
+    /// Detect the first supported shell available on the process search path.
+    ///
+    /// Bash is preferred over PowerShell when both are present.
     pub fn detect() -> Self {
         if which_exists("bash") {
             Self::Bash
@@ -70,6 +124,7 @@ impl ShellAvailability {
         }
     }
 
+    /// Return the built-in tool name corresponding to this availability.
     pub fn tool_name(&self) -> Option<&'static str> {
         match self {
             Self::Bash => Some("bash"),
@@ -91,9 +146,13 @@ fn which_exists(cmd: &str) -> bool {
 }
 
 #[derive(Debug, Clone)]
+/// Security and approval settings applied to built-in tool operations.
 pub struct BuiltinToolPolicy {
+    /// How long a granted tool approval remains valid.
     pub approval_duration: ApprovalDuration,
+    /// Whether built-in network access is permitted.
     pub network: NetworkPolicy,
+    /// Whether file reads identify and summarize likely binary content.
     pub binary_detection_enabled: bool,
     /// When `false` (default), `webfetch` refuses requests that resolve to
     /// loopback, link-local, or private IP ranges. Opt in to reach internal
@@ -113,6 +172,16 @@ impl Default for BuiltinToolPolicy {
 }
 
 impl BuiltinToolPolicy {
+    /// Resolve `path` and verify that it lies within an allowed root.
+    ///
+    /// Relative paths are resolved against the first root. Existing ancestors
+    /// are canonicalized so symlinks cannot escape a root, while nonexistent
+    /// final components remain usable for file creation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when canonicalization fails, or an out-of-scope
+    /// error when the resolved path is outside all roots or retains `..`.
     pub fn validate_path(
         &self,
         path: &Path,

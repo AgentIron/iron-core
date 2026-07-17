@@ -1,3 +1,10 @@
+//! Skill discovery backends for filesystem and in-memory sources.
+//!
+//! Sources separate lightweight discovery from full loading. Filesystem
+//! sources parse `SKILL.md`, snapshot its instruction body and resources, and
+//! retain diagnostics; static sources provide the same lifecycle for skills
+//! supplied by an embedding client.
+
 use crate::skill::{
     LoadedSkill, SkillDiagnostic, SkillLocation, SkillMetadata, SkillOrigin, SkillResourceEntry,
 };
@@ -15,7 +22,8 @@ pub trait SkillSource: Send + Sync {
 
     /// Load a full skill by name.
     ///
-    /// Returns `None` if the skill is not found or cannot be loaded.
+    /// Returns `None` if the skill is not found or cannot be loaded. A loaded
+    /// value is an owned snapshot suitable for session-scoped activation.
     fn load(&self, name: &str) -> Option<LoadedSkill>;
 
     /// Return any diagnostics accumulated during discovery/load.
@@ -241,12 +249,15 @@ impl StaticSkillSource {
         }
     }
 
-    /// Register a skill with this source.
+    /// Register or replace a skill with this source by metadata ID.
     pub fn register(&mut self, skill: LoadedSkill) {
         self.skills.insert(skill.metadata.id.clone(), skill);
     }
 
-    /// Register a skill from raw components.
+    /// Register or replace a client-provided skill from raw components.
+    ///
+    /// The created skill has no filesystem location, resources, trust
+    /// requirement, or automatic activation.
     pub fn register_raw(
         &mut self,
         name: impl Into<String>,

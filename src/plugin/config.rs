@@ -1,3 +1,9 @@
+//! Plugin installation sources and artifact integrity verification.
+//!
+//! Local artifacts are read directly by the lifecycle manager. Remote artifacts
+//! carry a required cryptographic checksum that is verified before caching,
+//! manifest extraction, or WASM loading.
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -50,7 +56,12 @@ pub enum ChecksumAlgorithm {
 }
 
 impl Checksum {
-    /// Verify that the given bytes match this checksum
+    /// Verifies that bytes match the configured digest, ignoring hex case.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChecksumError::Mismatch`] with both expected and computed
+    /// hex digests when verification fails.
     pub fn verify(&self, data: &[u8]) -> Result<(), ChecksumError> {
         match self.algorithm {
             ChecksumAlgorithm::Sha256 => {
@@ -87,7 +98,12 @@ impl Checksum {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChecksumError {
     /// Checksum does not match the computed hash
-    Mismatch { expected: String, computed: String },
+    Mismatch {
+        /// Hex digest supplied by the plugin configuration.
+        expected: String,
+        /// Hex digest computed from the artifact bytes.
+        computed: String,
+    },
 }
 
 impl std::fmt::Display for ChecksumError {

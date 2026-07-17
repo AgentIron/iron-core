@@ -1,3 +1,5 @@
+//! High-level agent, connection, session, and streaming prompt APIs.
+
 use crate::plugin::rich_output::{transcript_text as plugin_transcript_text, view as plugin_view};
 use crate::{
     capability::{CapabilityBackend, CapabilityDescriptor, CapabilityId},
@@ -98,17 +100,23 @@ pub struct PermissionRequest {
 ///
 /// # Event Ordering
 ///
-/// Events are emitted in the order they occur:
-/// 1. Zero or more [`Status`](PromptEvent::Status) events
-/// 2. Zero or more [`Output`](PromptEvent::Output) events (text from the model)
-/// 3. Zero or more [`ToolCall`](PromptEvent::ToolCall) events
-/// 4. For each tool requiring approval: an [`ApprovalRequest`](PromptEvent::ApprovalRequest)
-/// 5. For each tool call: a [`ToolResult`](PromptEvent::ToolResult)
-/// 6. Finally, a [`Complete`](PromptEvent::Complete) event
+/// Events preserve runtime occurrence order and may interleave across inference
+/// iterations. For a given tool, [`ToolCall`](PromptEvent::ToolCall) precedes an
+/// optional [`ApprovalRequest`](PromptEvent::ApprovalRequest), which precedes
+/// its terminal [`ToolResult`](PromptEvent::ToolResult). Compaction start events
+/// precede their matching finish or failure event. A successful stream task
+/// emits one [`Complete`](PromptEvent::Complete) event last.
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// use iron_core::{Config, IronAgent, PromptEvent};
+/// use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let provider = ProviderConnection::from_profile(ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"), RuntimeConfig::new("sk-example"))?;
+/// # let agent = IronAgent::new(Config::default(), provider);
+/// # let session = agent.connect().create_session()?;
 /// let (handle, mut events) = session.prompt_stream("Hello");
 /// while let Some(event) = events.next().await {
 ///     match event {
@@ -121,6 +129,8 @@ pub struct PermissionRequest {
 ///         _ => {}
 ///     }
 /// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub enum PromptEvent {
@@ -323,7 +333,14 @@ pub enum PromptStatus {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// use iron_core::{Config, IronAgent};
+/// use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let provider = ProviderConnection::from_profile(ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"), RuntimeConfig::new("sk-example"))?;
+/// # let agent = IronAgent::new(Config::default(), provider);
+/// # let session = agent.connect().create_session()?;
 /// let (handle, mut events) = session.prompt_stream("Hello");
 ///
 /// // Later, when an approval request is received...
@@ -331,6 +348,8 @@ pub enum PromptStatus {
 ///
 /// // Or cancel the entire prompt
 /// handle.cancel().await;
+/// # Ok(())
+/// # }
 /// ```
 pub struct PromptHandle {
     approval_resolvers:
@@ -409,7 +428,7 @@ impl std::fmt::Debug for PromptHandle {
     }
 }
 
-/// A stream of prompt events.
+/// Asynchronous event receiver for one streaming prompt.
 ///
 /// Returned by [`AgentSession::prompt_stream`] and
 /// [`AgentSession::prompt_stream_with_blocks`], this struct provides
@@ -418,7 +437,14 @@ impl std::fmt::Debug for PromptHandle {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// use iron_core::{Config, IronAgent, PromptEvent};
+/// use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let provider = ProviderConnection::from_profile(ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"), RuntimeConfig::new("sk-example"))?;
+/// # let agent = IronAgent::new(Config::default(), provider);
+/// # let session = agent.connect().create_session()?;
 /// let (handle, mut events) = session.prompt_stream("Hello");
 ///
 /// while let Some(event) = events.next().await {
@@ -428,6 +454,8 @@ impl std::fmt::Debug for PromptHandle {
 ///         _ => {}
 ///     }
 /// }
+/// # Ok(())
+/// # }
 /// ```
 pub struct PromptEvents {
     rx: tokio::sync::mpsc::UnboundedReceiver<PromptEvent>,
@@ -506,7 +534,7 @@ fn default_profile_registry() -> ProfileRegistry {
 // IronAgent
 // ---------------------------------------------------------------------------
 
-/// The main entry point for interacting with an Iron agent.
+/// Top-level owner of the runtime and its profile and stored-prompt registries.
 ///
 /// `IronAgent` is the top-level type for creating and managing agent connections.
 /// It owns the runtime, provider, and tool registry. Use [`IronAgent::connect`]
@@ -514,20 +542,22 @@ fn default_profile_registry() -> ProfileRegistry {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use iron_core::{IronAgent, Config};
+/// ```no_run
+/// use iron_core::{Config, FunctionTool, IronAgent};
 /// use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
+/// use serde_json::json;
 ///
 /// let config = Config::default();
 /// let provider = ProviderConnection::from_profile(
 ///     ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"),
-///     RuntimeConfig::new("sk-..."),
+///     RuntimeConfig::new("sk-example"),
 /// )
 /// .expect("provider config should be valid");
 /// let agent = IronAgent::new(config, provider);
 ///
 /// // Register custom tools
-/// agent.register_tool(my_custom_tool);
+/// let ping = FunctionTool::simple("ping", "Return pong", |_| Ok(json!("pong")));
+/// agent.register_tool(ping);
 ///
 /// // Connect and create a session
 /// let conn = agent.connect();
@@ -1154,12 +1184,15 @@ type SyncPermissionHandler = Rc<RefCell<Option<Box<dyn Fn(&str) -> PermissionVer
 /// Inspectable metadata for a hidden runtime session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HiddenSessionInfo {
+    /// Identifier of the hidden session.
     pub session_id: SessionId,
+    /// Connection that directly owns the hidden session.
     pub connection_id: ConnectionId,
+    /// Parent session for delegated work, when registered.
     pub parent_session_id: Option<SessionId>,
 }
 
-/// A connection to an Iron agent.
+/// Connection-scoped owner for sessions, events, and permission callbacks.
 ///
 /// Connections are the primary interface for creating and managing sessions.
 /// Each connection has its own event queue and can set up permission handlers
@@ -1174,7 +1207,12 @@ pub struct HiddenSessionInfo {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// use iron_core::{Config, IronAgent, PermissionVerdict};
+/// use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
+///
+/// # let provider = ProviderConnection::from_profile(ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"), RuntimeConfig::new("sk-example")).unwrap();
+/// # let agent = IronAgent::new(Config::default(), provider);
 /// let conn = agent.connect();
 ///
 /// // Set up a permission handler
@@ -1787,7 +1825,7 @@ fn convert_notification_to_prompt_event_with_index(
 // AgentSession
 // ---------------------------------------------------------------------------
 
-/// A session for interacting with the agent.
+/// Connection-owned handle to one durable conversation and its active prompt.
 ///
 /// Sessions maintain conversation history and context. Each session is owned
 /// by the connection that created it. Use the session to send prompts and
@@ -1809,7 +1847,14 @@ fn convert_notification_to_prompt_event_with_index(
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// use iron_core::{Config, ContentBlock, IronAgent, PromptEvent};
+/// use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let provider = ProviderConnection::from_profile(ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"), RuntimeConfig::new("sk-example"))?;
+/// # let agent = IronAgent::new(Config::default(), provider);
+/// # let conn = agent.connect();
 /// let session = conn.create_session().unwrap();
 ///
 /// // Using the streaming API (text-only convenience)
@@ -1823,10 +1868,9 @@ fn convert_notification_to_prompt_event_with_index(
 /// }
 ///
 /// // Using the streaming API (multimodal)
-/// use iron_core::ContentBlock;
 /// let blocks = vec![
 ///     ContentBlock::text("Describe this image:"),
-///     ContentBlock::Image { data: base64_data, mime_type: "image/png".into() },
+///     ContentBlock::Image { data: "base64-data".into(), mime_type: "image/png".into() },
 /// ];
 /// let (handle, mut events) = session.prompt_stream_with_blocks(&blocks);
 /// while let Some(event) = events.next().await {
@@ -1836,6 +1880,8 @@ fn convert_notification_to_prompt_event_with_index(
 ///         _ => {}
 ///     }
 /// }
+/// # Ok(())
+/// # }
 /// ```
 pub struct AgentSession {
     id: SessionId,
@@ -1942,17 +1988,23 @@ impl AgentSession {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use iron_core::facade::{IronAgent, AgentSession};
+    /// ```no_run
+    /// use iron_core::{Config, IronAgent};
     /// use iron_core::provider_credential::domain::{ProviderPromptContext, ProviderSlug};
+    /// use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
     ///
-    /// let session: AgentSession = /* ... */;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let provider = ProviderConnection::from_profile(ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"), RuntimeConfig::new("sk-example"))?;
+    /// # let agent = IronAgent::new(Config::default(), provider);
+    /// # let session = agent.connect().create_session()?;
     /// let context = ProviderPromptContext {
     ///     provider_slug: ProviderSlug::new("kimi-code"),
     ///     model: "kimi-for-coding".into(),
     ///     api_key: None,
     /// };
     /// let outcome = session.prompt_managed("Explain closures in Rust", context).await;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn prompt_managed(
         &self,
@@ -1981,18 +2033,24 @@ impl AgentSession {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use iron_core::facade::{AgentSession, ContentBlock};
+    /// ```no_run
+    /// use iron_core::{Config, ContentBlock, IronAgent};
     /// use iron_core::provider_credential::domain::{ProviderPromptContext, ProviderSlug};
+    /// use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
     ///
-    /// let session: AgentSession = /* ... */;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let provider = ProviderConnection::from_profile(ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"), RuntimeConfig::new("sk-example"))?;
+    /// # let agent = IronAgent::new(Config::default(), provider);
+    /// # let session = agent.connect().create_session()?;
     /// let context = ProviderPromptContext {
     ///     provider_slug: ProviderSlug::new("kimi-code"),
     ///     model: "kimi-for-coding".into(),
     ///     api_key: Some("sk-...".into()),
     /// };
-    /// let blocks = vec![ContentBlock::Text("Describe this image".into())];
+    /// let blocks = vec![ContentBlock::text("Describe this image")];
     /// let outcome = session.prompt_with_blocks_managed(&blocks, context).await;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn prompt_with_blocks_managed(
         &self,
@@ -2022,7 +2080,14 @@ impl AgentSession {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// use iron_core::{Config, IronAgent, PromptEvent};
+    /// use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let provider = ProviderConnection::from_profile(ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"), RuntimeConfig::new("sk-example"))?;
+    /// # let agent = IronAgent::new(Config::default(), provider);
+    /// # let session = agent.connect().create_session()?;
     /// let (handle, mut events) = session.prompt_stream("Hello");
     ///
     /// while let Some(event) = events.next().await {
@@ -2035,6 +2100,8 @@ impl AgentSession {
     ///         _ => {}
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn prompt_stream(&self, text: &str) -> (PromptHandle, PromptEvents) {
         let acp_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
@@ -2057,13 +2124,18 @@ impl AgentSession {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use iron_core::ContentBlock;
+    /// ```no_run
+    /// use iron_core::{Config, ContentBlock, IronAgent, PromptEvent};
+    /// use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
     ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let provider = ProviderConnection::from_profile(ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"), RuntimeConfig::new("sk-example"))?;
+    /// # let agent = IronAgent::new(Config::default(), provider);
+    /// # let session = agent.connect().create_session()?;
     /// let blocks = vec![
     ///     ContentBlock::text("Describe this image:"),
     ///     ContentBlock::Image {
-    ///         data: base64_data,
+    ///         data: "base64-data".into(),
     ///         mime_type: "image/png".into(),
     ///     },
     /// ];
@@ -2076,6 +2148,8 @@ impl AgentSession {
     ///         _ => {}
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn prompt_stream_with_blocks(
         &self,
@@ -2158,10 +2232,15 @@ impl AgentSession {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// use iron_core::{Config, IronAgent};
     /// use iron_core::provider_credential::domain::{ProviderPromptContext, ProviderSlug};
+    /// use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
     ///
-    /// let session: AgentSession = /* ... */;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let provider = ProviderConnection::from_profile(ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"), RuntimeConfig::new("sk-example"))?;
+    /// # let agent = IronAgent::new(Config::default(), provider);
+    /// # let session = agent.connect().create_session()?;
     /// let context = ProviderPromptContext {
     ///     provider_slug: ProviderSlug::new("kimi-code"),
     ///     model: "kimi-for-coding".into(),
@@ -2171,6 +2250,8 @@ impl AgentSession {
     /// while let Some(event) = events.next().await {
     ///     // handle PromptEvent
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn prompt_stream_managed(
         &self,
@@ -2188,18 +2269,24 @@ impl AgentSession {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use iron_core::facade::{AgentSession, ContentBlock};
+    /// ```no_run
+    /// use iron_core::{Config, ContentBlock, IronAgent};
     /// use iron_core::provider_credential::domain::{ProviderPromptContext, ProviderSlug};
+    /// use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
     ///
-    /// let session: AgentSession = /* ... */;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let provider = ProviderConnection::from_profile(ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"), RuntimeConfig::new("sk-example"))?;
+    /// # let agent = IronAgent::new(Config::default(), provider);
+    /// # let session = agent.connect().create_session()?;
     /// let context = ProviderPromptContext {
     ///     provider_slug: ProviderSlug::new("kimi-code"),
     ///     model: "kimi-for-coding".into(),
     ///     api_key: None,
     /// };
-    /// let blocks = vec![ContentBlock::Text("Describe this".into())];
+    /// let blocks = vec![ContentBlock::text("Describe this")];
     /// let (handle, mut events) = session.prompt_stream_with_blocks_managed(&blocks, context);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn prompt_stream_with_blocks_managed(
         &self,

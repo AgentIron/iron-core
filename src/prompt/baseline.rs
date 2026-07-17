@@ -1,3 +1,6 @@
+//! Core-owned baseline instructions included in composed system prompts.
+
+/// Default behavioral instructions supplied to the core-guidelines prompt section.
 pub const BASELINE_PROMPT: &str = r##"<baseline_instructions>
 You are a tool-using agent. Execute tasks by choosing tools and interpreting their results.
 Follow instructions from the user, from repository instruction files, and from session-level instructions.

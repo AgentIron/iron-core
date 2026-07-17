@@ -1,3 +1,5 @@
+//! Prompt inference loop, permission flow, tool execution, and turn cleanup.
+
 use crate::config::Config;
 use crate::connection::SharedClientChannel;
 use crate::delegation::{
@@ -68,6 +70,7 @@ fn tie_off_cancelled(durable: &Arc<Mutex<DurableSession>>) {
     }
 }
 
+/// Executes provider iterations and tool calls for one admitted prompt.
 pub(crate) struct PromptRunner {
     runtime: IronRuntime,
     managed_provider: Option<Box<dyn Provider>>,
@@ -78,6 +81,7 @@ pub(crate) struct PromptRunner {
 }
 
 impl PromptRunner {
+    /// Creates a runner that uses the runtime's default provider.
     pub(crate) fn new(runtime: IronRuntime) -> Self {
         Self {
             runtime,
@@ -88,6 +92,10 @@ impl PromptRunner {
         }
     }
 
+    /// Creates a runner bound to an explicitly resolved managed provider.
+    ///
+    /// `context` is retained so an OAuth-backed authentication failure can
+    /// force one credential refresh and retry.
     pub(crate) fn new_managed(
         runtime: IronRuntime,
         provider: Box<dyn Provider>,
@@ -103,6 +111,7 @@ impl PromptRunner {
     }
 
     #[cfg(test)]
+    /// Creates a managed runner with a deterministic retry provider for tests.
     pub(crate) fn new_managed_with_retry_provider_for_test(
         runtime: IronRuntime,
         provider: Box<dyn Provider>,
@@ -146,6 +155,14 @@ impl PromptRunner {
         self.runtime.force_refresh_managed_provider(context).await
     }
 
+    /// Runs provider and tool iterations until a terminal ACP stop reason.
+    ///
+    /// Each iteration builds a request from a durable snapshot, streams output
+    /// before executing proposed tools, resolves approvals in proposal order,
+    /// and executes approved calls sequentially. Cancellation ties off every
+    /// running tool record before returning. Request and provider failures are
+    /// persisted as agent text and terminate with `EndTurn`; exceeding
+    /// `max_iterations` returns `MaxTurnRequests`.
     pub(crate) async fn run(
         &self,
         durable: &Arc<Mutex<DurableSession>>,
@@ -2475,6 +2492,10 @@ impl PromptRunner {
         .await;
     }
 
+    /// Emits a durable and client-visible warning when post-turn pressure is critical.
+    ///
+    /// This check runs only when context management is enabled. Notification
+    /// delivery is best effort and occurs after the warning is persisted.
     pub(crate) async fn maybe_compact_post_turn(
         &self,
         durable: &Arc<Mutex<DurableSession>>,

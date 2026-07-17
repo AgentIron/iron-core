@@ -1,16 +1,27 @@
+//! JSON-RPC wire types used by the MCP transport clients.
+//!
+//! The types in [`messages`] model the initialize, paginated tool discovery,
+//! and tool execution exchanges. Conversion helpers reduce MCP content blocks
+//! to the JSON values and error strings returned by the runtime tool layer.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// JSON-RPC 2.0 request
+/// An outbound JSON-RPC 2.0 request.
 #[derive(Debug, Clone, Serialize)]
 pub struct JsonRpcRequest {
+    /// JSON-RPC protocol version, always `"2.0"` for requests built here.
     pub jsonrpc: String,
+    /// MCP method to invoke.
     pub method: String,
+    /// Method-specific parameters.
     pub params: Value,
+    /// Request identifier used to correlate the response.
     pub id: u64,
 }
 
 impl JsonRpcRequest {
+    /// Builds a JSON-RPC 2.0 request with the supplied method, parameters, and ID.
     pub fn new(method: &str, params: Value, id: u64) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
@@ -21,129 +32,180 @@ impl JsonRpcRequest {
     }
 }
 
-/// JSON-RPC 2.0 response
+/// An inbound JSON-RPC 2.0 response.
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonRpcResponse {
+    /// JSON-RPC protocol version reported by the server.
     pub jsonrpc: String,
+    /// Successful result payload, when present.
     pub result: Option<Value>,
+    /// Structured RPC error, when the request failed.
     pub error: Option<JsonRpcError>,
+    /// Correlation ID; some servers omit it from bootstrap responses.
     #[serde(default)]
     pub id: Option<u64>,
 }
 
-/// JSON-RPC 2.0 error
+/// A JSON-RPC 2.0 error object returned by an MCP server.
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonRpcError {
+    /// Numeric JSON-RPC error code.
     pub code: i32,
+    /// Human-readable error message.
     pub message: String,
+    /// Optional server-defined diagnostic payload.
     pub data: Option<Value>,
 }
 
-/// MCP protocol messages
+/// Method-specific MCP request, response, tool, and content types.
 pub mod messages {
     use serde::{Deserialize, Serialize};
     use serde_json::Value;
 
-    /// Initialize request
+    /// Client capabilities sent during MCP connection initialization.
     #[derive(Debug, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct InitializeRequest {
+        /// MCP protocol version requested by the client.
         pub protocol_version: String,
+        /// Client capability object.
         pub capabilities: Value,
+        /// Name and version identifying the client implementation.
         pub client_info: ClientInfo,
     }
 
+    /// Name and version identifying an MCP client.
     #[derive(Debug, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct ClientInfo {
+        /// Client implementation name.
         pub name: String,
+        /// Client implementation version.
         pub version: String,
     }
 
-    /// Initialize response
+    /// Server capabilities returned after successful initialization.
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct InitializeResponse {
+        /// MCP protocol version selected by the server.
         pub protocol_version: String,
+        /// Server capability object.
         pub capabilities: Value,
+        /// Name and version identifying the server implementation.
         pub server_info: ServerInfo,
     }
 
+    /// Name and version identifying an MCP server.
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct ServerInfo {
+        /// Server implementation name.
         pub name: String,
+        /// Server implementation version.
         pub version: String,
     }
 
-    /// Tool list request
+    /// A request for one page of the server's tool catalog.
     #[derive(Debug, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct ListToolsRequest {
+        /// Opaque pagination cursor returned by the previous page.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub cursor: Option<String>,
     }
 
-    /// Tool list response
+    /// One page of tools discovered from an MCP server.
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct ListToolsResponse {
+        /// Tool definitions in this page.
         pub tools: Vec<Tool>,
+        /// Cursor for the next page, or `None` when discovery is complete.
         #[serde(default)]
         pub next_cursor: Option<String>,
     }
 
+    /// A tool definition advertised by an MCP server.
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Tool {
+        /// Server-local tool name.
         pub name: String,
+        /// Description presented to the model.
         pub description: String,
+        /// JSON Schema describing accepted arguments.
         pub input_schema: Value,
     }
 
-    /// Tool call request
+    /// A request to execute a named MCP tool.
     #[derive(Debug, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct CallToolRequest {
+        /// Server-local name of the tool to invoke.
         pub name: String,
+        /// JSON arguments supplied to the tool.
         pub arguments: Value,
     }
 
-    /// Tool call response
+    /// Content blocks returned by an MCP tool invocation.
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct CallToolResponse {
+        /// Ordered content emitted by the tool.
         pub content: Vec<ToolContent>,
+        /// Whether the content describes a tool-level failure.
         #[serde(default)]
         pub is_error: bool,
     }
 
+    /// A content block returned by an MCP tool.
     #[derive(Debug, Deserialize)]
     #[serde(tag = "type")]
     pub enum ToolContent {
+        /// Plain text content.
         #[serde(rename = "text")]
-        Text { text: String },
+        Text {
+            /// Text emitted by the tool.
+            text: String,
+        },
+        /// Base64-encoded image content.
         #[serde(rename = "image")]
         Image {
+            /// Base64-encoded image bytes.
             data: String,
+            /// Media type of the encoded image.
             #[serde(rename = "mimeType")]
             mime_type: String,
         },
+        /// Text or binary resource content.
         #[serde(rename = "resource")]
-        Resource { resource: Resource },
+        Resource {
+            /// Resource descriptor returned by the server.
+            resource: Resource,
+        },
     }
 
+    /// Resource content referenced or embedded by a tool response.
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Resource {
+        /// URI identifying the resource.
         pub uri: String,
+        /// Optional media type of the resource.
         pub mime_type: Option<String>,
+        /// Optional inline UTF-8 text content.
         pub text: Option<String>,
+        /// Optional inline base64-encoded binary content.
         pub blob: Option<String>,
     }
 }
 
-/// Convert tool content to JSON value
+/// Converts MCP content blocks into the runtime's compact JSON result shape.
+///
+/// A single block becomes `{"result": ...}` and multiple blocks become
+/// `{"results": [...]}`. Images and non-text resources are represented by
+/// descriptive placeholders rather than exposing binary data.
 pub fn tool_content_to_value(content: Vec<messages::ToolContent>) -> Value {
     let mut texts = Vec::new();
     for item in content {
@@ -171,7 +233,10 @@ pub fn tool_content_to_value(content: Vec<messages::ToolContent>) -> Value {
     }
 }
 
-/// Convert tool error content into a useful error string.
+/// Converts MCP error content into a useful error string.
+///
+/// Text blocks are joined with newlines; if no textual representation is
+/// available, the normalized JSON value is serialized instead.
 pub fn tool_error_to_string(content: Vec<messages::ToolContent>) -> String {
     let value = tool_content_to_value(content);
 

@@ -1,3 +1,5 @@
+//! Runtime tool adapter for sandboxed embedded-Python execution.
+
 use crate::error::RuntimeResult;
 use crate::tool::{Tool, ToolDefinition, ToolFuture};
 use serde_json::{json, Value};
@@ -11,6 +13,12 @@ use crate::embedded_python::{ScriptRun, ToolExecutorFn};
 #[cfg(feature = "embedded-python")]
 use std::sync::Arc;
 
+/// Tool implementation that executes Python source in the embedded sandbox.
+///
+/// The tool always requires approval. With the `embedded-python` feature it
+/// enforces the default [`crate::config::EmbeddedPythonConfig`] limits and can
+/// delegate script child calls to a configured executor. Without that feature,
+/// execution returns a tool error explaining how to enable it.
 pub struct PythonExecTool {
     definition: ToolDefinition,
     #[cfg(feature = "embedded-python")]
@@ -24,6 +32,7 @@ impl Default for PythonExecTool {
 }
 
 impl PythonExecTool {
+    /// Creates a `python_exec` tool without a child tool-call executor.
     pub fn new() -> Self {
         let definition = ToolDefinition::new(
             "python_exec",
@@ -51,6 +60,7 @@ impl PythonExecTool {
     }
 
     #[cfg(feature = "embedded-python")]
+    /// Installs the host callback used for tool calls made by Python scripts.
     pub fn with_tool_executor(mut self, executor: Arc<ToolExecutorFn>) -> Self {
         self.tool_executor = Some(executor);
         self
@@ -87,6 +97,10 @@ impl PythonExecTool {
 }
 
 #[cfg(feature = "embedded-python")]
+/// Converts structured script output to the JSON returned by `python_exec`.
+///
+/// Optional `result`, `error`, and `child_outcomes` members are omitted when
+/// absent. Status and error kinds use stable snake-case strings.
 pub fn script_output_to_json(output: &ScriptOutput) -> Value {
     let status_str = match output.status {
         ScriptExecStatus::Completed => "completed",

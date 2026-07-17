@@ -9,13 +9,17 @@ use iron_providers::{ProviderProfile, ProviderRegistry};
 
 /// Build an effective provider registry from built-ins plus persisted profiles.
 ///
-/// Starts with [`ProviderRegistry::default()` (which loads all built-in
-/// profiles) and applies each persisted provider profile. Persisted profiles
+/// Starts with [`ProviderRegistry::default`] (which loads all built-in profiles)
+/// and applies each persisted provider profile. Persisted profiles
 /// with built-in slugs override the built-in; persisted profiles with new slugs
 /// are added alongside built-ins.
 ///
 /// Invalid stored profiles are skipped with a warning rather than failing the
 /// entire operation.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] if persisted provider-profile rows cannot be listed.
 pub async fn build_effective_registry(
     store: &ConfigStore,
 ) -> Result<ProviderRegistry, ConfigError> {

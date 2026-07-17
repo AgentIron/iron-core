@@ -18,38 +18,62 @@ use crate::durable::{DurableSession, SessionId, StructuredMessage};
 use crate::skill::SessionSkillState;
 use serde::{Deserialize, Serialize};
 
+/// Current serialized handoff bundle format version.
 pub const HANDOFF_BUNDLE_VERSION: &str = "1";
 
+/// Provenance and approximate size of a handoff bundle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandoffBundleMetadata {
+    /// Metadata schema version.
     pub version: String,
+    /// Model reported by the exporter.
     pub source_model: String,
+    /// Source provider name, when known.
     pub source_provider: Option<String>,
+    /// Display form of the source session identifier.
     pub source_session_id: String,
+    /// Heuristic size of instructions, summaries, tail, and active skills.
     pub size_estimate_tokens: usize,
 }
 
+/// Portable continuity state transferred between durable sessions.
+///
+/// The bundle owns cloned instructions, summaries, recent messages, skill
+/// state, profile snapshots, and model-switch state. Runtime-local MCP and
+/// plugin enablement are intentionally absent. Managed provider credentials
+/// are included when present, so serialized bundles must be handled as secrets.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandoffBundle {
+    /// Bundle schema version.
     pub version: String,
+    /// Explicit source-session instructions.
     pub instructions: Option<String>,
+    /// Human-readable continuity and portability note.
     pub handoff_note: String,
+    /// Durable summaries selected for transfer.
     pub compressed_blocks: Vec<CompressedBlock>,
+    /// Recent structured messages selected for transfer.
     pub recent_tail: Vec<StructuredMessage>,
+    /// Activated skill state preserved across runtimes.
     pub skill_state: SessionSkillState,
+    /// Bundle provenance and size estimate.
     pub metadata: HandoffBundleMetadata,
-    /// Model switch history preserved across handoffs
+    /// Model-switch history preserved across handoffs.
     pub model_switch_history: Vec<ModelSwitchRecord>,
-    /// Current model after the most recent switch
+    /// Current model after the most recent switch.
     pub current_model: Option<String>,
-    /// Current provider slug (if managed)
+    /// Current managed-provider slug, if any.
     pub current_provider_slug: Option<String>,
-    /// Current provider API key (if managed)
-    pub current_provider_api_key: Option<String>,
+    /// Current managed-provider API key, if any.
+    ///
+    /// Wrapped in a [`crate::secret::SecretString`] so the credential is redacted
+    /// from debug output. It still serializes transparently because serialized
+    /// bundles must remain usable as portable secrets.
+    pub current_provider_api_key: Option<crate::secret::SecretString>,
     /// Profile identity prompt selected for this session, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_identity: Option<String>,
-    /// Tools hidden due to model capability differences
+    /// Tools hidden due to model capability differences.
     #[serde(default)]
     pub hidden_tools: Vec<String>,
     /// The profile id last used for this session, if any.
@@ -73,9 +97,13 @@ pub struct HandoffBundle {
         Option<crate::provider_credential::domain::ProviderPromptContext>,
 }
 
+/// Validator and builder for portable handoff bundles.
 pub struct HandoffExporter;
 
 impl HandoffExporter {
+    /// Returns whether the session has no pending or running tool calls.
+    ///
+    /// Handoff export is restricted to this idle tool lifecycle boundary.
     pub fn can_export(session: &DurableSession) -> bool {
         !session.tool_records.iter().any(|r| {
             matches!(
@@ -86,6 +114,15 @@ impl HandoffExporter {
         })
     }
 
+    /// Clones selected continuity state into a portable bundle.
+    ///
+    /// `compressed_blocks` and `tail` are caller-selected views; they need not
+    /// equal all context currently owned by `session`. Runtime-local tool and
+    /// plugin enablement are not exported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error while a tool call is pending approval or running.
     pub fn export(
         session: &DurableSession,
         model: &str,
@@ -178,9 +215,22 @@ impl HandoffExporter {
     }
 }
 
+/// Hydrates durable sessions from owned handoff bundles.
 pub struct HandoffImporter;
 
 impl HandoffImporter {
+    /// Merges an owned bundle into an existing durable session.
+    ///
+    /// Imported summaries are rendered as an agent message, recent tail items
+    /// are appended directly to message storage, and model-switch timeline
+    /// metadata is recreated. Existing runtime-local MCP and plugin enablement
+    /// remains owned by the target and is not replaced. The target retains its
+    /// session identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the target identifier equals the newly allocated
+    /// identity used by the method's mismatch guard.
     pub fn hydrate(target: &mut DurableSession, bundle: HandoffBundle) -> Result<(), String> {
         if target.id == SessionId::new() {
             return Err(
@@ -254,6 +304,10 @@ impl HandoffImporter {
         Ok(())
     }
 
+    /// Creates a fresh durable session and hydrates it from an owned bundle.
+    ///
+    /// The destination receives a new [`SessionId`]. Runtime-local MCP and
+    /// plugin enablement starts empty rather than crossing the handoff boundary.
     pub fn hydrate_into_new(bundle: HandoffBundle) -> DurableSession {
         let mut session = DurableSession::new(SessionId::new());
 

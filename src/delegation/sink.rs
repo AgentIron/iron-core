@@ -20,6 +20,10 @@ pub(crate) struct DelegationPromptSink {
 }
 
 impl DelegationPromptSink {
+    /// Create a child prompt sink bound to the parent client and ACP session.
+    ///
+    /// Approval requests are either auto-approved once or forwarded to this
+    /// parent session according to `mode`; forwarding failures deny the call.
     pub(crate) fn new(
         mode: ChildApprovalMode,
         parent_client: SharedClientChannel,

@@ -1,3 +1,8 @@
+//! Built-in tools for reading, writing, and exact-match file editing.
+//!
+//! All paths are constrained to configured roots. Editing requires a prior
+//! successful read recorded by the shared [`BuiltinToolConfig`].
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -11,11 +16,13 @@ use crate::error::RuntimeResult;
 use crate::tool::{Tool, ToolDefinition, ToolFuture};
 use serde_json::Value;
 
+/// Read files or list directories within configured workspace roots.
 pub struct ReadTool {
     config: Arc<BuiltinToolConfig>,
 }
 
 impl ReadTool {
+    /// Create a read tool using `config` for path checks and output limits.
     pub fn new(config: BuiltinToolConfig) -> Self {
         Self {
             config: Arc::new(config),
@@ -197,11 +204,13 @@ fn is_binary(bytes: &[u8]) -> bool {
     null_count > 0 && (null_count as f64 / check_len as f64) > 0.01
 }
 
+/// Create or overwrite text files within configured workspace roots.
 pub struct WriteTool {
     config: Arc<BuiltinToolConfig>,
 }
 
 impl WriteTool {
+    /// Create a write tool using `config` for path checks and approval metadata.
     pub fn new(config: BuiltinToolConfig) -> Self {
         Self {
             config: Arc::new(config),
@@ -348,11 +357,13 @@ fn validate_no_path_conflict(
     Ok(())
 }
 
+/// Replace exact text in a previously read file.
 pub struct EditTool {
     config: Arc<BuiltinToolConfig>,
 }
 
 impl EditTool {
+    /// Create an edit tool sharing `config`'s read-tracking state.
     pub fn new(config: BuiltinToolConfig) -> Self {
         Self {
             config: Arc::new(config),
@@ -360,11 +371,16 @@ impl EditTool {
     }
 }
 
+/// Apply a sequence of exact replacements to one previously read file.
+///
+/// All replacements are validated against an in-memory buffer before the file
+/// is written, so a validation failure leaves the file unchanged.
 pub struct MultieditTool {
     config: Arc<BuiltinToolConfig>,
 }
 
 impl MultieditTool {
+    /// Create a multi-edit tool sharing `config`'s read-tracking state.
     pub fn new(config: BuiltinToolConfig) -> Self {
         Self {
             config: Arc::new(config),
@@ -676,7 +692,8 @@ fn execute_multiedit(config: &BuiltinToolConfig, args: Value) -> RuntimeResult<V
             return Err(crate::error::RuntimeError::from(
                 BuiltinToolError::edit_ambiguous(format!(
                     "edit {}: old_string matched {} locations; provide more context or use replace_all; no changes were applied",
-                    i + 1, match_count
+                    i + 1,
+                    match_count
                 )),
             ));
         }

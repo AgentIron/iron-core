@@ -1,65 +1,61 @@
 # iron-core
 
-`iron-core` is the core embedding crate for AgentIron.
+`iron-core` is the core embedding crate for AgentIron. It provides the agent
+runtime, durable session state, tool registration, provider integration, and
+ACP transport adapters.
 
-It provides:
-
-- the stream-first `IronAgent` / `AgentConnection` / `AgentSession` facade
-- durable messages, timeline entries, and tool-call records
-- tool registration with JSON Schema argument validation
-- approval-gated tool execution
-- ACP-native transports for in-process, stdio, and TCP integrations
-- context compaction, active-context accounting, and handoff export/import
-- layered prompt composition with repository instruction loading and runtime context injection
-- optional embedded Python execution via the `embedded-python` feature
-- WASM integration plugins via Extism with install lifecycle, manifest extraction, session-scoped enablement, auth-gated tool availability, and a 30-second execution timeout
-
-The facade/runtime API is the supported integration surface.
+The recommended entry point for embedded applications is the stream-first
+`IronAgent` / `AgentConnection` / `AgentSession` facade. All modules and items
+that are public in the crate are part of the public API; the facade and
+`prelude` are recommendations for discovery, not a boundary around the API.
 
 ## Requirements
 
-- Rust 1.95+
-- Tokio for async embedding code
+- Rust 1.96 or newer
+- Tokio for asynchronous embedding code
 
 ## Install
 
-Use the git dependency for now:
+`iron-core` is published on crates.io. Add the released crates to your
+application:
 
 ```toml
 [dependencies]
-iron-core = { git = "https://github.com/AgentIron/iron-core", branch = "main" }
-iron-providers = "0.2.2"
+iron-core = "0.1"
+iron-providers = "0.2"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
-`iron-core` is not ready for crates.io publication yet because the optional `embedded-python` feature depends on `monty` from git until a usable crates.io release exists.
-
-If you need the built-in `python_exec` tool, enable the feature explicitly:
+The default feature set is empty. Enable `embedded-python` only when the
+built-in `python_exec` tool is needed:
 
 ```toml
 [dependencies]
-iron-core = { git = "https://github.com/AgentIron/iron-core", branch = "main", features = ["embedded-python"] }
-iron-providers = "0.2.2"
-serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+iron-core = { version = "0.1", features = ["embedded-python"] }
 ```
 
 ## Quick Start
 
-```rust,ignore
+The following example compiles as a documentation test but is not run because
+it reads an API key and sends a provider request over the network.
+
+```rust,no_run
 use iron_core::{Config, FunctionTool, IronAgent, PromptEvent, ToolDefinition};
 use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
 use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::new().with_model("gpt-4o");
     let provider = ProviderConnection::from_profile(
-        ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"),
+        ProviderProfile::new(
+            "openai",
+            ApiFamily::Responses,
+            "https://api.openai.com/v1",
+        ),
         RuntimeConfig::new(std::env::var("OPENAI_API_KEY")?),
     )?;
-    let agent = IronAgent::new(config, provider);
+    let agent = IronAgent::new(Config::new().with_model("gpt-4o"), provider);
 
     agent.register_tool(FunctionTool::new(
         ToolDefinition::new(
@@ -76,15 +72,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         |args| Ok(json!({ "echo": args["text"].clone() })),
     ));
 
-    let connection = agent.connect();
-    let session = connection.create_session()?;
+    let session = agent.connect().create_session()?;
     let (handle, mut events) = session.prompt_stream("Call echo with hello.");
 
     while let Some(event) = events.next().await {
         match event {
             PromptEvent::Output { text } => print!("{text}"),
             PromptEvent::ApprovalRequest { call_id, .. } => {
-                handle.approve(&call_id).expect("approval should be pending");
+                handle.approve(&call_id)?;
             }
             PromptEvent::Complete { outcome } => {
                 println!("\nprompt finished: {outcome:?}");
@@ -98,93 +93,119 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The canonical interaction model is stream-first:
+The canonical interaction model is stream-first: call
+`AgentSession::prompt_stream`, consume `PromptEvent` values, and use the
+returned `PromptHandle` to approve, deny, or cancel an active prompt.
 
-- call `session.prompt_stream(...)`
-- consume `PromptEvent`s as they arrive
-- use `PromptHandle` to approve, deny, or cancel an active prompt
+## Capabilities
 
-## Built-In Tools
+- Durable messages, timeline entries, tool-call records, context accounting,
+  compaction, and handoff export/import
+- Custom tool registration with JSON Schema argument validation and approval
+  strategies
+- Layered prompt composition with repository instructions and runtime context
+- Operational in-process ACP transport, with reserved stdio and TCP entry points
+  that currently return compatibility errors
+- Headless automation, scheduled tasks, profiles, stored prompts, provider
+  credentials, skills, management APIs, and debug observation
+- Optional embedded Python execution through the `embedded-python` feature
 
-`iron-core` can register built-in `read`, `write`, `edit`, `glob`, `grep`, and `webfetch` tools, plus `bash` or `powershell` when a shell is available.
+### Built-In Tools
 
-Use `BuiltinToolConfig` to scope filesystem access, disable specific tools, and tune limits such as command timeouts and output caps.
+`IronAgent::register_builtin_tools` can register `read`, `write`, `edit`,
+`multiedit`, `glob`, `grep`, and `webfetch`, plus either `bash` or `powershell`
+when that shell is available. `BuiltinToolConfig` controls allowed filesystem
+roots, disabled tools, approval and network policy, shell selection, timeouts,
+and result-size limits. Built-in tools enforce their configured policies at
+execution time.
 
-## MCP Servers
+### MCP Servers
 
-`iron-core` supports session-scoped MCP (Model Context Protocol) servers as a tool source alongside built-in and custom tools. The full implementation covers:
+Runtime-managed MCP servers can provide tools alongside built-in and custom
+tools. The public MCP APIs cover server inventory and health, stdio and HTTP
+transport configuration, connection lifecycle, session-effective tool
+catalogs, approval handling, and unavailable-tool diagnostics. MCP server state
+is runtime-local and is not included in handoff bundles.
 
-- Runtime-local MCP server inventory with per-server configuration
-- Session-scoped enablement governed by a single runtime-default policy
-- Canonical session-effective tool catalog with precise unavailable-tool diagnostics
-- Approval strategy enforcement for MCP tool calls
-- Transport clients for stdio, HTTP, and HTTP+SSE
-- Connection lifecycle management with single-flight connect guarding
-- Handoff exclusion — MCP state is runtime-local and not portable
+### Integration Plugins
 
-## Integration Plugins
-
-`iron-core` includes a WASM-based integration-plugin surface powered by [Extism](https://extism.org). Plugins are a third tool source alongside built-in tools and MCP servers.
-
-The plugin system is fully implemented:
-
-- **Install lifecycle** — fetch (local or HTTPS+checksum), cache, manifest extraction from WASM binaries, identity validation, and Extism-backed WASM host loading
-- **WASM execution** — tools are invoked via `tool_{name}` exports with a JSON request/response envelope and a 30-second timeout
-- **Session-scoped enablement** — runtime-level defaults materialised at session creation, with per-session overrides
-- **Canonical tool availability** — single-source-of-truth `compute_tool_availability()` gates tools on health, auth requirements, and scope satisfaction
-- **Auth model** — runtime-governed auth state, credential bindings, and per-tool scope checks
-- **Tool diagnostics** — structured `UnavailableReason` variants for actionable error messages
-- **Network policy** — allowlist, blocklist, and wildcard policies declared in plugin manifests
+The `plugin` module provides Extism-backed WASM integration-plugin APIs for
+local or HTTPS artifacts, checksums, manifest extraction, registry and install
+state, session enablement, authentication requirements, tool availability,
+network policy declarations, and rich output. Plugin calls use a 30-second host
+timeout. Availability and policy APIs describe and gate tools; embedders remain
+responsible for configuring credentials, network access, and user-facing auth
+flows.
 
 ## Development
 
-Install the security tooling if you want to run the same audit check CI reports:
+The repository requires Rust 1.96. Install the Python
+[`invoke`](https://www.pyinvoke.org/) package to use the convenience tasks, and
+install `cargo-audit` for the security task:
 
 ```bash
-cargo install cargo-audit
-```
-
-Configure the repository pre-commit hook after cloning:
-
-```bash
+cargo install cargo-audit --locked
 git config core.hooksPath .githooks
 ```
 
-The pre-commit hook runs `cargo fmt --manifest-path Cargo.toml -- --check` when staged Rust files are present. Before opening or updating a pull request, run the same checks CI validates:
-
-```bash
-cargo build --manifest-path Cargo.toml --all-targets
-cargo fmt --manifest-path Cargo.toml -- --check
-cargo clippy --manifest-path Cargo.toml --all-targets --all-features -- -D warnings
-cargo test --manifest-path Cargo.toml
-cargo audit --file Cargo.lock
-```
-
-The local `invoke` tasks in `tasks.py` are a convenience layer over these checks:
+The pre-commit hook checks formatting when staged Rust files are present. Run
+the repository task groups before opening a pull request:
 
 ```bash
 inv build
 inv test
+inv docs
 inv security
 ```
 
-The `Pull Request` workflow runs build, format, lint, and test checks on every PR to `main`. It also runs `cargo audit` as a non-blocking audit and posts the output as a PR comment.
+`inv build` runs build, format, and all-feature Clippy checks; `inv test` runs
+the test suite; `inv docs` runs strict all-feature rustdoc and doctests; and
+`inv security` runs `cargo audit`. The corresponding documentation commands
+are:
 
-Merges to `main` trigger an automatic patch release that bumps `Cargo.toml`, creates a `vX.Y.Z` tag, and creates a GitHub release. Publishing to crates.io is skipped until `monty` is available from crates.io because crates.io rejects manifests containing git dependencies.
+```bash
+RUSTDOCFLAGS="-D warnings -D missing-docs" cargo doc --manifest-path Cargo.toml --no-deps --all-features
+cargo test --manifest-path Cargo.toml --doc
+```
+
+The current `Pull Request` workflow runs locked build, format, all-feature
+Clippy, test, and `inv docs` checks on Linux; all-feature link and scheduler
+checks on macOS and Windows; and a fresh `embedded-python` consumer build. Its
+`cargo audit` step is non-blocking and posts the result on same-repository pull
+requests. Pull requests validate documentation but do not deploy it.
+
+Pushes to `main` with unreleased changes run the patch-release workflow. After
+its build, lint, test, audit, and fresh-consumer checks pass, the workflow bumps
+the patch version, commits and tags it, publishes all features to crates.io
+using trusted publishing, and creates a GitHub release. A manually dispatched
+workflow performs the same process for minor or major releases. See the
+[current releases](https://github.com/AgentIron/iron-core/releases) for published versions.
 
 ## Documentation
 
+- [Published release API documentation](https://docs.rs/iron-core/latest/iron_core/)
 - [Architecture Overview](docs/architecture-overview.md)
 - [Getting Started](docs/getting-started-iron-core.md)
 - [Integration Plugins](docs/integration-plugins.md)
+- [Model Switching](docs/model-switching.md)
+- [Model Switching Examples](docs/model-switching-examples.md)
 - [Prompt Composition](docs/prompt-composition.md)
-- [Architecture Cleanup Checklist](docs/architecture-cleanup-checklist.md)
 
-Build the API docs locally with:
+GitHub Pages is configured as a public workflow deployment with the custom
+domain `core.agentiron.ai`. The `Deploy Documentation` workflow runs on pushes
+to `main` and manual dispatch, builds strict all-feature rustdoc, publishes
+`target/doc`, and redirects the site root to `iron_core/index.html`. Current
+`main` API documentation is available at `https://core.agentiron.ai/` after a
+successful deployment. The published docs.rs link above remains available
+independently.
+
+Build the same all-feature API documentation locally with:
 
 ```bash
-cargo doc -p iron-core --no-deps
+RUSTDOCFLAGS="-D warnings -D missing-docs" cargo doc --manifest-path Cargo.toml --no-deps --all-features
 ```
+
+Then open `target/doc/iron_core/index.html`.
 
 ## License
 

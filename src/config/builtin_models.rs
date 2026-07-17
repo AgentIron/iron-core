@@ -80,6 +80,10 @@ impl BuiltinModelEntry {
     ///
     /// An empty vector is rejected because reasoning support requires
     /// at least one valid effort level.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `values` is empty.
     pub fn with_reasoning(mut self, values: Vec<impl Into<String>>) -> Self {
         let effort_values: Vec<String> = values.into_iter().map(Into::into).collect();
         assert!(

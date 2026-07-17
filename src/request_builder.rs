@@ -1,3 +1,5 @@
+//! Construction of provider inference requests and composed system instructions.
+
 use crate::{
     config::{Config, ContextWindowPolicy},
     context::models::CompressedBlock,
@@ -6,12 +8,19 @@ use crate::{
 };
 use iron_providers::{InferenceRequest, Message, ProviderRegistry, ToolPolicy};
 
+/// Per-request context used to build instructions and effective tool exposure.
 pub struct EffectiveToolRequestContext<'a> {
+    /// Durable summaries prepended to the provider transcript as assistant messages.
     pub compressed_blocks: &'a [CompressedBlock],
+    /// Optional session instructions rendered in the client-injection section.
     pub instructions: Option<&'a str>,
+    /// Optional preloaded repository instruction payload.
     pub repo_instruction_payload: Option<&'a crate::prompt::config::RepoInstructionPayload>,
+    /// Whether `python_exec` is available in the effective session catalog.
     pub python_exec_available: bool,
+    /// Optional concatenated instructions from active skills.
     pub skill_instructions: Option<&'a str>,
+    /// Current context pressure used to render tool-use guidance.
     pub context_pressure: crate::context::ContextPressure,
     /// Optional session workspace root snapshot. When provided, this overrides
     /// Config.workspace_roots for runtime context rendering.
@@ -39,8 +48,16 @@ struct ComposedInstructionInputs<'a> {
     effective_provider_guidance: Option<&'a str>,
 }
 
-/// Build an inference request using an effective tool view.
-/// This allows MCP tools to be included based on session state.
+/// Builds an inference request using an already resolved effective tool view.
+///
+/// Compressed blocks precede retained messages. Context-window pruning applies
+/// only to `messages`, and tools are emitted in `effective_tools` order. An
+/// empty tool view forces [`ToolPolicy::None`].
+///
+/// # Errors
+///
+/// Returns [`RuntimeError`] if the configured context-window policy cannot be
+/// applied.
 pub fn build_inference_request_with_effective_tools(
     config: &Config,
     messages: &[Message],
@@ -101,6 +118,11 @@ pub fn build_inference_request_with_effective_tools(
     Ok(request)
 }
 
+/// Builds an inference request from the runtime's local tool registry.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError`] if request context preparation fails.
 pub fn build_inference_request(
     config: &Config,
     messages: &[Message],
@@ -126,6 +148,11 @@ pub fn build_inference_request(
     )
 }
 
+/// Builds an inference request with compressed context prepended to messages.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError`] if request context preparation fails.
 pub fn build_inference_request_with_context(
     config: &Config,
     messages: &[Message],
@@ -152,6 +179,11 @@ pub fn build_inference_request_with_context(
     )
 }
 
+/// Builds an inference request with optional preloaded repository instructions.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError`] if request context preparation fails.
 pub fn build_inference_request_with_repo(
     config: &Config,
     messages: &[Message],
@@ -178,6 +210,16 @@ pub fn build_inference_request_with_repo(
     )
 }
 
+/// Builds an inference request from the local registry and complete prompt context.
+///
+/// Compressed blocks are prepended before retained messages. The request uses
+/// the effective model when supplied, otherwise `config.model`; `python_exec`
+/// guidance is enabled if either the context or local registry exposes it.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError`] if the configured context-window policy cannot be
+/// applied.
 pub fn build_inference_request_with_context_and_repo(
     config: &Config,
     messages: &[Message],

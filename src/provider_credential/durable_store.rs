@@ -1,10 +1,21 @@
+//! Durable provider credential persistence over [`crate::config::ConfigStore`].
+//!
+//! Credential bodies are serialized and delegated to the configuration store,
+//! which encrypts them at rest. [`FallibleCredentialStore`] preserves storage,
+//! key-source, serialization, and decryption failures for callers that need to
+//! distinguish them from an absent credential.
+
 use crate::config::{ConfigError, ConfigStore};
 use crate::provider_credential::domain::{ProviderSlug, StoredCredential};
 use crate::provider_credential::store::ProviderCredentialStore;
 use async_trait::async_trait;
 use tracing::warn;
 
-/// A durable provider credential store backed by ConfigStore.
+/// A durable provider credential store backed by [`ConfigStore`].
+///
+/// Its [`ProviderCredentialStore`] implementation logs and suppresses durable
+/// errors for compatibility. Use [`FallibleCredentialStore`] when errors must
+/// be surfaced to the caller.
 pub struct DurableCredentialStore {
     store: ConfigStore,
 }
@@ -107,9 +118,13 @@ pub trait FallibleCredentialStore: Send + Sync {
 /// Credential metadata without secret material.
 #[derive(Debug, Clone)]
 pub struct CredentialMetadata {
+    /// Provider slug that owns the credential row.
     pub provider_slug: String,
+    /// Persisted credential-mode discriminator; secret material is omitted.
     pub credential_mode: String,
+    /// Time at which a credential was first stored for this provider.
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Time at which the credential was last replaced or refreshed.
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 

@@ -74,7 +74,17 @@ fn map_unavailable_reason(
 }
 
 impl IronRuntime {
-    /// Derive a child tool catalog from policy, profile filter, and runtime state.
+    /// Derive the model-visible child tool catalog from policy and runtime state.
+    ///
+    /// Resolution starts from either the parent's effective catalog or a fresh
+    /// hidden session's default catalog. Requested additions are then resolved
+    /// from runtime and parent-session inventories, the child profile filter is
+    /// applied, and the explicit deny list is applied last. Unavailable or
+    /// profile-excluded additions are omitted and recorded as diagnostics.
+    ///
+    /// The returned definitions are sorted by name and include a deterministic
+    /// digest for audit records. A temporary child-default session is closed
+    /// before this method returns.
     pub fn derive_child_tool_catalog(
         &self,
         parent_session_id: SessionId,
@@ -214,10 +224,18 @@ impl IronRuntime {
         })
     }
 
-    /// Run a delegated child prompt and return the result.
+    /// Run a delegated child prompt and return its result and audit metadata.
     ///
-    /// This creates a hidden child session, sets up a delegation sink, resolves the
-    /// selected profile/provider, runs the prompt, and cleans up the relationship.
+    /// This creates a hidden child session on the parent's connection, derives
+    /// its bounded tool catalog, activates profile-allowed skills that do not
+    /// require trust, resolves the selected provider, and runs at most the
+    /// requested number of iterations. Child approvals either propagate to the
+    /// parent client or receive one-time approval according to
+    /// [`crate::delegation::ChildApprovalMode`].
+    ///
+    /// Failures before prompt execution unregister and close the child session.
+    /// On successful return, the durable child session and its parent-child
+    /// registration remain available for later inspection and lifecycle control.
     pub async fn run_delegation(
         &self,
         parent_session_id: SessionId,

@@ -1,4 +1,19 @@
 //! ACP transport adapters for `iron-core`.
+//!
+//! Every transport enters the same ACP RPC layer, so transport selection only
+//! changes how messages move between client and agent. Session ownership,
+//! durable history, permission mediation, and cancellation semantics remain
+//! transport-independent. The in-process adapter is operational; the stdio and
+//! TCP entry points currently return ACP compatibility errors.
+//!
+//! ```
+//! use iron_core::transport::{TransportKind, TransportMetadata, ACP_SUPPORT};
+//!
+//! let transport = TransportMetadata::new(TransportKind::InProcess);
+//! assert_eq!(transport.kind, TransportKind::InProcess);
+//! assert!(ACP_SUPPORT.stable_methods.contains(&"prompt"));
+//! assert!(ACP_SUPPORT.stable_methods.contains(&"cancel"));
+//! ```
 
 use crate::connection::{ClientChannel, IronConnection};
 use agent_client_protocol as acp;
@@ -86,12 +101,26 @@ semantics. The transport only affects how bytes move between the agent and \
 client sides - it does not change runtime/session ownership, durable history \
 behavior, permission mediation, or cancellation outcomes.";
 
+/// Handles agent-to-client ACP callbacks for an in-process transport.
+///
+/// Implementations receive session notifications and permission requests on
+/// the same local executor as the agent. Returned futures therefore need not
+/// be [`Send`], but handlers must remain valid for the lifetime of the
+/// transport.
 pub trait InProcessClientHandler: 'static {
+    /// Delivers an ACP session notification to the embedded client.
+    ///
+    /// The returned future completes when the client has accepted the
+    /// notification or returns an ACP error.
     fn session_notification(
         &self,
         notification: acp_schema::SessionNotification,
     ) -> Pin<Box<dyn Future<Output = agent_client_protocol::Result<()>>>>;
 
+    /// Asks the embedded client to decide an ACP tool permission request.
+    ///
+    /// The response is returned to the waiting agent operation; an ACP error
+    /// aborts that permission exchange.
     fn request_permission(
         &self,
         request: acp_schema::RequestPermissionRequest,
@@ -164,6 +193,7 @@ impl InProcessClient {
         op().await
     }
 
+    /// Initializes the ACP connection and negotiates protocol capabilities.
     pub async fn initialize(
         &self,
         request: acp_schema::InitializeRequest,
@@ -171,6 +201,7 @@ impl InProcessClient {
         self.connection.handle_initialize(request).await
     }
 
+    /// Creates a new ACP session owned by this connection.
     pub async fn new_session(
         &self,
         request: acp_schema::NewSessionRequest,
@@ -178,6 +209,10 @@ impl InProcessClient {
         self.connection.handle_new_session(request).await
     }
 
+    /// Runs a prompt request in an existing session.
+    ///
+    /// Agent notifications and permission requests are delivered through the
+    /// [`InProcessClientHandler`] installed when the transport was created.
     pub async fn prompt(
         &self,
         request: acp_schema::PromptRequest,
@@ -186,6 +221,7 @@ impl InProcessClient {
             .await
     }
 
+    /// Requests cancellation of the session operation named by the notification.
     pub async fn cancel(
         &self,
         notification: acp_schema::CancelNotification,
@@ -193,6 +229,7 @@ impl InProcessClient {
         self.connection.handle_cancel(notification).await
     }
 
+    /// Closes a session through the unstable ACP `closeSession` method.
     pub async fn close_session(
         &self,
         request: acp_schema::CloseSessionRequest,
@@ -201,7 +238,12 @@ impl InProcessClient {
     }
 }
 
-/// Create an in-process ACP transport and its IO driver future.
+/// Creates an in-process ACP transport and its IO driver future.
+///
+/// The handler mediates agent-to-client notifications and permission
+/// requests. The returned driver currently performs no work and completes
+/// immediately; callers may still spawn or await it to use the same ownership
+/// pattern as stream-backed transports.
 pub fn create_in_process_transport<C>(
     runtime: crate::runtime::IronRuntime,
     client_handler: C,
@@ -229,7 +271,11 @@ impl std::fmt::Debug for InProcessTransport {
     }
 }
 
-/// Create an ACP agent bound to stdio.
+/// Creates an ACP agent intended to be bound to standard input and output.
+///
+/// The connection is created immediately. The returned driver currently
+/// resolves to an ACP internal error because ACP 0.11 requires a `Send`
+/// handler that this adapter does not yet provide.
 pub fn create_stdio_agent(
     runtime: crate::runtime::IronRuntime,
 ) -> (
@@ -245,7 +291,12 @@ pub fn create_stdio_agent(
     (iron_conn, future)
 }
 
-/// Serve ACP connections over TCP at the provided socket address.
+/// Serves ACP connections over TCP at the provided socket address.
+///
+/// # Errors
+///
+/// Currently always returns an ACP internal error because the TCP adapter has
+/// not yet been updated for the ACP 0.11 `Send` handler requirement.
 pub async fn serve_tcp_agent(
     _runtime: crate::runtime::IronRuntime,
     _addr: std::net::SocketAddr,
@@ -254,6 +305,12 @@ pub async fn serve_tcp_agent(
         .data("serve_tcp_agent is not yet adapted to the ACP 0.11 Send handler requirements"))
 }
 
+/// Connects an ACP client to a TCP agent at the provided socket address.
+///
+/// # Errors
+///
+/// Currently always returns an ACP internal error because the client adapter
+/// has not yet been updated for the ACP 0.11 client builder API.
 pub async fn connect_tcp_client(_addr: std::net::SocketAddr) -> acp::Result<()> {
     Err(acp::Error::internal_error()
         .data("connect_tcp_client is not yet adapted to the ACP 0.11 client builder API"))

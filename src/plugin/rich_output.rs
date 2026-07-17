@@ -1,96 +1,149 @@
+//! Normalized transcript and constrained rich-view output from plugin tools.
+//!
+//! Plain string results become transcript-only envelopes. JSON objects are
+//! interpreted as rich output only when they explicitly use the
+//! `plugin_tool_result` kind, preserving arbitrary legacy JSON unchanged.
+//! Rich payloads are limited to typed todo, status, and progress views; unknown
+//! fields and executable presentation content are rejected during normalization.
+
 use crate::plugin::wasm_host::{WasmError, WasmResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const NORMALIZED_RESULT_KIND: &str = "plugin_tool_result";
 
+/// Canonical result shape returned by normalized plugin tool execution.
+///
+/// The transcript is suitable for model history, while the optional view is a
+/// constrained client-rendered projection. Runtime metadata identifies the
+/// source and cannot be supplied by the plugin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginToolResultEnvelope {
+    /// Envelope discriminator, always `"plugin_tool_result"` after normalization.
     pub kind: String,
+    /// Text persisted in the model-visible transcript.
     pub transcript: PluginToolTranscript,
+    /// Optional structured view for a supporting client.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub view: Option<PluginToolView>,
+    /// Runtime-injected provenance for this result.
     pub metadata: PluginToolResultMetadata,
 }
 
+/// Model-visible text associated with a plugin tool result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginToolTranscript {
+    /// Non-empty text to append to the conversation transcript.
     pub text: String,
 }
 
+/// A constrained, client-rendered projection of plugin output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginToolView {
+    /// Stable logical view ID used to correlate updates.
     pub id: String,
+    /// How the client should combine this view with prior output.
     pub mode: PluginToolViewMode,
+    /// Typed presentation payload rendered by the client.
     pub payload: PluginToolViewPayload,
 }
 
+/// Update behavior for a rich plugin view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginToolViewMode {
+    /// Replace the prior view with the same logical ID.
     Replace,
+    /// Append this view to existing output.
     Append,
+    /// Display the view temporarily rather than retaining it as durable output.
     Transient,
 }
 
+/// Supported safe presentation payloads for plugin rich output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PluginToolViewPayload {
+    /// A checklist-style collection of todo items.
     TodoList(TodoListView),
+    /// A textual status callout.
     Status(StatusView),
+    /// Fractional progress for an ongoing operation.
     Progress(ProgressView),
 }
 
+/// A checklist view containing one or more todo items.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TodoListView {
+    /// Optional heading displayed above the list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Non-empty list of todo items.
     pub items: Vec<TodoListItem>,
 }
 
+/// One item in a [`TodoListView`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TodoListItem {
+    /// Non-empty stable item ID used to correlate updates.
     pub id: String,
+    /// Non-empty user-facing item text.
     pub label: String,
+    /// Whether the item is complete.
     pub done: bool,
 }
 
+/// A textual status view with optional severity and title.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusView {
+    /// Non-empty status message.
     pub text: String,
+    /// Optional semantic level used for client styling.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<StatusLevel>,
+    /// Optional heading displayed with the status.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 }
 
+/// Semantic level of a plugin status view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusLevel {
+    /// Neutral informational status.
     Info,
+    /// Successful completion or healthy status.
     Success,
+    /// Warning that may require attention.
     Warning,
+    /// Failed or unhealthy status.
     Error,
 }
 
+/// Fractional progress view for an ongoing operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProgressView {
+    /// Optional description of the operation being measured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Completion fraction in the inclusive range `0.0..=1.0`.
     pub value: f64,
 }
 
+/// Runtime-injected provenance for a normalized plugin tool result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginToolResultMetadata {
+    /// Registry ID of the plugin that produced the result.
     pub plugin_id: String,
+    /// Plugin-local name of the executed tool.
     pub tool_name: String,
 }
 
@@ -106,6 +159,18 @@ struct PluginToolResultInput {
     metadata: Option<Value>,
 }
 
+/// Normalizes and validates a raw result from a plugin tool.
+///
+/// String values become transcript-only envelopes. Objects explicitly tagged
+/// `plugin_tool_result` are parsed with unknown fields denied, validated, and
+/// rewritten with runtime-owned metadata. Other JSON values pass through
+/// unchanged.
+///
+/// # Errors
+///
+/// Returns [`WasmError::ExecutionFailed`] when a declared rich envelope is
+/// malformed, has an unsupported kind, contains empty required text or IDs,
+/// has an empty todo list, or reports progress outside `0.0..=1.0`.
 pub fn normalize_plugin_tool_result(
     plugin_id: &str,
     tool_name: &str,
@@ -143,6 +208,9 @@ pub fn normalize_plugin_tool_result(
     normalized_value(plugin_id, tool_name, input.transcript, input.view)
 }
 
+/// Returns transcript text from a normalized result envelope.
+///
+/// Returns `None` for plain JSON, malformed envelopes, or a different kind.
 pub fn transcript_text(result: &Value) -> Option<&str> {
     result
         .get("kind")
@@ -153,6 +221,10 @@ pub fn transcript_text(result: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+/// Returns the raw structured view from a normalized result envelope.
+///
+/// Returns `None` when no view is present or the value is not a normalized
+/// `plugin_tool_result` envelope.
 pub fn view(result: &Value) -> Option<&Value> {
     result
         .get("kind")

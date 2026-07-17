@@ -1,8 +1,15 @@
-/// Embedded migration SQL for the config store schema.
-///
-/// Migrations are applied in order. Each migration is idempotent where possible.
+//! Embedded migrations for the configuration-store schema.
+//!
+//! SQL migrations are applied in ascending version order. Prompt identity
+//! canonicalization and its unique index are completed transactionally by Rust
+//! after the SQL steps.
+
 use sha2::{Digest, Sha256};
 
+/// Ordered `(schema_version, SQL)` migrations embedded in the binary.
+///
+/// Entries cover versions 1 through 9; version 10 is finalized by the prompt
+/// identity canonicalization performed in [`apply_migrations`].
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
@@ -235,11 +242,20 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     ),
 ];
 
-/// The current schema version.
+/// Newest configuration-store schema understood by this binary.
 #[allow(dead_code)]
 pub const CURRENT_SCHEMA_VERSION: i64 = 10;
 
-/// Apply all pending migrations to the database.
+/// Apply all pending migrations and prompt-identity repairs to a database.
+///
+/// A database created by a newer binary is rejected without mutation. Each SQL
+/// migration and the final identity/index repair are committed transactionally.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Migration`](super::error::ConfigError::Migration) if
+/// schema inspection, migration SQL, identity repair, or transaction commit
+/// fails.
 pub async fn apply_migrations(pool: &sqlx::SqlitePool) -> Result<(), super::error::ConfigError> {
     // Create schema_version table if it doesn't exist
     sqlx::query("CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)")
