@@ -112,8 +112,11 @@ impl DelegationRequest {
 /// Outcome of a delegated child run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DelegationOutcome {
+    /// The child model completed its turn normally.
     EndTurn,
+    /// The child prompt was cancelled before normal completion.
     Cancelled,
+    /// The child exhausted the request's inference/tool iteration limit.
     MaxTurnRequests,
     /// The run stopped for a reason that is not recognized by this core version.
     Unknown,
@@ -153,24 +156,43 @@ pub struct DelegationResult {
 /// Audit/diagnostic metadata for a delegated run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DelegationMetadata {
+    /// Stable delegation identifier shared with the returned result.
     pub delegation_id: String,
+    /// Durable session that initiated the delegation.
     pub parent_session_id: SessionId,
+    /// Parent tool-call identifier, when delegation originated from a tool call.
     pub parent_tool_call_id: Option<String>,
+    /// Hidden durable session created for the delegated run.
     pub child_session_id: SessionId,
+    /// Requested child profile identifier, if explicitly selected.
     pub profile_id: Option<AgentProfileId>,
+    /// Approval handling applied to child tool calls.
     pub child_approval_mode: ChildApprovalMode,
+    /// Inference/tool iteration limit applied to the child prompt.
     pub max_iterations: u32,
+    /// Terminal outcome once the delegated prompt has finished.
     pub outcome: Option<DelegationOutcome>,
+    /// Deterministic digest of the model-visible child tool catalog.
     pub tool_catalog_digest: String,
+    /// Final child tools also present in the parent's effective catalog.
     pub inherited_tools: Vec<String>,
+    /// Candidate tools removed by the request's deny list.
     pub removed_tools: Vec<String>,
+    /// Final child tools not present in the parent's effective catalog.
     pub added_tools: Vec<String>,
+    /// Requested additions unavailable from runtime or session catalogs.
     pub unavailable_requested_additions: Vec<String>,
+    /// Candidate tools removed by the selected profile's tool filter.
     pub excluded_by_profile: Vec<String>,
+    /// Structured reasons requested tool-policy changes were not applied.
     pub tool_policy_diagnostics: Vec<ToolPolicyDiagnostic>,
+    /// Skill names requested for the child session.
     pub requested_skills: Vec<String>,
+    /// Requested skills loaded and activated in the child session.
     pub activated_skills: Vec<String>,
+    /// Requested skills rejected by the selected profile's skill filter.
     pub excluded_skills_by_profile: Vec<String>,
+    /// Profile-allowed skills that were absent or required elevated trust.
     pub unavailable_requested_skills: Vec<String>,
 }
 
@@ -185,49 +207,61 @@ pub enum ToolPolicyDiagnosticReason {
     /// The MCP server providing this tool is disabled for the session.
     McpServerNotEnabled {
         #[serde(rename = "server_id")]
+        /// MCP server that owns the requested tool.
         server_id: String,
     },
     /// The MCP server providing this tool is not healthy.
     McpServerNotHealthy {
         #[serde(rename = "server_id")]
+        /// MCP server that owns the requested tool.
         server_id: String,
         #[serde(rename = "health")]
+        /// Debug representation of the observed server health.
         health: String,
     },
     /// The plugin providing this tool is not enabled for the session.
     PluginNotEnabled {
         #[serde(rename = "plugin_id")]
+        /// Plugin that owns the requested tool.
         plugin_id: String,
     },
     /// The plugin providing this tool is not installed.
     PluginNotInstalled {
         #[serde(rename = "plugin_id")]
+        /// Plugin that owns the requested tool.
         plugin_id: String,
     },
     /// The plugin providing this tool has no loaded manifest.
     PluginManifestMissing {
         #[serde(rename = "plugin_id")]
+        /// Plugin that owns the requested tool.
         plugin_id: String,
     },
     /// The plugin providing this tool is not healthy.
     PluginNotHealthy {
         #[serde(rename = "plugin_id")]
+        /// Plugin that owns the requested tool.
         plugin_id: String,
         #[serde(rename = "health")]
+        /// Debug representation of the observed plugin health.
         health: String,
     },
     /// The plugin tool requires authentication that is not satisfied.
     PluginAuthRequired {
         #[serde(rename = "plugin_id")]
+        /// Plugin that owns the requested tool.
         plugin_id: String,
     },
     /// The plugin tool requires scopes that are not granted.
     PluginScopeMissing {
         #[serde(rename = "plugin_id")]
+        /// Plugin that owns the requested tool.
         plugin_id: String,
         #[serde(rename = "required")]
+        /// Complete scope set required by the tool.
         required: Vec<String>,
         #[serde(rename = "missing")]
+        /// Required scopes absent from the current grant.
         missing: Vec<String>,
     },
 }
@@ -235,7 +269,9 @@ pub enum ToolPolicyDiagnosticReason {
 /// Frontend/audit diagnostic for child tool policy derivation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolPolicyDiagnostic {
+    /// Requested tool whose policy change could not be applied.
     pub tool_name: String,
+    /// Structured reason the tool was unavailable or excluded.
     pub reason: ToolPolicyDiagnosticReason,
 }
 

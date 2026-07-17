@@ -1,8 +1,16 @@
+//! Legacy linear prompt assembly and repository-instruction rendering.
+
 use crate::prompt::config::RepoInstructionPayload;
 
+/// Assembles instruction sources into provider-ready text.
 pub struct PromptAssembler;
 
 impl PromptAssembler {
+    /// Concatenates non-empty instruction sources in argument order.
+    ///
+    /// The order is baseline, repository instructions, additional inline
+    /// blocks, session instructions, skill instructions, and runtime context.
+    /// Adjacent sources are separated by two newlines.
     pub fn assemble(
         baseline: &str,
         repo_payload: &RepoInstructionPayload,
@@ -48,6 +56,10 @@ impl PromptAssembler {
         parts.join("\n\n")
     }
 
+    /// Renders repository and additional instruction files with source paths.
+    ///
+    /// Sources retain their payload order. Returns an empty string when the
+    /// payload contains no files.
     pub fn render_repo_instructions(payload: &RepoInstructionPayload) -> String {
         if payload.sources.is_empty() && payload.additional_files.is_empty() {
             return String::new();

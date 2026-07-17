@@ -1,10 +1,25 @@
-//! Context management: compression, telemetry, and handoff
+//! Context management: accounting, compression, model switching, and handoff.
 //!
 //! This module implements context management:
 //!
 //! - **`active_context`**: the provider-visible footprint of the next request
 //! - **`compressed_blocks`**: freeform compressed context summaries
 //! - **`handoff_bundle`**: portable continuity payload for cross-session transfer
+//!
+//! ```
+//! use iron_core::{Config, ContextManagementConfig, TailRetentionRule};
+//!
+//! let context = ContextManagementConfig::new()
+//!     .enabled()
+//!     .with_maintenance_threshold(32_000)
+//!     .with_context_window_hint(128_000)
+//!     .with_tail_retention(TailRetentionRule::Messages(16));
+//! context.validate()?;
+//!
+//! let config = Config::default().with_context_management(context);
+//! assert!(config.context_management.enabled);
+//! # Ok::<(), String>(())
+//! ```
 
 pub mod accounting;
 pub mod compaction;

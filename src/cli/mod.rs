@@ -36,13 +36,21 @@ use tokio_util::sync::CancellationToken;
 // Exit codes
 // ============================================================================
 
+/// Exit code for a successfully completed automation run.
 pub const EXIT_COMPLETED: i32 = 0;
+/// Exit code for invalid command-line arguments or a missing timeout.
 pub const EXIT_USAGE: i32 = 2;
+/// Exit code for configuration and stored-reference failures.
 pub const EXIT_CONFIG: i32 = 3;
+/// Exit code for an unsafe policy or unavailable required tool.
 pub const EXIT_UNSAFE_POLICY: i32 = 4;
+/// Exit code for provider initialization, credentials, or interactive authentication failures.
 pub const EXIT_PROVIDER_INIT: i32 = 5;
+/// Exit code for an automation execution failure without a more specific category.
 pub const EXIT_EXECUTION: i32 = 6;
+/// Exit code for a cancelled automation run.
 pub const EXIT_CANCELLED: i32 = 7;
+/// Exit code for an automation run that exceeded its timeout.
 pub const EXIT_TIMED_OUT: i32 = 8;
 
 // ============================================================================
@@ -52,7 +60,9 @@ pub const EXIT_TIMED_OUT: i32 = 8;
 /// Output format selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
+    /// Human-readable final assistant text.
     Text,
+    /// A versioned JSON representation of the complete run result.
     Json,
 }
 
@@ -63,17 +73,24 @@ pub enum OutputFormat {
 /// Parsed CLI arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliArgs {
+    /// Identifier of the stored automation task to run.
     pub task_id: String,
+    /// Optional ConfigStore database path supplied by `--config`.
     pub config: Option<String>,
+    /// Optional workspace path supplied by `--workspace`.
     pub workspace: Option<String>,
+    /// Optional duration string supplied by `--timeout`.
     pub timeout: Option<String>,
+    /// Optional output format supplied by `--format`.
     pub format: Option<String>,
+    /// Whether progress output on standard error is suppressed.
     pub quiet: bool,
 }
 
 /// Usage error from argument parsing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageError {
+    /// Human-readable error text, including usage help when appropriate.
     pub message: String,
 }
 
@@ -96,7 +113,13 @@ Options:
   -q, --quiet             Suppress progress output on stderr
   -h, --help              Show this help message";
 
-/// Parse command-line arguments (everything after the program name).
+/// Parses command-line arguments following the program name.
+///
+/// # Errors
+///
+/// Returns [`UsageError`] when the `run` subcommand, task ID, or an option
+/// value is missing, or when an unknown or extra argument is present. Help is
+/// also represented as a usage error containing the usage text.
 pub fn parse_args(args: &[String]) -> Result<CliArgs, UsageError> {
     if args.is_empty() {
         return Err(UsageError {
@@ -230,7 +253,12 @@ fn raw_args_request_json(args: &[String]) -> bool {
 
 /// Parse a positive duration string like `30s`, `5m`, `1h`.
 ///
-/// Returns an error for zero, negative, or malformed values.
+/// A value without a suffix is interpreted as seconds.
+///
+/// # Errors
+///
+/// Returns an error for zero, negative, malformed, unsupported-unit, or
+/// overflowing values.
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -276,6 +304,11 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
 /// Resolve workspace from CLI, environment, or task fallback.
 ///
 /// Canonicalizes the path and requires it to be an existing directory.
+///
+/// # Errors
+///
+/// Returns an error when no source supplies a path, the selected path is not
+/// an existing directory, or canonicalization fails.
 pub fn resolve_workspace(
     cli: Option<&str>,
     env: Option<&str>,
@@ -311,7 +344,12 @@ pub fn resolve_workspace(
     })
 }
 
-/// Resolve the ConfigStore database path from CLI, environment, or default.
+/// Resolves the ConfigStore database path from CLI, environment, or the platform default.
+///
+/// # Errors
+///
+/// Returns an error when the platform default cannot be determined and neither
+/// an explicit CLI nor environment path was supplied.
 pub fn resolve_config_path(cli: Option<&str>, env: Option<&str>) -> Result<PathBuf, String> {
     if let Some(p) = cli {
         return Ok(PathBuf::from(p));
@@ -322,7 +360,12 @@ pub fn resolve_config_path(cli: Option<&str>, env: Option<&str>) -> Result<PathB
     default_config_path().map_err(|e| format!("failed to determine default config path: {}", e))
 }
 
-/// Resolve timeout duration from CLI, environment, or task fallback.
+/// Resolves the timeout from CLI, environment, or the stored task fallback.
+///
+/// # Errors
+///
+/// Returns an error when the selected duration is invalid or no source
+/// supplies a timeout.
 pub fn resolve_timeout(
     cli: Option<&str>,
     env: Option<&str>,
@@ -339,7 +382,12 @@ pub fn resolve_timeout(
     })
 }
 
-/// Resolve output format from CLI or environment (default: text).
+/// Resolves output format from CLI or environment, defaulting to text.
+///
+/// # Errors
+///
+/// Returns an error unless the selected value is `text` or `json`, compared
+/// case-insensitively after trimming whitespace.
 pub fn resolve_format(cli: Option<&str>, env: Option<&str>) -> Result<OutputFormat, String> {
     let raw = cli.or(env).unwrap_or("text");
     match raw.trim().to_lowercase().as_str() {
@@ -352,7 +400,10 @@ pub fn resolve_format(cli: Option<&str>, env: Option<&str>) -> Result<OutputForm
     }
 }
 
-/// Resolve quiet flag from CLI flag or environment.
+/// Resolves quiet mode from the CLI flag or environment.
+///
+/// A set CLI flag always wins. Otherwise, environment values `1`, `true`, and
+/// `yes` enable quiet mode, compared case-insensitively after trimming.
 pub fn resolve_quiet(quiet_flag: bool, env: Option<&str>) -> bool {
     if quiet_flag {
         return true;
@@ -439,7 +490,10 @@ pub fn format_text_output(result: &AutomationRunResult) -> String {
     result.output.clone()
 }
 
-/// Format a run result as a single versioned JSON object.
+/// Formats a run result as one pretty-printed, versioned JSON object.
+///
+/// If serialization unexpectedly fails, returns a minimal versioned execution
+/// failure object instead.
 pub fn format_json_output(result: &AutomationRunResult) -> String {
     serde_json::to_string_pretty(result).unwrap_or_else(|e| {
         format!(
@@ -485,7 +539,8 @@ async fn wait_for_signal() {
 ///
 /// Returns the process exit code. This function is intended to be called
 /// from the binary's `main` on a `current_thread` Tokio runtime inside a
-/// `LocalSet`.
+/// `LocalSet`. It reads process environment variables and writes the final
+/// result to standard output and diagnostics to standard error.
 pub async fn execute_run(args: &[String]) -> i32 {
     let env: Vec<(String, String)> = std::env::vars().collect();
     execute_run_with_streams(
@@ -499,7 +554,8 @@ pub async fn execute_run(args: &[String]) -> i32 {
 
 /// Execute a headless run using the provided environment variables.
 ///
-/// Separated from [`execute_run`] for testability.
+/// Separated from [`execute_run`] for testability. Output is still written to
+/// the process standard streams.
 pub async fn execute_run_with_env(args: &[String], env: &mut [(String, String)]) -> i32 {
     execute_run_with_streams(args, env, &mut std::io::stdout(), &mut std::io::stderr()).await
 }
@@ -507,7 +563,9 @@ pub async fn execute_run_with_env(args: &[String], env: &mut [(String, String)])
 /// Execute a headless run writing output to the provided writers.
 ///
 /// This is the core implementation. Tests pass `Vec<u8>` buffers to capture
-/// stdout and stderr.
+/// stdout and stderr. The environment slice is consulted instead of the
+/// process environment, and the returned value is one of the stable `EXIT_*`
+/// codes exposed by this module.
 pub async fn execute_run_with_streams(
     args: &[String],
     env: &mut [(String, String)],

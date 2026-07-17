@@ -11,7 +11,10 @@ use std::time::SystemTime;
 ///
 /// Examples: `"kimi-code"`, `"codex"`, `"openai"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ProviderSlug(pub String);
+pub struct ProviderSlug(
+    /// Canonical provider identifier used by profiles, stores, and registries.
+    pub String,
+);
 
 impl ProviderSlug {
     /// Create a new provider slug.
@@ -94,13 +97,19 @@ pub enum ProviderAuthStatus {
     /// An API key is configured.
     ConfiguredApiKey,
     /// OAuth is connected with a known expiry.
-    ConnectedOAuth { expires_at: Option<SystemTime> },
-    /// OAuth refresh is in progress.
+    ConnectedOAuth {
+        /// Known access-token expiry, or `None` when the provider omitted it.
+        expires_at: Option<SystemTime>,
+    },
+    /// OAuth refresh is due because the token is expired or nearing expiry.
     Refreshing,
     /// OAuth access token has expired.
     Expired,
     /// OAuth refresh failed with a reason.
-    RefreshFailed { reason: String },
+    RefreshFailed {
+        /// Sanitized reason the most recent refresh attempt failed.
+        reason: String,
+    },
     /// OAuth credential was revoked.
     Revoked,
     /// The configured credential mode is not supported by the provider.
@@ -117,7 +126,9 @@ pub enum ProviderAuthError {
     /// The provider does not support the configured credential mode.
     #[error("Provider '{provider}' does not support credential mode {mode:?}")]
     UnsupportedCredential {
+        /// Provider whose capability does not include the stored mode.
         provider: String,
+        /// Credential mode rejected by the provider profile.
         mode: CredentialMode,
     },
 
@@ -127,7 +138,12 @@ pub enum ProviderAuthError {
 
     /// OAuth token refresh failed.
     #[error("OAuth refresh failed for provider '{provider}': {reason}")]
-    RefreshFailed { provider: String, reason: String },
+    RefreshFailed {
+        /// Provider whose OAuth token could not be refreshed.
+        provider: String,
+        /// Network, protocol, or response-validation failure.
+        reason: String,
+    },
 
     /// The OAuth credential was revoked.
     #[error("OAuth credential revoked for provider '{0}'")]
@@ -135,7 +151,12 @@ pub enum ProviderAuthError {
 
     /// A durable credential store operation failed.
     #[error("Credential store error for provider '{provider}': {reason}")]
-    StoreError { provider: String, reason: String },
+    StoreError {
+        /// Provider whose credential operation failed.
+        provider: String,
+        /// Durable storage, key-source, serialization, or encryption failure.
+        reason: String,
+    },
 }
 
 /// Result type for provider credential operations.

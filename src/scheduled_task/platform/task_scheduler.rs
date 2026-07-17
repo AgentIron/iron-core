@@ -2,7 +2,11 @@
 //!
 //! Manages tasks under `\AgentIron\Tasks\<id>` using generated Task Scheduler
 //! XML. Uses `schtasks.exe` for lifecycle operations. Cron expressions are
-//! compiled into Task Scheduler triggers.
+//! compiled into calendar triggers, with separate monthly and weekly triggers
+//! preserving cron's day-of-month OR weekday semantics. Expansion rejects
+//! definitions whose represented field values exceed [`MAX_TRIGGERS`].
+//! Inspection recovers enabled and command state from XML but does not
+//! reconstruct the original cron expression.
 //!
 //! The XML rendering and cron expansion logic is platform-independent and
 //! tested here. The actual `schtasks.exe` execution requires Windows.
@@ -25,12 +29,21 @@ pub const MAX_TRIGGERS: usize = 64;
 // ============================================================================
 
 /// A Task Scheduler calendar trigger specification.
+///
+/// Values are expanded numeric cron matches. Rendering emits one Windows
+/// calendar trigger per minute/hour pair and preserves cron's day-of-month OR
+/// day-of-week behavior by emitting separate monthly and weekly triggers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskTrigger {
+    /// Matching minutes in `0..=59`.
     pub minutes: Vec<u32>,
+    /// Matching hours in `0..=23`.
     pub hours: Vec<u32>,
+    /// Matching days of month in `1..=31`.
     pub days_of_month: Vec<u32>,
+    /// Matching months in `1..=12`.
     pub months: Vec<u32>,
+    /// Matching cron weekdays, where `0` is Sunday and `6` is Saturday.
     pub days_of_week: Vec<u32>,
 }
 
@@ -324,6 +337,7 @@ pub struct TaskSchedulerHostScheduler {
 }
 
 impl TaskSchedulerHostScheduler {
+    /// Create a Windows Task Scheduler adapter using the supplied command runner.
     pub fn new(runner: Box<dyn CommandRunner>) -> Self {
         Self { runner }
     }

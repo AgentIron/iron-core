@@ -1,3 +1,5 @@
+//! Filesystem loading for repository-level prompt instructions.
+
 use std::path::{Path, PathBuf};
 
 use crate::error::RuntimeError;
@@ -6,9 +8,20 @@ use crate::prompt::config::{
     RepoInstructionPayload, RepoInstructionSource,
 };
 
+/// Resolves configured repository instruction files into prompt payloads.
 pub struct RepoInstructionLoader;
 
 impl RepoInstructionLoader {
+    /// Loads at most one preferred instruction file from each configured scope.
+    ///
+    /// Scopes are processed in configuration order. Missing files and unreadable
+    /// preferred files are skipped, and a disabled configuration returns an
+    /// empty payload.
+    ///
+    /// # Errors
+    ///
+    /// The current resolver performs best-effort reads and does not return an
+    /// error, but the result remains fallible for API consistency.
     pub fn resolve(config: &RepoInstructionConfig) -> Result<RepoInstructionPayload, RuntimeError> {
         if !config.enabled {
             return Ok(RepoInstructionPayload::default());
@@ -27,6 +40,14 @@ impl RepoInstructionLoader {
         })
     }
 
+    /// Appends explicitly configured instruction files to an existing payload.
+    ///
+    /// Files are read and appended in slice order. If a read fails, previously
+    /// appended files remain in `payload` and later files are not attempted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] when a file cannot be read as UTF-8 text.
     pub fn load_additional_files(
         payload: &mut RepoInstructionPayload,
         files: &[PathBuf],

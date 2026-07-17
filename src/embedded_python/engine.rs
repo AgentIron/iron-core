@@ -1,3 +1,5 @@
+//! Monty-backed sandboxed script engine and per-execution state.
+
 use crate::config::EmbeddedPythonConfig;
 use crate::embedded_python::convert::{json_to_monty, make_iron_exception, monty_to_json};
 use crate::embedded_python::types::{
@@ -15,11 +17,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Host callback used to execute a child tool call requested by a script.
+///
+/// Arguments are the generated call ID, registered tool name, and JSON object
+/// payload. The callback returns the terminal child-call status and optional
+/// JSON result or failure detail.
 pub type ToolExecutorFn =
     dyn Fn(&str, &str, Value) -> (ChildCallStatus, Option<Value>) + Send + Sync;
 
+/// A configured, single-script execution.
+///
+/// Runs enforce source-size, serialized-result-size, wall-clock, child-call,
+/// cancellation, and host OS-access limits. The cancellation flag may be set
+/// from another thread before or during execution.
 pub struct ScriptRun {
+    /// Source and structured input for this run.
     pub input: ScriptInput,
+    /// Resource limits and feature settings captured when the run was created.
     pub config: EmbeddedPythonConfig,
     cancel_token: Arc<AtomicBool>,
     child_outcomes: Arc<Mutex<Vec<ChildCallOutcome>>>,
@@ -28,6 +42,7 @@ pub struct ScriptRun {
 }
 
 impl ScriptRun {
+    /// Creates a run using a snapshot of `config` and a shared cancellation flag.
     pub fn new(
         input: ScriptInput,
         config: &EmbeddedPythonConfig,
@@ -43,21 +58,36 @@ impl ScriptRun {
         }
     }
 
+    /// Installs the host callback for child tool calls.
+    ///
+    /// Without an executor, attempted child calls are recorded as failed.
     pub fn with_tool_executor(mut self, executor: Arc<ToolExecutorFn>) -> Self {
         self.tool_executor = Some(executor);
         self
     }
 
+    /// Replaces the tools namespace catalog used by this run.
     pub(crate) fn with_tool_catalog(mut self, catalog: ToolCatalog) -> Self {
         self.tool_catalog = catalog;
         self
     }
 
+    /// Populates the script-visible tools namespace from a runtime registry.
+    ///
+    /// Tool definitions are snapshotted when this method is called. Calls are
+    /// still dispatched through the separately configured [`ToolExecutorFn`].
     pub fn with_tool_catalog_from_registry(mut self, registry: &ToolRegistry) -> Self {
         self.tool_catalog = ToolCatalog::from_definitions(registry.definitions());
         self
     }
 
+    /// Executes the script synchronously to a terminal output.
+    ///
+    /// The script receives `input` and `tools` globals. It may call cataloged
+    /// tools through `tools.<alias>(payload)`, `tools.call(name, payload)`, or
+    /// the low-level `iron_call(name, payload)`. Direct host OS operations are
+    /// rejected. The configured timeout is enforced by the interpreter; source
+    /// and serialized result byte limits are checked before and after execution.
     pub fn execute(&self) -> ScriptOutput {
         if self.cancel_token.load(Ordering::SeqCst) {
             return ScriptOutput::cancelled();
@@ -506,21 +536,28 @@ enum ResolvedFunctionCall {
     Error(MontyException),
 }
 
+/// Factory for embedded-Python runs sharing one configuration snapshot.
 pub struct ScriptEngine {
+    /// Configuration copied into each run created by this engine.
     pub config: EmbeddedPythonConfig,
 }
 
 impl ScriptEngine {
+    /// Creates an engine by cloning the supplied embedded-Python configuration.
     pub fn new(config: &EmbeddedPythonConfig) -> Self {
         Self {
             config: config.clone(),
         }
     }
 
+    /// Returns whether embedded-Python execution is enabled by configuration.
     pub fn is_enabled(&self) -> bool {
         self.config.enabled
     }
 
+    /// Creates a run with a new, initially unset cancellation flag.
+    ///
+    /// No child tool executor or tool catalog is installed automatically.
     pub fn create_run(&self, input: ScriptInput) -> ScriptRun {
         let cancel_token = Arc::new(AtomicBool::new(false));
         ScriptRun::new(input, &self.config, cancel_token)

@@ -1,3 +1,10 @@
+//! Shared runtime inventory, health, authentication, and availability for plugins.
+//!
+//! [`PluginRegistry`] stores lifecycle state independently from per-session
+//! enablement. Registry mutations increment a version for catalog invalidation;
+//! availability snapshots consistently apply plugin health, auth state, and
+//! granted OAuth scopes.
+
 use crate::plugin::auth::{
     AuthActionHint, AuthAvailability, AuthPrompt, AuthState, CredentialBinding,
 };
@@ -16,9 +23,12 @@ use std::sync::{
 };
 use tracing::{info, warn};
 
-/// Stable identifier for a plugin
+/// Stable identifier for a plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PluginId(pub String);
+pub struct PluginId(
+    /// String form used as the registry key and tool namespace component.
+    pub String,
+);
 
 impl std::fmt::Display for PluginId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -99,6 +109,7 @@ pub struct PluginState {
 }
 
 impl PluginState {
+    /// Creates configured runtime state with no loaded artifact, manifest, or credentials.
     pub fn new(config: PluginConfig) -> Self {
         // Runtime health starts as Configured regardless of session-level
         // enablement defaults.  Session enablement is a separate concern
@@ -217,6 +228,7 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
+    /// Creates an empty plugin registry with mutation version zero.
     pub fn new() -> Self {
         Self {
             plugins: Arc::new(RwLock::new(HashMap::new())),
@@ -430,7 +442,12 @@ impl PluginRegistry {
         }
     }
 
-    /// Start authentication flow
+    /// Transitions an eligible plugin into the authenticating state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plugin is unknown, already authenticating,
+    /// or already authenticated.
     pub fn start_authentication(&self, plugin_id: &str) -> Result<(), String> {
         let mut plugins = self.plugins.write();
         if let Some(state) = plugins.get_mut(plugin_id) {

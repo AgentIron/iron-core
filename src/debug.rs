@@ -13,9 +13,25 @@
 //!
 //! ## Usage
 //!
-//! ```rust,ignore
-//! let runtime = IronRuntime::new(config, provider);
-//! runtime.set_debug_sink(Some(Arc::new(MyDebugSink)));
+//! ```no_run
+//! use iron_core::{Config, DebugEvent, DebugSink, IronAgent};
+//! use iron_providers::{ApiFamily, ProviderConnection, ProviderProfile, RuntimeConfig};
+//! use std::sync::Arc;
+//!
+//! struct MyDebugSink;
+//! impl DebugSink for MyDebugSink {
+//!     fn emit(&self, event: DebugEvent) {
+//!         eprintln!("debug event {}: {:?}", event.sequence, event.payload);
+//!     }
+//! }
+//!
+//! let provider = ProviderConnection::from_profile(
+//!     ProviderProfile::new("openai", ApiFamily::Responses, "https://api.openai.com/v1"),
+//!     RuntimeConfig::new("sk-example"),
+//! )?;
+//! let agent = IronAgent::new(Config::default(), provider);
+//! agent.set_debug_sink(Some(Arc::new(MyDebugSink)));
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! ## Redaction
@@ -29,10 +45,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A sink that receives structured debug events from the runtime.
 ///
-/// Implementations should return quickly and not block the runtime.
-/// Debug observation is best-effort: sink failures or slowness must
-/// never affect prompt execution, tool execution, model switching,
-/// or session state.
+/// Emission is synchronous and is not isolated from the caller. Implementations
+/// must return quickly, avoid blocking, and avoid panicking so observation does
+/// not disrupt prompt execution, tool execution, model switching, or session
+/// state.
 pub trait DebugSink: Send + Sync {
     /// Emit a debug event. This is synchronous and should not block.
     fn emit(&self, event: DebugEvent);
@@ -52,10 +68,15 @@ impl DebugSink for NullDebugSink {
 /// for correct behavior.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DebugEvent {
+    /// UTC time at which the event envelope was created.
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Runtime-local monotonically increasing event sequence number.
     pub sequence: u64,
+    /// Operational importance assigned by the emitter.
     pub severity: DebugSeverity,
+    /// Correlation identifiers available at the emission site.
     pub scope: DebugScope,
+    /// Domain-specific observation carried by the event.
     pub payload: DebugPayload,
 }
 
@@ -63,8 +84,11 @@ pub struct DebugEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DebugSeverity {
+    /// Informational observation of normal runtime behavior.
     Info,
+    /// Unexpected or degraded behavior that did not necessarily stop execution.
     Warning,
+    /// A semantic operation failed.
     Error,
 }
 
@@ -77,12 +101,19 @@ pub enum DebugSeverity {
 /// turn, and tool-call scope where available.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DebugScope {
+    /// Identifier of the runtime instance, when assigned.
     pub runtime_id: Option<String>,
+    /// Identifier of the client connection, when the event is connection-scoped.
     pub connection_id: Option<String>,
+    /// Session associated with the event.
     pub session_id: Option<crate::SessionId>,
+    /// Prompt-turn identifier associated with the event.
     pub turn_id: Option<String>,
+    /// Tool-call identifier associated with the event.
     pub tool_call_id: Option<String>,
+    /// Provider selected for the relevant model request.
     pub provider_name: Option<String>,
+    /// Model selected for the relevant model request.
     pub model_id: Option<String>,
 }
 
@@ -94,78 +125,135 @@ pub struct DebugScope {
 #[non_exhaustive]
 pub enum DebugPayload {
     /// Prompt-related debug events.
-    Prompt(PromptDebugEvent),
+    Prompt(
+        /// Prompt observation details.
+        PromptDebugEvent,
+    ),
     /// Context-related debug events.
-    Context(ContextDebugEvent),
+    Context(
+        /// Context observation details.
+        ContextDebugEvent,
+    ),
     /// Compaction-related debug events.
-    Compaction(CompactionDebugEvent),
+    Compaction(
+        /// Compaction observation details.
+        CompactionDebugEvent,
+    ),
     /// Tool-related debug events.
-    Tool(ToolDebugEvent),
+    Tool(
+        /// Tool observation details.
+        ToolDebugEvent,
+    ),
     /// Provider/model-switch-related debug events.
-    Provider(ProviderDebugEvent),
+    Provider(
+        /// Provider or model-switch observation details.
+        ProviderDebugEvent,
+    ),
     /// Configuration-related debug events.
-    Config(ConfigDebugEvent),
+    Config(
+        /// Redacted configuration observation details.
+        ConfigDebugEvent,
+    ),
     /// Skill-related debug events.
-    Skill(SkillDebugEvent),
+    Skill(
+        /// Skill observation details.
+        SkillDebugEvent,
+    ),
 }
 
 // ── Prompt ──────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
+/// Observations about prompt construction and model-input influences.
 pub enum PromptDebugEvent {
     /// A system prompt was rendered for an inference request.
     SystemPromptRendered {
+        /// Stable digest of the rendered prompt, without exposing its text.
         fingerprint: String,
+        /// Character count of the complete rendered prompt.
         total_chars: usize,
+        /// Safe metadata for each composed prompt section.
         sections: Vec<SectionSummary>,
+        /// Whether the fingerprint changed from the prior render, if known.
         changed: Option<bool>,
     },
     /// A model input influence was added, removed, changed, or suppressed.
     ModelInputInfluence {
+        /// Runtime condition or instruction that caused the influence.
         source: InfluenceSource,
+        /// Model-input component affected by the influence.
         destination: InfluenceDestination,
+        /// How the destination was altered.
         effect: InfluenceEffect,
+        /// Safe explanation of why the influence was applied.
         reason: String,
     },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+/// Sources that can influence model input composition.
 pub enum InfluenceSource {
+    /// Current context-window pressure.
     ContextPressure,
+    /// Whether context compaction is available.
     CompactionAvailability,
+    /// Tools currently visible to the model.
     ToolAvailability,
+    /// Activation of a reusable skill.
     SkillActivation,
+    /// Provider-specific request guidance.
     ProviderGuidance,
+    /// Explicit instruction from the connected client.
     ClientInstruction,
+    /// Instruction discovered in the active repository.
     RepoInstruction,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+/// Model-input components that can be influenced by runtime decisions.
 pub enum InfluenceDestination {
-    SystemPromptSection(String),
+    /// Named section of the rendered system prompt.
+    SystemPromptSection(
+        /// Human-readable name of the affected section.
+        String,
+    ),
+    /// Transformation of the user-supplied prompt.
     UserPromptRewrite,
+    /// Definition of a model-visible tool.
     ToolDefinition,
+    /// Context supplied to continue a prior interaction.
     ContinuationContext,
+    /// Provider request metadata outside prompt text.
     RequestMetadata,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+/// Kind of change made to a model-input component.
 pub enum InfluenceEffect {
+    /// New content or metadata was introduced.
     Added,
+    /// Existing content or metadata was removed.
     Removed,
+    /// Existing content or metadata was modified.
     Changed,
+    /// A candidate influence was intentionally not applied.
     Suppressed,
 }
 
+/// Safe metadata describing one rendered system-prompt section.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SectionSummary {
+    /// Human-readable section title.
     pub name: String,
+    /// Component responsible for the section, when available.
     pub owner: Option<String>,
+    /// Section stability classification, when available.
     pub temperature: Option<String>,
+    /// Character count of the section, or zero when unavailable.
     pub chars: usize,
 }
 
@@ -173,21 +261,32 @@ pub struct SectionSummary {
 
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
+/// Observations about context size, quality, and pressure transitions.
 pub enum ContextDebugEvent {
     /// Active context snapshot was estimated.
     SnapshotEstimated {
+        /// Estimated tokens in active model context.
         total_tokens: usize,
+        /// Maximum model context size, when known.
         context_window_limit: Option<usize>,
+        /// Token threshold at which compaction is considered, when configured.
         compact_threshold_tokens: Option<usize>,
+        /// Confidence or completeness of the context estimate.
         quality: crate::ContextQuality,
+        /// Current context-pressure classification.
         pressure: String,
+        /// Per-category token estimates and their quality classifications.
         categories: Vec<(String, usize, crate::ContextQuality)>,
+        /// Provider-reported cumulative usage, when available.
         accumulated_usage: Option<crate::context::TokenUsageTotals>,
     },
     /// Context pressure classification changed.
     PressureChanged {
+        /// Pressure classification before the transition.
         old_pressure: String,
+        /// Pressure classification after the transition.
         new_pressure: String,
+        /// Safe explanation of the transition.
         reason: String,
     },
 }
@@ -196,22 +295,35 @@ pub enum ContextDebugEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
+/// Observations from the context-compaction lifecycle.
 pub enum CompactionDebugEvent {
     /// The model requested compaction.
     Requested {
+        /// Whether the request specified a compaction topic.
         topic_present: bool,
+        /// Number of transcript ranges requested for compaction.
         range_count: usize,
+        /// Safe rendering of applicable thresholds, when available.
         thresholds: Option<String>,
     },
     /// Compaction was rejected by validation.
-    Rejected { reason: String },
+    Rejected {
+        /// Validation reason for rejecting the request.
+        reason: String,
+    },
     /// Compaction was applied successfully.
     Applied {
+        /// Number of transcript blocks compacted.
         block_count: usize,
+        /// Estimated token count before compaction, when available.
         old_size_tokens: Option<usize>,
+        /// Estimated token count after compaction, when available.
         new_size_tokens: Option<usize>,
+        /// Compaction strategy or implementation, when reported.
         method: Option<String>,
+        /// Context-pressure classification after compaction.
         pressure_state: String,
+        /// Percentage token reduction, when both estimates are available.
         reduction_pct: Option<f64>,
     },
 }
@@ -220,28 +332,43 @@ pub enum CompactionDebugEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
+/// Observations from tool approval and execution.
 pub enum ToolDebugEvent {
     /// Tool approval was evaluated.
     ApprovalEvaluated {
+        /// Registered name of the proposed tool.
         tool_name: String,
+        /// Final approval decision.
         approved: bool,
+        /// Policy, user, or other source of the decision.
         decision_source: String,
+        /// Whether evaluation required a user-facing approval request.
         user_approval_requested: bool,
+        /// Safe explanation of the decision.
         reason: String,
     },
     /// Tool execution started.
     ExecutionStarted {
+        /// Registered name of the executing tool.
         tool_name: String,
+        /// Tool provider category, such as builtin or plugin.
         tool_source: String,
+        /// Identifier correlating this start with its completion event.
         call_id: String,
     },
     /// Tool execution finished.
     ExecutionFinished {
+        /// Registered name of the executed tool.
         tool_name: String,
+        /// Identifier correlating this completion with its start event.
         call_id: String,
+        /// Terminal execution status.
         status: String,
+        /// Elapsed execution time in milliseconds, when measured.
         duration_ms: Option<u64>,
+        /// Whether returned tool content was truncated.
         truncated: bool,
+        /// Safe failure or truncation explanation, when available.
         reason: Option<String>,
     },
 }
@@ -250,31 +377,46 @@ pub enum ToolDebugEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
+/// Observations from provider and model-switch decisions.
 pub enum ProviderDebugEvent {
     /// A model switch was queued for the next turn boundary.
     ModelSwitchQueued {
+        /// Model requested for the next turn.
         target_model: String,
+        /// Provider that serves the target model.
         target_provider: String,
     },
     /// A model switch plan was created.
     ModelSwitchPlanCreated {
+        /// Estimated tokens in the current context.
         current_tokens: usize,
+        /// Context-window size of the target model, when known.
         target_window: Option<usize>,
+        /// Whether context must be adapted before switching.
         adaptation_needed: bool,
+        /// Quality classification of the token estimate.
         estimate_quality: String,
     },
     /// A model switch was applied.
     ModelSwitchApplied {
+        /// Model active before the switch.
         from_model: String,
+        /// Provider active before the switch.
         from_provider: String,
+        /// Model active after the switch.
         to_model: String,
+        /// Provider active after the switch.
         to_provider: String,
+        /// Safe summary of capability changes, when available.
         capability_diff: Option<String>,
     },
     /// A model switch failed.
     ModelSwitchFailed {
+        /// Model that could not be activated.
         target_model: String,
+        /// Provider that could not serve the switch.
         target_provider: String,
+        /// Safe explanation of the failure.
         reason: String,
     },
 }
@@ -283,18 +425,29 @@ pub enum ProviderDebugEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
+/// Redacted observations about effective runtime configuration.
 pub enum ConfigDebugEvent {
     /// Runtime was initialized with a configuration summary.
     RuntimeConfigured {
+        /// Selected provider name.
         provider_name: String,
+        /// Selected model identifier.
         model_id: String,
+        /// Safe rendering of the default approval strategy.
         approval_strategy: String,
+        /// Whether automatic context management is enabled.
         context_management_enabled: bool,
+        /// Whether repository prompt composition is enabled.
         prompt_composition_enabled: bool,
+        /// Safe rendering of the default tool policy.
         tool_policy: String,
+        /// Whether plugin loading is enabled.
         plugin_enabled: bool,
+        /// Whether MCP integration is enabled.
         mcp_enabled: bool,
+        /// Whether skill discovery and activation are enabled.
         skill_enabled: bool,
+        /// Number of configured workspace roots.
         workspace_roots: usize,
     },
 }
@@ -303,28 +456,44 @@ pub enum ConfigDebugEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
+/// Observations from skill discovery, availability, and activation.
 pub enum SkillDebugEvent {
     /// Skill catalog was refreshed.
     CatalogRefreshed {
+        /// Safe names of catalog sources that were scanned.
         sources: Vec<String>,
+        /// Number of skills discovered before trust filtering.
         discovered_count: usize,
+        /// Number of discovered skills accepted as trusted.
         trusted_count: usize,
+        /// Number of discovered skills classified as untrusted.
         untrusted_count: usize,
+        /// Number of diagnostics produced during refresh.
         diagnostic_count: usize,
     },
     /// Skills were made available to a session.
     AvailableToSession {
+        /// Number of skills exposed to the session.
         count: usize,
+        /// Categories of sources contributing available skills.
         source_categories: Vec<String>,
     },
     /// Skill activation succeeded.
     ActivationSuccess {
+        /// Name of the activated skill.
         skill_name: String,
+        /// Kind of source from which the skill was loaded.
         source_kind: String,
+        /// Runtime action or request that triggered activation.
         activation_source: String,
     },
     /// Skill activation was rejected.
-    ActivationRejected { skill_name: String, reason: String },
+    ActivationRejected {
+        /// Name of the skill that was not activated.
+        skill_name: String,
+        /// Safe explanation of the rejection.
+        reason: String,
+    },
 }
 
 // ── Internal helpers ────────────────────────────────────────────
@@ -335,12 +504,14 @@ pub(crate) struct SequenceGenerator {
 }
 
 impl SequenceGenerator {
+    /// Creates a generator whose first returned sequence is one.
     pub(crate) fn new() -> Self {
         Self {
             counter: AtomicU64::new(1),
         }
     }
 
+    /// Atomically returns the next runtime-local sequence number.
     pub(crate) fn next(&self) -> u64 {
         self.counter.fetch_add(1, Ordering::Relaxed)
     }
@@ -359,6 +530,7 @@ impl Default for SequenceGenerator {
 /// through runtime → connection → session → turn → tool call.
 #[derive(Clone, Debug, Default)]
 pub struct DebugContext {
+    /// Correlation scope copied into events built from this context.
     pub scope: DebugScope,
 }
 
@@ -401,19 +573,19 @@ impl DebugContext {
         fork
     }
 
-    /// Set provider name in scope.
+    /// Sets the provider name in this context and returns it for chaining.
     pub fn with_provider(&mut self, provider: impl Into<String>) -> &mut Self {
         self.scope.provider_name = Some(provider.into());
         self
     }
 
-    /// Set model id in scope.
+    /// Sets the model identifier in this context and returns it for chaining.
     pub fn with_model(&mut self, model: impl Into<String>) -> &mut Self {
         self.scope.model_id = Some(model.into());
         self
     }
 
-    /// Build a DebugEvent from this context.
+    /// Builds a timestamped [`DebugEvent`] by cloning this context's scope.
     pub fn event(
         &self,
         sequence: u64,
@@ -500,6 +672,7 @@ pub(crate) fn emit_debug(sink: &dyn DebugSink, event: DebugEvent) {
 // ── Test utilities ──────────────────────────────────────────────
 
 #[cfg(test)]
+/// Debug sinks used by this module's tests and crate-internal test suites.
 pub(crate) mod test_helpers {
     use super::*;
     use std::sync::Mutex;
@@ -511,6 +684,7 @@ pub(crate) mod test_helpers {
     }
 
     impl RecordingDebugSink {
+        /// Creates an empty recording sink.
         pub fn new() -> Self {
             Self::default()
         }

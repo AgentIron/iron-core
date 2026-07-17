@@ -4,6 +4,19 @@
 //! a five-field cron expression and enabled state. Schedules never contain
 //! executable paths, shell commands, prompt text, or environment variables —
 //! the installed host entry is always a core-generated `agent-iron run` call.
+//!
+//! ```
+//! use iron_core::scheduled_task::{validate_schedule_input, ScheduledTaskInput};
+//!
+//! let schedule = validate_schedule_input(&ScheduledTaskInput {
+//!     id: "weekday-review".into(),
+//!     automation_task_id: "daily-review".into(),
+//!     cron_expression: "0 9 * * 1-5".into(),
+//!     enabled: true,
+//! })?;
+//! assert_eq!(schedule.cron_expression, "0 9 * * 1-5");
+//! # Ok::<(), String>(())
+//! ```
 
 pub mod cron;
 pub mod host;

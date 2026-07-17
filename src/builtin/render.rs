@@ -50,6 +50,10 @@ pub fn render_skip_warning(count: usize) -> String {
     )
 }
 
+/// Render a one-line summary for a filesystem mutation.
+///
+/// The path is made relative to the most specific matching root. Non-empty
+/// detail is appended in parentheses.
 pub fn render_mutation_summary(
     operation: &str,
     path: &Path,
@@ -65,6 +69,7 @@ pub fn render_mutation_summary(
     }
 }
 
+/// Join already-rendered directory entries with newline separators.
 pub fn render_directory_entries(entries: &[String]) -> String {
     entries.join("\n")
 }

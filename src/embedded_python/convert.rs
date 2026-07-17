@@ -1,8 +1,13 @@
+//! Conversions between JSON values, Monty values, and script exceptions.
+
 use monty::{DictPairs, ExcType, MontyException, MontyObject};
 use num_bigint::BigInt;
 use num_traits::Zero;
 use serde_json::Value;
 
+/// Converts a JSON value into the corresponding embedded-Python value.
+///
+/// JSON arrays and objects become Python lists and dictionaries recursively.
 pub fn json_to_monty(value: &Value) -> MontyObject {
     match value {
         Value::Null => MontyObject::None,
@@ -26,6 +31,11 @@ pub fn json_to_monty(value: &Value) -> MontyObject {
     }
 }
 
+/// Converts an embedded-Python value into JSON-compatible output.
+///
+/// Tuples become arrays, dictionary keys are converted to strings, non-finite
+/// `NaN` becomes the string `"NaN"`, and integers outside the JSON `i64` range
+/// become decimal strings. Unsupported runtime objects become JSON `null`.
 pub fn monty_to_json(obj: &MontyObject) -> Value {
     match obj {
         MontyObject::None => Value::Null,
@@ -79,6 +89,11 @@ fn bigint_to_json(bi: &BigInt) -> Value {
     }
 }
 
+/// Creates the Python exception used to report a child tool-call failure.
+///
+/// Recognized timeout names map to Python `TimeoutError`; other tool failure,
+/// denial, and cancellation names map to `RuntimeError`. The supplied type name
+/// is retained as a prefix in the exception message.
 pub fn make_iron_exception(type_name: &str, message: &str) -> MontyException {
     let exc_type = match type_name {
         "ToolFailedError" | "ToolError" => ExcType::RuntimeError,

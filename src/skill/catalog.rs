@@ -1,3 +1,9 @@
+//! Unified skill catalog and source-precedence resolution.
+//!
+//! Discovery fully loads source entries into owned snapshots. Name collisions
+//! resolve deterministically by [`crate::skill::origin_precedence`], while
+//! shadowing and load failures remain available as diagnostics.
+
 use crate::skill::source::SkillSource;
 use crate::skill::{
     origin_precedence, DiagnosticLevel, LoadedSkill, SkillDiagnostic, SkillMetadata,
@@ -108,7 +114,7 @@ impl SkillCatalog {
         self.diagnostics.extend(diagnostics);
     }
 
-    /// Register a skill directly into the catalog.
+    /// Register a skill directly, applying the same origin precedence used by discovery.
     pub fn register(&mut self, skill: LoadedSkill) {
         self.insert(skill.metadata.id.clone(), skill);
     }

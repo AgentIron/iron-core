@@ -36,6 +36,20 @@
 //!
 //! The module is additive: existing injected-provider paths in `IronAgent` and
 //! `IronRuntime` continue to work without using any of these types.
+//!
+//! ```
+//! use iron_core::provider_credential::{
+//!     CredentialMode, InMemoryCredentialStore, StoredCredential,
+//! };
+//! use std::collections::HashMap;
+//!
+//! let credentials = HashMap::from([
+//!     ("openai".into(), StoredCredential::ApiKey("sk-example".into())),
+//! ]);
+//! let store = InMemoryCredentialStore::from_map(credentials);
+//! let snapshot = store.snapshot();
+//! assert_eq!(snapshot["openai"].mode(), CredentialMode::ApiKey);
+//! ```
 
 pub mod domain;
 pub mod durable_store;

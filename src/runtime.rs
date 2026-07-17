@@ -132,7 +132,10 @@ struct RuntimeConnection {
 
 /// Stable identifier for a client connection registered with the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ConnectionId(pub u64);
+pub struct ConnectionId(
+    /// Process-local numeric connection identifier.
+    pub u64,
+);
 
 static CONNECTION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -945,6 +948,7 @@ impl IronRuntime {
         }
     }
 
+    /// Returns the shared manager responsible for MCP server connections.
     pub fn mcp_connection_manager(&self) -> Arc<McpConnectionManager> {
         self.inner.mcp_connection_manager.clone()
     }
@@ -1079,6 +1083,7 @@ impl IronRuntime {
         diagnostics
     }
 
+    /// Clones the runtime skill catalog into a session-initialization snapshot.
     pub(crate) fn available_skill_snapshot(&self) -> Vec<LoadedSkill> {
         self.skill_catalog()
             .list_all()
@@ -1232,6 +1237,9 @@ impl IronRuntime {
         true
     }
 
+    /// Registers an active client connection under a preallocated identifier.
+    ///
+    /// Registering an existing identifier replaces its prior runtime record.
     pub fn register_connection(&self, id: ConnectionId) {
         let conn = Arc::new(RuntimeConnection {
             active: AtomicBool::new(true),
@@ -1239,6 +1247,7 @@ impl IronRuntime {
         self.inner.connections.write().insert(id, conn);
     }
 
+    /// Removes a connection and recursively closes every session it owns.
     pub fn close_connection(&self, id: ConnectionId) {
         if let Some(conn) = self.inner.connections.write().get(&id) {
             conn.active.store(false, Ordering::SeqCst);
@@ -1247,10 +1256,19 @@ impl IronRuntime {
         self.close_sessions_for_connection(id);
     }
 
+    /// Returns the number of currently registered connections.
     pub fn connection_count(&self) -> usize {
         self.inner.connections.read().len()
     }
 
+    /// Creates a visible session owned by `connection_id`.
+    ///
+    /// Session initialization snapshots runtime workspace roots, repository
+    /// instructions, plugin and MCP defaults, and available skills.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] when the runtime has shut down.
     pub fn create_session(
         &self,
         connection_id: ConnectionId,
@@ -1258,6 +1276,14 @@ impl IronRuntime {
         self.create_session_with_options(connection_id, CreateSessionOptions::default())
     }
 
+    /// Creates a session with explicit visibility options.
+    ///
+    /// Initialization is identical to [`Self::create_session`], with hidden
+    /// sessions omitted from normal connection listings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] when the runtime has shut down.
     pub fn create_session_with_options(
         &self,
         connection_id: ConnectionId,
@@ -1366,6 +1392,15 @@ impl IronRuntime {
             .unwrap_or(false)
     }
 
+    /// Inserts a preexisting durable session under a connection.
+    ///
+    /// Destination-runtime plugin and MCP defaults fill only missing choices;
+    /// existing session choices are preserved. Missing workspace roots are
+    /// backfilled before session skills are refreshed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] when the runtime has shut down.
     pub fn insert_session(
         &self,
         session_id: SessionId,
@@ -1404,6 +1439,7 @@ impl IronRuntime {
         Ok(())
     }
 
+    /// Returns shared durable state for a session, or `None` if it is absent.
     pub fn get_session(&self, id: SessionId) -> Option<Arc<Mutex<DurableSession>>> {
         self.inner
             .sessions
@@ -1412,6 +1448,7 @@ impl IronRuntime {
             .map(|rs| rs.session.clone())
     }
 
+    /// Returns the connection that owns a session, or `None` if it is absent.
     pub fn get_session_connection(&self, id: SessionId) -> Option<ConnectionId> {
         self.inner
             .sessions
@@ -1420,10 +1457,15 @@ impl IronRuntime {
             .map(|rs| rs.connection_id)
     }
 
+    /// Cancels and removes a session and all registered descendants.
     pub fn close_session(&self, id: SessionId) {
         self.cancel_and_remove_session_subtree(id);
     }
 
+    /// Cancels and removes all sessions owned by `connection_id`.
+    ///
+    /// Descendants are removed recursively even when their direct connection
+    /// ownership differs.
     pub fn close_sessions_for_connection(&self, connection_id: ConnectionId) {
         let to_remove: Vec<SessionId> = {
             let sessions = self.inner.sessions.read();
@@ -1610,6 +1652,15 @@ impl IronRuntime {
         false
     }
 
+    /// Atomically admits a new active prompt for a session.
+    ///
+    /// The returned ephemeral turn is already running and has a monotonically
+    /// increasing session-local turn identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] if the session does not exist or already has an
+    /// active prompt.
     pub fn try_start_prompt(
         &self,
         session_id: SessionId,
@@ -1639,6 +1690,9 @@ impl IronRuntime {
         Ok(ephemeral)
     }
 
+    /// Clears a session's active-prompt slot at a turn boundary.
+    ///
+    /// This is a no-op when the session is absent or no prompt is active.
     pub fn finish_prompt(&self, session_id: SessionId) {
         let sessions = self.inner.sessions.read();
         if let Some(rs) = sessions.get(&session_id) {
@@ -2156,6 +2210,9 @@ impl IronRuntime {
         self.inner.model_capability_registry.read()
     }
 
+    /// Requests cancellation for a session's active prompt and all descendants.
+    ///
+    /// Returns `true` if at least one active prompt received cancellation.
     pub fn cancel_active_prompt(&self, session_id: SessionId) -> bool {
         let sessions = self.inner.sessions.read();
         let children_by_parent = self.inner.children_by_parent.read();
@@ -2182,6 +2239,7 @@ impl IronRuntime {
         false
     }
 
+    /// Returns whether a session currently occupies its active-prompt slot.
     pub fn has_active_prompt(&self, session_id: SessionId) -> bool {
         let sessions = self.inner.sessions.read();
         sessions
@@ -2254,6 +2312,7 @@ impl IronRuntime {
         let _ = self.refresh_session_skills(session_id, &roots);
     }
 
+    /// Returns shared ephemeral state for a session's active prompt.
     pub fn get_active_prompt_ephemeral(
         &self,
         session_id: SessionId,
@@ -2267,10 +2326,15 @@ impl IronRuntime {
         })
     }
 
+    /// Returns the total number of visible and hidden runtime sessions.
     pub fn session_count(&self) -> usize {
         self.inner.sessions.read().len()
     }
 
+    /// Lists sessions directly owned by a connection.
+    ///
+    /// Hidden sessions are included only when `include_hidden` is `true`; the
+    /// returned order follows the runtime map and is not stable.
     pub fn sessions_for_connection(
         &self,
         connection_id: ConnectionId,
@@ -2327,6 +2391,10 @@ impl IronRuntime {
         result
     }
 
+    /// Begins runtime shutdown, aborting tracked tasks and removing all state.
+    ///
+    /// MCP shutdown is scheduled first. Repeated calls are safe, and subsequent
+    /// task spawning or session creation is rejected.
     pub fn shutdown(&self) {
         let manager = self.inner.mcp_connection_manager.clone();
         let _shutdown_handle = self.inner.tokio_handle.spawn(async move {

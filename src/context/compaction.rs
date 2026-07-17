@@ -1,10 +1,19 @@
+//! Model-directed compaction of resolved durable context.
+//!
+//! Compaction validates every requested inclusive range before mutation, then
+//! permanently removes the selected timeline entries or older compressed
+//! blocks and replaces each range with a durable summary. Active context and
+//! either half of a tool-call/result pair are protected from removal.
+
 use crate::context::models::CompressedBlock;
 use crate::durable::{DurableSession, TimelineEntry};
 use crate::tool::ToolDefinition;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+/// Provider-facing name of the runtime-owned compaction tool.
 pub const COMPRESS_TOOL_NAME: &str = "compress";
+/// Method label recorded for summaries created by the model.
 pub const COMPRESS_METHOD_MODEL_SUMMARY: &str = "model_summary";
 
 /// Runtime-owned compress tool: validates ranges, applies compression, and
@@ -12,6 +21,7 @@ pub const COMPRESS_METHOD_MODEL_SUMMARY: &str = "model_summary";
 pub struct CompressTool;
 
 impl CompressTool {
+    /// Returns the provider-facing definition of the `compress` tool.
     pub fn definition() -> ToolDefinition {
         ToolDefinition::new(
             COMPRESS_TOOL_NAME,
@@ -51,6 +61,15 @@ impl CompressTool {
         )
     }
 
+    /// Parses and validates the shape of provider-supplied compaction arguments.
+    ///
+    /// Both canonical `start_message_id`/`end_message_id` keys and the legacy
+    /// `start_id`/`end_id` aliases are accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the topic, content array, IDs, or summary is
+    /// absent or empty.
     pub fn parse_arguments(arguments: &Value) -> Result<(String, Vec<CompressRange>), String> {
         let topic = arguments
             .get("topic")
@@ -102,7 +121,14 @@ impl CompressTool {
     /// Execute a compress request from the model.
     ///
     /// The model provides a topic and one or more source ranges with summaries.
-    /// The runtime validates all ranges before mutating state.
+    /// The runtime validates all ranges before mutating state. Successful
+    /// execution invalidates provider token accounting because the visible
+    /// transcript has been rewritten.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unknown, reversed, overlapping, protected, or
+    /// improperly paired tool-call ranges. The session is unchanged on error.
     pub fn execute(
         session: &mut DurableSession,
         topic: String,
@@ -369,18 +395,28 @@ impl ResolvedRange {
     }
 }
 
+/// Inclusive visible-ID range and its durable replacement summary.
 #[derive(Debug, Clone)]
 pub struct CompressRange {
+    /// First compressed block or timeline visible ID in the range.
     pub start_id: String,
+    /// Last compressed block or timeline visible ID in the range.
     pub end_id: String,
+    /// Model-produced text that permanently replaces the range.
     pub summary: String,
 }
 
+/// Outcome and telemetry from a successful compaction.
 #[derive(Debug, Clone)]
 pub struct CompressResult {
+    /// Durable summaries added to the session.
     pub blocks_created: Vec<CompressedBlock>,
+    /// Best available estimate before the rewrite.
     pub tokens_before: Option<usize>,
+    /// Sum of available replacement-summary estimates.
     pub tokens_after: Option<usize>,
+    /// Compaction method label.
     pub method: String,
+    /// Pressure label recalculated after compaction.
     pub pressure_state: String,
 }

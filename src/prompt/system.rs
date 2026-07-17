@@ -1,40 +1,66 @@
+//! Stable section model, cache, fingerprint, and renderer for system prompts.
+
 use crate::prompt::{ClientPromptFragment, RepoInstructionPayload};
 
+/// A section in the canonical system-prompt layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptSection {
+    /// Agent identity and role.
     Identity,
+    /// Dynamic runtime and workspace facts.
     StaticContext,
+    /// Core behavioral baseline.
     CoreGuidelines,
+    /// Tool-use and context-management guidance.
     ToolPhilosophy,
+    /// Editing policy supplied by the client or core default.
     EditingGuidelines,
+    /// Safety and protected-resource constraints.
     Safety,
+    /// Guidance specific to the selected provider.
     ProviderSpecificGuidance,
+    /// Response style and formatting guidance.
     CommunicationFormatting,
+    /// Repository, session, skill, and client-owned instructions.
     ClientInjection,
 }
 
+/// Authority responsible for a prompt section's contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptSectionOwner {
+    /// Content controlled by `iron-core`.
     Core,
+    /// Content selected from provider metadata.
     Provider,
+    /// Content supplied through client configuration or session state.
     Client,
 }
 
+/// Expected change frequency of a prompt section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptSectionTemperature {
+    /// Content expected to remain stable across most requests.
     Cold,
+    /// Content that changes occasionally with configuration or environment.
     Warm,
+    /// Content that may change from turn to turn.
     Hot,
 }
 
+/// Descriptive metadata for one canonical prompt section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptSectionMetadata {
+    /// Section represented by this metadata.
     pub section: PromptSection,
+    /// Human-readable heading rendered for the section.
     pub title: &'static str,
+    /// Authority that controls the section.
     pub owner: PromptSectionOwner,
+    /// Expected change frequency used by diagnostics and caching policy.
     pub temperature: PromptSectionTemperature,
 }
 
+/// Canonical rendering order for all system-prompt sections.
 pub const PROMPT_SECTION_ORDER: [PromptSection; 9] = [
     PromptSection::Identity,
     PromptSection::StaticContext,
@@ -48,6 +74,7 @@ pub const PROMPT_SECTION_ORDER: [PromptSection; 9] = [
 ];
 
 impl PromptSection {
+    /// Returns the title, owner, and temperature assigned to this section.
     pub fn metadata(self) -> PromptSectionMetadata {
         match self {
             PromptSection::Identity => PromptSectionMetadata {
@@ -108,25 +135,46 @@ impl PromptSection {
     }
 }
 
+/// Borrowed inputs required to render a complete system prompt.
+///
+/// Optional empty textual inputs use their section-specific fallback where one
+/// exists. Client injection collections retain their input order.
 pub struct SystemPromptInputs<'a> {
+    /// Core baseline inserted into the core-guidelines section.
     pub baseline: &'a str,
+    /// Pre-rendered `<runtime_context>` block.
     pub runtime_context: &'a str,
+    /// Loaded repository and additional instruction files.
     pub repo_payload: &'a RepoInstructionPayload,
+    /// Additional inline instruction blocks in rendering order.
     pub additional_inline: &'a [String],
+    /// Optional profile-specific replacement for the default identity.
     pub profile_identity: Option<&'a str>,
+    /// Optional session-level instructions.
     pub session_instructions: Option<&'a str>,
+    /// Optional instructions from active skills.
     pub skill_instructions: Option<&'a str>,
+    /// Optional provider-specific guidance.
     pub provider_guidance: Option<&'a str>,
+    /// Optional replacement for the default editing guidance.
     pub client_editing_guidance: Option<&'a str>,
+    /// Client-owned Markdown fragments in rendering order.
     pub client_injections: &'a [ClientPromptFragment],
+    /// Whether `python_exec` is present in the effective tool catalog.
     pub python_exec_available: bool,
+    /// Current context pressure used to select tool-use guidance.
     pub context_pressure: crate::context::ContextPressure,
 }
 
+/// Deterministic, opaque cache key derived from all system-prompt inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemPromptFingerprint(String);
 
 impl SystemPromptFingerprint {
+    /// Computes a length-delimited fingerprint from every rendering input.
+    ///
+    /// The fingerprint is intended for equality checks, not cryptographic use
+    /// or stable persistence across crate versions.
     pub fn from_inputs(inputs: &SystemPromptInputs<'_>) -> Self {
         let mut value = String::new();
         push_part(&mut value, inputs.baseline);
@@ -155,6 +203,7 @@ impl SystemPromptFingerprint {
     }
 }
 
+/// Memoizes the most recently rendered system prompt.
 #[derive(Debug, Default, Clone)]
 pub struct SystemPromptCache {
     rendered: Option<String>,
@@ -162,6 +211,8 @@ pub struct SystemPromptCache {
 }
 
 impl SystemPromptCache {
+    /// Returns a prompt rendered from `inputs`, reusing the cached allocation
+    /// when the complete input fingerprint is unchanged.
     pub fn render(&mut self, inputs: &SystemPromptInputs<'_>) -> &str {
         let fingerprint = SystemPromptFingerprint::from_inputs(inputs);
         if self.fingerprint.as_ref() != Some(&fingerprint) {
@@ -172,27 +223,33 @@ impl SystemPromptCache {
         self.rendered.as_deref().unwrap_or_default()
     }
 
+    /// Invalidates the cached prompt after working-directory context changes.
     pub fn invalidate_working_directory(&mut self) {
         self.invalidate();
     }
 
+    /// Invalidates the cached prompt after provider guidance changes.
     pub fn invalidate_provider_guidance(&mut self) {
         self.invalidate();
     }
 
+    /// Invalidates the cached prompt after effective tool availability changes.
     pub fn invalidate_tool_availability(&mut self) {
         self.invalidate();
     }
 
+    /// Clears the cached rendering and fingerprint unconditionally.
     pub fn invalidate(&mut self) {
         self.rendered = None;
         self.fingerprint = None;
     }
 }
 
+/// Stateless renderer for the canonical, numbered system-prompt layout.
 pub struct SystemPromptRenderer;
 
 impl SystemPromptRenderer {
+    /// Renders every section in [`PROMPT_SECTION_ORDER`], separated by blank lines.
     pub fn render(inputs: &SystemPromptInputs<'_>) -> String {
         PROMPT_SECTION_ORDER
             .iter()
@@ -239,6 +296,7 @@ impl SystemPromptRenderer {
     }
 }
 
+/// Core identity text used when no non-empty profile identity is supplied.
 pub(crate) const DEFAULT_RENDERED_IDENTITY: &str = "You are an AI coding agent powered by iron-core. Follow the core-owned instructions in this prompt and preserve the authority boundaries between core, provider, and client sections.";
 
 fn render_identity() -> String {

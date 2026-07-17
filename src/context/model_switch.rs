@@ -1,60 +1,64 @@
-//! Model switching: turn-boundary model changes with context adaptation
+//! Model switching: turn-boundary model changes with context adaptation.
 //!
 //! This module implements model switching as a first-class operation that
 //! preserves session identity while adapting context and reconciling capabilities.
 
 use serde::{Deserialize, Serialize};
 
-/// Plan for adapting a session to a new model
+/// Plan for adapting a session before changing its active model.
+///
+/// Planning does not mutate a session or provider. The runtime applies the
+/// plan at an idle turn boundary so session identity and durable history remain
+/// continuous across the switch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelSwitchPlan {
-    /// Source model identifier
+    /// Source model identifier.
     pub source_model: String,
-    /// Target model identifier
+    /// Target model identifier.
     pub target_model: String,
-    /// Source provider slug (if managed)
+    /// Source managed-provider slug, if any.
     pub source_provider: Option<String>,
-    /// Target provider slug (if managed)
+    /// Target managed-provider slug, if any.
     pub target_provider: Option<String>,
-    /// Context adaptation required
+    /// Context adaptation required before the target can be used.
     pub context_adaptation: ContextAdaptationPlan,
-    /// Capability differences between source and target
+    /// Capability differences between source and target.
     pub capability_diff: CapabilityDiff,
-    /// Whether compaction was triggered
+    /// Whether planning determined that compaction is required.
     pub compaction_triggered: bool,
-    /// Estimated tokens after adaptation
+    /// Estimated retained token count after adaptation.
     pub estimated_tokens_after: usize,
-    /// Target context window (if known)
+    /// Target context-window size, if known.
     pub target_window: Option<usize>,
 }
 
-/// Plan for adapting context to fit target constraints
+/// Planned retention needed to fit context into target constraints.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextAdaptationPlan {
-    /// Whether context needs to be compacted
+    /// Whether context needs to be compacted.
     pub needs_compaction: bool,
-    /// Number of messages to retain in tail
+    /// Number of recent messages to retain.
     pub tail_messages: usize,
-    /// Whether the tail fits within target window
+    /// Whether the estimated retained tail fits the target window.
     pub tail_fits: bool,
-    /// Estimated tokens of retained context
+    /// Estimated tokens in retained context.
     pub retained_tokens: usize,
 }
 
-/// Differences in capabilities between source and target models
+/// Capabilities lost or restricted when moving to a target model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CapabilityDiff {
-    /// Tools that are unavailable in the target model
+    /// Tools unavailable in the target model.
     pub hidden_tools: Vec<String>,
-    /// Modalities unsupported by target (e.g., "image", "pdf")
+    /// Source modalities unsupported by the target, such as `image` or `pdf`.
     pub unsupported_modalities: Vec<String>,
-    /// Context window shrink in tokens (if smaller)
+    /// Number of tokens by which the target window is smaller.
     pub window_shrink: Option<usize>,
-    /// Features unsupported by target
+    /// Source features unsupported by the target.
     pub unsupported_features: Vec<String>,
-    /// Whether the target supports tool calling
+    /// Whether the target supports tool calling.
     pub tools_supported: bool,
-    /// Whether the target supports streaming
+    /// Whether the target supports streaming.
     pub streaming_supported: bool,
 }
 
@@ -71,38 +75,43 @@ impl Default for CapabilityDiff {
     }
 }
 
-/// Request to switch models
+/// Owned provider selection queued for a model switch.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelSwitchRequest {
-    /// Switch to a managed provider (resolved via credential store)
+    /// Switch to a managed provider resolved through configured credentials.
     Managed {
+        /// Managed-provider slug.
         provider_slug: String,
+        /// Target model identifier.
         model: String,
+        /// Explicit provider API key, when supplied.
         api_key: Option<String>,
     },
-    /// Switch to an unmanaged provider (direct Provider instance)
+    /// Switch to an unmanaged provider instance.
     Unmanaged {
+        /// Target model identifier.
         model: String,
+        /// Display name of the provider instance.
         provider_name: String,
     },
 }
 
-/// Record of a model switch for timeline/history
+/// Durable history record of an applied model switch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelSwitchRecord {
-    /// Source model
+    /// Source model.
     pub from_model: String,
-    /// Target model
+    /// Target model.
     pub to_model: String,
-    /// Source provider
+    /// Source provider, if recorded.
     pub from_provider: Option<String>,
-    /// Target provider
+    /// Target provider, if recorded.
     pub to_provider: Option<String>,
-    /// Whether context was adapted
+    /// Whether context or capabilities required adaptation.
     pub adapted: bool,
-    /// Capability differences
+    /// Capability restrictions discovered for the target.
     pub capability_diff: CapabilityDiff,
-    /// Timestamp of the switch
+    /// UTC timestamp at which the switch was recorded.
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
@@ -117,17 +126,17 @@ pub struct CompactionInfo {
     pub method: String,
 }
 
-/// Pending model switch queued for turn boundary
+/// Model switch request waiting for an idle turn boundary.
 #[derive(Debug, Clone)]
 pub struct PendingModelSwitch {
-    /// The switch request
+    /// Owned provider and model selection to apply.
     pub request: ModelSwitchRequest,
-    /// When the switch was requested
+    /// UTC timestamp at which the request was queued.
     pub requested_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl ModelSwitchPlan {
-    /// Create a new plan with default adaptation
+    /// Creates a plan with no adaptation and a default 20-message tail.
     pub fn new(source_model: impl Into<String>, target_model: impl Into<String>) -> Self {
         Self {
             source_model: source_model.into(),
@@ -147,7 +156,7 @@ impl ModelSwitchPlan {
         }
     }
 
-    /// Whether the switch requires any adaptation
+    /// Returns whether compaction or any capability restriction is required.
     pub fn requires_adaptation(&self) -> bool {
         self.context_adaptation.needs_compaction
             || !self.capability_diff.hidden_tools.is_empty()
@@ -157,17 +166,17 @@ impl ModelSwitchPlan {
 }
 
 impl ContextAdaptationPlan {
-    /// Whether the context fits within the target window
+    /// Returns whether no compaction is required and the retained tail fits.
     pub fn fits(&self) -> bool {
         self.tail_fits && !self.needs_compaction
     }
 }
 
-/// Planner for model switches that estimates context and creates adaptation plans
+/// Stateless planner for model-switch context and capability adaptation.
 pub struct ModelSwitchPlanner;
 
 impl ModelSwitchPlanner {
-    /// Create a plan for switching from source to target model
+    /// Creates a plan for switching from a source model to a target model.
     ///
     /// Estimates current context size and determines if compaction is needed
     /// based on the target model's context window.
@@ -187,7 +196,11 @@ impl ModelSwitchPlanner {
         )
     }
 
-    /// Create a plan with capability comparison
+    /// Creates a plan and compares capabilities when both metadata records exist.
+    ///
+    /// When `target_window` is unknown, the full current estimate is assumed to
+    /// fit. When it is exceeded, retained tail size uses a coarse 20-message
+    /// average and never plans fewer than five messages before the 20-message cap.
     pub fn create_plan_with_capabilities(
         source_model: &str,
         target_model: &str,
@@ -254,9 +267,9 @@ impl ModelSwitchPlanner {
         (total_tokens as f64 * 0.6) as usize
     }
 
-    /// Estimate total context size from a session
+    /// Estimates total context from uncompacted tokens and block summary length.
     ///
-    /// Sums uncompacted tokens plus an estimate for compressed blocks.
+    /// Compressed summaries use a four-characters-per-token heuristic.
     pub fn estimate_session_tokens(
         uncompacted_tokens: usize,
         compressed_blocks: &[crate::context::models::CompressedBlock],
@@ -270,23 +283,35 @@ impl ModelSwitchPlanner {
     }
 }
 
-/// Simple model capability metadata
+/// Capability metadata used to compare two model/provider pairs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelCapabilityMetadata {
+    /// Model identifier.
     pub model: String,
+    /// Provider identifier.
     pub provider: String,
+    /// Maximum context-window size in tokens.
     pub context_window: usize,
+    /// Whether tool calling is supported.
     pub supports_tools: bool,
+    /// Whether streamed responses are supported.
     pub supports_streaming: bool,
+    /// Whether reasoning-effort selection is supported.
     #[serde(default)]
     pub supports_reasoning_effort: bool,
+    /// Accepted reasoning-effort values.
     #[serde(default)]
     pub reasoning_effort_values: Vec<String>,
+    /// Input modalities supported by the model.
     pub supported_modalities: Vec<String>,
+    /// Tool names explicitly unavailable for this model.
     pub unsupported_tools: Vec<String>,
 }
 
-/// Compare capabilities between source and target models
+/// Compares source capabilities with restrictions on a target model.
+///
+/// The result records capabilities lost during the switch; it is not a full
+/// independent description of either model.
 pub fn compare_capabilities(
     source: &ModelCapabilityMetadata,
     target: &ModelCapabilityMetadata,
@@ -328,26 +353,32 @@ pub fn compare_capabilities(
     diff
 }
 
-/// Registry for model capability metadata
+/// In-memory registry keyed by provider and model identifier.
 #[derive(Debug, Clone, Default)]
 pub struct ModelCapabilityRegistry {
     models: std::collections::HashMap<(String, String), ModelCapabilityMetadata>,
 }
 
 impl ModelCapabilityRegistry {
+    /// Creates an empty capability registry.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Inserts or replaces metadata for its provider/model pair.
     pub fn register(&mut self, metadata: ModelCapabilityMetadata) {
         let key = (metadata.provider.clone(), metadata.model.clone());
         self.models.insert(key, metadata);
     }
 
+    /// Returns metadata for an exact provider/model pair.
     pub fn get(&self, provider: &str, model: &str) -> Option<&ModelCapabilityMetadata> {
         self.models.get(&(provider.to_string(), model.to_string()))
     }
 
+    /// Compares two registered provider/model pairs.
+    ///
+    /// Returns `None` if either pair is absent.
     pub fn compare(
         &self,
         source_provider: &str,

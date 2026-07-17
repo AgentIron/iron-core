@@ -1,3 +1,5 @@
+//! Errors produced by durable configuration, migration, and encryption operations.
+
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the config store.

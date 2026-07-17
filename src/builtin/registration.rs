@@ -1,7 +1,13 @@
+//! Registration of enabled and available built-in tools.
+
 use super::config::BuiltinToolConfig;
 use super::policy::ShellAvailability;
 use crate::tool::ToolRegistry;
 
+/// Register each enabled built-in tool in `registry`.
+///
+/// At most one shell tool is registered, as selected by the configuration's
+/// shell availability. Existing tools with the same names are replaced.
 pub fn register_builtin_tools(registry: &mut ToolRegistry, config: &BuiltinToolConfig) {
     if config.is_tool_enabled("read") {
         registry.register(super::file_ops::ReadTool::new(config.clone()));

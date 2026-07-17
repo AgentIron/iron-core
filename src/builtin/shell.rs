@@ -1,13 +1,20 @@
+//! Built-in Bash and PowerShell command-execution tools.
+//!
+//! Commands require approval, run only in validated working directories, and
+//! return captured output subject to configured time and size limits.
+
 use crate::builtin::config::BuiltinToolConfig;
 use crate::error::RuntimeResult;
 use crate::tool::{Tool, ToolDefinition, ToolFuture};
 use serde_json::Value;
 
+/// Execute commands through Bash.
 pub struct BashTool {
     config: BuiltinToolConfig,
 }
 
 impl BashTool {
+    /// Create a Bash tool with the supplied execution policy and limits.
     pub fn new(config: BuiltinToolConfig) -> Self {
         Self { config }
     }
@@ -163,11 +170,13 @@ fn truncate_output(output: &str, max_bytes: usize) -> (bool, String) {
     )
 }
 
+/// Execute commands through PowerShell Core or Windows PowerShell.
 pub struct PowerShellTool {
     config: BuiltinToolConfig,
 }
 
 impl PowerShellTool {
+    /// Create a PowerShell tool with the supplied execution policy and limits.
     pub fn new(config: BuiltinToolConfig) -> Self {
         Self { config }
     }

@@ -11,6 +11,18 @@
 //! validation → WASM host load.  The pipeline is parameterised over a
 //! `PluginLoader` trait so the lifecycle state machine can be tested
 //! independently of Extism.
+//!
+//! ```
+//! use iron_core::{PluginSource, PluginSourceConfig};
+//! use std::path::PathBuf;
+//!
+//! let plugin = PluginSourceConfig {
+//!     id: "com.example.calendar".into(),
+//!     source: PluginSource::LocalPath { path: PathBuf::from("calendar.wasm") },
+//!     enabled_by_default: false,
+//! };
+//! assert_eq!(plugin.id, "com.example.calendar");
+//! ```
 
 pub mod auth;
 pub mod config;

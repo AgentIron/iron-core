@@ -108,10 +108,6 @@ pub struct DeviceCodeInteraction {
     pub interval_secs: u64,
 }
 
-/// Start a device-code authorization flow.
-///
-/// Calls the provider's device authorization endpoint and returns the
-/// interaction data the client should present to the user.
 fn encode_form(params: &[(&str, &str)]) -> String {
     let mut encoded = url::form_urlencoded::Serializer::new(String::new());
     for (k, v) in params {
@@ -139,6 +135,16 @@ fn refresh_response_error(
     }
 }
 
+/// Start the provider-specific device authorization flow.
+///
+/// Calls the configured device authorization endpoint and returns opaque
+/// polling state plus interaction data that is safe to present to the user.
+///
+/// # Errors
+///
+/// Returns [`ProviderAuthError::RefreshFailed`] for request failures,
+/// unsuccessful responses, malformed response bodies, or missing required
+/// device-auth fields.
 pub async fn start_device_code_flow(
     metadata: &OAuthProviderMetadata,
     client: &reqwest::Client,
@@ -299,6 +305,12 @@ pub struct DeviceCodeStartResult {
 ///
 /// This should be called repeatedly (respecting `interval_secs`) until it
 /// returns either tokens or a terminal error.
+///
+/// # Errors
+///
+/// Pending authorization and polling throttles are represented as
+/// [`ProviderAuthError::RefreshFailed`] with an actionable reason, as are
+/// network, protocol, decoding, denial, and expiry failures.
 pub async fn poll_token_exchange(
     metadata: &OAuthProviderMetadata,
     device_code: &str,
@@ -513,6 +525,12 @@ async fn exchange_codex_authorization_code(
 }
 
 /// Refresh an OAuth access token using a refresh token.
+///
+/// # Errors
+///
+/// Returns [`ProviderAuthError::Revoked`] for revoked or invalid grants and
+/// [`ProviderAuthError::RefreshFailed`] for transport, response-status,
+/// decoding, or missing-token failures.
 pub async fn refresh_access_token(
     metadata: &OAuthProviderMetadata,
     refresh_token: &str,

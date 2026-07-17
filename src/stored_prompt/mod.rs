@@ -2,6 +2,22 @@
 //!
 //! Stored prompts are named reusable task definitions persisted in the core
 //! config store. They are invoked through delegated child-session execution.
+//!
+//! ```
+//! use iron_core::{StoredPrompt, StoredPromptRegistry};
+//!
+//! let prompt = StoredPrompt {
+//!     display_name: "Review Changes".into(),
+//!     normalized_name: "review-changes".into(),
+//!     instructions: "Review the current changes and report risks.".into(),
+//!     skills: vec!["code-review".into()],
+//!     profile: None,
+//! };
+//! let mut registry = StoredPromptRegistry::new();
+//! registry.register("review".into(), prompt)?;
+//! assert_eq!(registry.get("review").unwrap().normalized_name, "review-changes");
+//! # Ok::<(), String>(())
+//! ```
 
 use crate::config::{ConfigError, ConfigStore};
 use crate::profile::AgentProfileId;
@@ -44,7 +60,13 @@ pub struct StoredPrompt {
 }
 
 impl StoredPrompt {
-    /// Validate invariants for v2 records.
+    /// Validate invariants for current-schema records.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic string when instructions or display identity are
+    /// empty, the normalized handle is stale, a skill identifier is invalid,
+    /// or skill identifiers repeat case-insensitively.
     pub fn validate(&self) -> Result<(), String> {
         if self.instructions.trim().is_empty() {
             return Err("stored prompt instructions must not be empty".to_string());
@@ -84,33 +106,55 @@ impl StoredPrompt {
 /// A stored prompt paired with its stable ID and identity state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredPromptEntry {
+    /// Immutable record ID used by automation-task references.
     pub id: String,
+    /// Decoded reusable prompt definition.
     pub prompt: StoredPrompt,
+    /// Whether the prompt is usable by handle or quarantined pending a rename.
     pub identity_state: IdentityState,
 }
 
 /// Issue category reported for a skipped prompt during `load_prompts`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptLoadIssue {
-    UnsupportedSchemaVersion { version: i64 },
+    /// The row uses a schema version this binary cannot decode.
+    UnsupportedSchemaVersion {
+        /// Unsupported version read from the prompt row.
+        version: i64,
+    },
+    /// The row ID or serialized prompt failed decoding or validation.
     InvalidPayload,
+    /// The ID appeared in a listing but disappeared before it could be read.
     MissingRecord,
-    UnavailableProfile { profile_id: String },
-    UnavailableSkill { skill: String },
+    /// The prompt refers to a profile unavailable to the loading context.
+    UnavailableProfile {
+        /// Profile ID that could not be resolved.
+        profile_id: String,
+    },
+    /// The prompt requests a skill unavailable to the loading context.
+    UnavailableSkill {
+        /// Requested skill identifier that was unavailable.
+        skill: String,
+    },
+    /// Migration quarantined the prompt after a normalized-name collision.
     NeedsRename,
 }
 
 /// Per-prompt diagnostic returned by best-effort prompt loading.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromptLoadDiagnostic {
+    /// Stable ID of the skipped or degraded prompt.
     pub prompt_id: String,
+    /// Machine-readable reason the prompt was not loaded normally.
     pub issue: PromptLoadIssue,
 }
 
 /// Result of loading typed stored prompts from ConfigStore.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PromptLoadReport {
+    /// Successfully decoded prompt entries, including their identity state.
     pub loaded: Vec<StoredPromptEntry>,
+    /// Record-local problems that did not abort the best-effort load.
     pub diagnostics: Vec<PromptLoadDiagnostic>,
 }
 
@@ -121,12 +165,21 @@ pub struct StoredPromptRegistry {
 }
 
 impl StoredPromptRegistry {
+    /// Create an empty in-memory prompt registry.
     pub fn new() -> Self {
         Self {
             prompts: HashMap::new(),
         }
     }
 
+    /// Validate and register a prompt under a trimmed stable ID.
+    ///
+    /// Replaces an existing prompt with the same ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic string if the ID is empty or contains control
+    /// characters, or if [`StoredPrompt::validate`] rejects the prompt.
     pub fn register(&mut self, id: String, prompt: StoredPrompt) -> Result<(), String> {
         let trimmed = id.trim();
         if trimmed.is_empty() {
@@ -140,14 +193,22 @@ impl StoredPromptRegistry {
         Ok(())
     }
 
+    /// Remove the prompt identified by the trimmed ID.
+    ///
+    /// Returns whether an entry was present.
     pub fn unregister(&mut self, id: &str) -> bool {
         self.prompts.remove(id.trim()).is_some()
     }
 
+    /// Look up a prompt by its trimmed stable ID.
     pub fn get(&self, id: &str) -> Option<&StoredPrompt> {
         self.prompts.get(id.trim())
     }
 
+    /// Return cloned entries sorted by stable ID.
+    ///
+    /// Registry entries are always returned with [`IdentityState::Ready`]
+    /// because quarantined durable rows are not registered.
     pub fn list(&self) -> Vec<StoredPromptEntry> {
         let mut ids: Vec<&String> = self.prompts.keys().collect();
         ids.sort();
@@ -160,10 +221,12 @@ impl StoredPromptRegistry {
             .collect()
     }
 
+    /// Return whether the registry contains no prompts.
     pub fn is_empty(&self) -> bool {
         self.prompts.is_empty()
     }
 
+    /// Return the number of registered prompts.
     pub fn len(&self) -> usize {
         self.prompts.len()
     }

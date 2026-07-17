@@ -89,6 +89,11 @@ impl ProfileStore for DurableProfileStore {
 /// deserializes it to extract the slug, and persists the validated JSON.
 ///
 /// Returns the slug of the imported profile on success.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when validation rejects malformed or secret-bearing
+/// JSON, canonical serialization fails, or the durable write fails.
 pub async fn import_provider_profile(
     store: &ConfigStore,
     json: &str,
@@ -110,6 +115,10 @@ pub async fn import_provider_profile(
 ///
 /// Returns `None` if no profile is stored for the slug. The exported JSON
 /// contains only non-secret provider profile metadata.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] if the durable lookup fails.
 pub async fn export_provider_profile(
     store: &ConfigStore,
     slug: &str,

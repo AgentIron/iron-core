@@ -1,14 +1,22 @@
+//! Provider-reported token baselines and session-local delta accounting.
+
 use crate::context::ContextQuality;
 use iron_providers::TokenUsage;
 
 /// Accumulated provider-reported token usage totals.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TokenUsageTotals {
+    /// Sum of provider-reported input tokens.
     pub input_tokens: u64,
+    /// Sum of provider-reported output tokens.
     pub output_tokens: u64,
+    /// Sum of provider-reported cached input tokens.
     pub cached_input_tokens: u64,
+    /// Sum of provider-reported cache-creation input tokens.
     pub cache_creation_input_tokens: u64,
+    /// Sum of provider-reported cache-read input tokens.
     pub cache_read_input_tokens: u64,
+    /// Sum of provider-reported reasoning output tokens.
     pub reasoning_output_tokens: u64,
 }
 
@@ -117,32 +125,37 @@ impl SessionTokenTracker {
         }
     }
 
-    // ── accumulated usage telemetry ──
-
+    /// Returns accumulated provider-reported input tokens.
     pub fn accumulated_input_tokens(&self) -> u64 {
         self.accumulated_input_tokens
     }
 
+    /// Returns accumulated provider-reported output tokens.
     pub fn accumulated_output_tokens(&self) -> u64 {
         self.accumulated_output_tokens
     }
 
+    /// Returns accumulated provider-reported cached input tokens.
     pub fn accumulated_cached_input_tokens(&self) -> u64 {
         self.accumulated_cached_input_tokens
     }
 
+    /// Returns accumulated provider-reported cache-creation input tokens.
     pub fn accumulated_cache_creation_input_tokens(&self) -> u64 {
         self.accumulated_cache_creation_input_tokens
     }
 
+    /// Returns accumulated provider-reported cache-read input tokens.
     pub fn accumulated_cache_read_input_tokens(&self) -> u64 {
         self.accumulated_cache_read_input_tokens
     }
 
+    /// Returns accumulated provider-reported reasoning output tokens.
     pub fn accumulated_reasoning_output_tokens(&self) -> u64 {
         self.accumulated_reasoning_output_tokens
     }
 
+    /// Returns all accumulated provider-reported usage categories.
     pub fn accumulated_totals(&self) -> TokenUsageTotals {
         TokenUsageTotals {
             input_tokens: self.accumulated_input_tokens,

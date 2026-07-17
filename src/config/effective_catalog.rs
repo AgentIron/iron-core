@@ -8,6 +8,7 @@ use std::collections::HashMap;
 /// Errors that can occur when building or querying the effective model catalog.
 #[derive(Debug, thiserror::Error, Clone, PartialEq)]
 pub enum CatalogError {
+    /// A custom row attempted to shadow the identified compiled-in model.
     #[error("Custom model duplicates built-in entry: ({0}, {1})")]
     DuplicateBuiltIn(String, String),
 }

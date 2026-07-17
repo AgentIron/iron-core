@@ -1,3 +1,9 @@
+//! System-prompt composition, repository instruction loading, and runtime-context rendering.
+//!
+//! Prompt material is assembled in the stable order defined by
+//! [`PROMPT_SECTION_ORDER`]. Repository and client-provided text is treated as
+//! prompt content; loading it does not grant additional runtime capabilities.
+
 pub mod assembly;
 pub mod baseline;
 pub mod config;

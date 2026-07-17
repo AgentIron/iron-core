@@ -37,7 +37,12 @@ pub enum InstallResult {
     /// Plugin was installed and loaded successfully.
     Success,
     /// Remote download completed but the computed checksum did not match.
-    InvalidChecksum { expected: String, computed: String },
+    InvalidChecksum {
+        /// Hex digest declared by the plugin configuration.
+        expected: String,
+        /// Hex digest computed from the downloaded artifact.
+        computed: String,
+    },
     /// A remote source was provided without a required checksum.
     MissingChecksum,
     /// Network or filesystem failure while fetching the artifact.
@@ -51,7 +56,9 @@ pub enum InstallResult {
     LoadFailed(String),
     /// Manifest identity does not match the runtime plugin configuration.
     IdentityMismatch {
+        /// Plugin ID requested by runtime configuration.
         config_id: String,
+        /// Plugin ID embedded in the artifact manifest.
         manifest_id: String,
     },
 }
@@ -187,6 +194,9 @@ impl PluginLifecycle {
     ///
     /// Re-installs are idempotent: the old artifact is replaced and the
     /// manifest/auth state is cleared before the new artifact is processed.
+    ///
+    /// Failures leave the registered plugin in error health with loaded state
+    /// cleared and remove any newly cached artifact.
     pub async fn install_with_loader(
         &self,
         config: PluginConfig,
@@ -333,6 +343,9 @@ impl PluginLifecycle {
     }
 
     /// Uninstall a plugin, delegating the WASM-host unload to `loader`.
+    ///
+    /// Cached-file removal is best effort. The registry entry is removed even
+    /// if the artifact has already disappeared or cannot be deleted.
     pub async fn uninstall_with_loader(
         &self,
         plugin_id: &str,

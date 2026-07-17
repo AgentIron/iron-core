@@ -20,7 +20,25 @@
 //!
 //! WASM plugins are not scanned, registered, or loaded. A profile that
 //! explicitly allow-lists a plugin tool fails preflight with an
-//! [`UnavailableTool`] error.
+//! [`HeadlessBootstrapError::UnavailableTool`] error.
+//!
+//! ```no_run
+//! use iron_core::bootstrap_headless;
+//! use iron_core::config::ConfigStore;
+//! use std::{path::PathBuf, time::Duration};
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let store = ConfigStore::open().await?;
+//! let runtime = bootstrap_headless(
+//!     store,
+//!     "daily-review",
+//!     PathBuf::from("/workspace/project"),
+//!     Duration::from_secs(300),
+//! ).await?;
+//! println!("running {} with {}", runtime.resolved.task.id, runtime.model);
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::builtin::BuiltinToolConfig;
 use crate::config::records::{McpServerConfigRecord, RuntimeSettingsSnapshot};
@@ -79,13 +97,28 @@ pub enum HeadlessBootstrapError {
     MissingDefaultProvider,
     /// Provider construction failed after credential resolution.
     #[error("provider initialization failed for '{provider}': {reason}")]
-    ProviderInit { provider: String, reason: String },
+    ProviderInit {
+        /// Provider slug selected by persisted runtime settings.
+        provider: String,
+        /// Provider registry construction failure.
+        reason: String,
+    },
     /// Credential is missing, unreadable, or otherwise unusable.
     #[error("credential failure for provider '{provider}': {reason}")]
-    CredentialFailure { provider: String, reason: String },
+    CredentialFailure {
+        /// Provider slug whose non-interactive credential could not be used.
+        provider: String,
+        /// Credential lookup, decoding, expiry, or storage failure.
+        reason: String,
+    },
     /// Credential exists but requires interactive re-authentication.
     #[error("interactive authentication required for provider '{provider}': {reason}")]
-    InteractiveAuthRequired { provider: String, reason: String },
+    InteractiveAuthRequired {
+        /// Provider slug requiring renewed authentication.
+        provider: String,
+        /// Reason unattended credential recovery cannot continue.
+        reason: String,
+    },
     /// Profile approval or tool policy is unsafe for headless execution.
     #[error("unsafe policy for headless execution: {0}")]
     UnsafePolicy(String),

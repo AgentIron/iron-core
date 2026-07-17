@@ -1,3 +1,9 @@
+//! Validated manifest model embedded in plugin WASM artifacts.
+//!
+//! Manifests identify publishers, presentation data, network policy, auth
+//! requirements, exported tools, and resource limits. The lifecycle validates
+//! this untrusted metadata before registering tools or loading executable code.
+
 use crate::plugin::auth::OAuthRequirements;
 use crate::plugin::network::NetworkPolicy;
 use serde::{Deserialize, Serialize};
@@ -101,7 +107,12 @@ pub struct ToolAuthRequirements {
 }
 
 impl PluginManifest {
-    /// Validate the manifest structure
+    /// Validates required identity and presentation fields, API version, and tool names.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ManifestValidationError`] for an empty required field, an
+    /// API version other than `1.0`, or duplicate plugin-local tool names.
     pub fn validate(&self) -> Result<(), ManifestValidationError> {
         // Validate identity
         if self.identity.id.is_empty() {
@@ -161,8 +172,11 @@ impl PluginManifest {
 /// Errors that can occur during manifest validation
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestValidationError {
+    /// A required manifest field was empty; contains its dotted field name.
     MissingField(String),
+    /// The manifest requested an unsupported plugin API version.
     UnsupportedApiVersion(String),
+    /// Two exported tools used the same plugin-local name.
     DuplicateToolName(String),
 }
 

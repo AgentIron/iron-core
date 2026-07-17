@@ -1,16 +1,26 @@
+//! Sandbox allowlists and resource limits for embedded-Python execution.
+
 use crate::config::EmbeddedPythonConfig;
 
+/// Builtin/module allowlists and per-run resource limits.
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
+    /// Python builtin names available to scripts.
     pub allowed_builtins: Vec<&'static str>,
+    /// Python module names scripts may import.
     pub allowed_modules: Vec<&'static str>,
+    /// Maximum accepted Python source length in bytes.
     pub max_source_bytes: usize,
+    /// Maximum serialized JSON result length in bytes.
     pub max_result_bytes: usize,
+    /// Maximum number of host tool calls initiated by one script.
     pub max_child_calls: usize,
+    /// Maximum script execution duration in seconds.
     pub timeout_secs: u64,
 }
 
 impl SandboxConfig {
+    /// Builds sandbox limits from runtime configuration and the default allowlists.
     pub fn from_config(config: &EmbeddedPythonConfig) -> Self {
         Self {
             allowed_builtins: DEFAULT_ALLOWED_BUILTINS.to_vec(),

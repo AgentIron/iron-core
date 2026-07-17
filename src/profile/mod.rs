@@ -5,6 +5,25 @@
 //! prompt layer. They intentionally do not store credential secret material;
 //! managed provider credentials are resolved from `iron-core`'s credential
 //! state at execution time.
+//!
+//! ```
+//! use iron_core::{AgentApproval, AgentProfile, AgentProfileProvider, SkillFilter, ToolFilter};
+//! use iron_core::provider_credential::ProviderSlug;
+//!
+//! let profile = AgentProfile {
+//!     name: "code-review".into(),
+//!     provider: AgentProfileProvider::Managed {
+//!         provider_slug: ProviderSlug::new("openai"),
+//!         model: "gpt-4.1".into(),
+//!     },
+//!     tools: ToolFilter::Allow(vec!["read".into(), "search".into()]),
+//!     skills: SkillFilter::Allow(vec!["code-review".into()]),
+//!     approval: AgentApproval::PerTool,
+//!     identity_prompt: Some("Review changes for correctness and risk.".into()),
+//! };
+//!
+//! assert_eq!(profile.effective_identity_prompt(), "Review changes for correctness and risk.");
+//! ```
 
 use crate::provider_credential::domain::{ProviderPromptContext, ProviderSlug};
 use iron_providers::Provider;
@@ -19,7 +38,10 @@ pub const PROFILE_SCHEMA_VERSION: i64 = 1;
 /// For durable profiles, the `ConfigStore` profile record ID is the stable
 /// profile ID. The user-facing display name lives inside [`AgentProfile::name`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AgentProfileId(pub String);
+pub struct AgentProfileId(
+    /// Opaque durable identifier stored as the profile row's primary key.
+    pub String,
+);
 
 impl AgentProfileId {
     /// Borrow the underlying ID string.
@@ -266,7 +288,9 @@ pub enum ResolvedProfileProvider {
     /// provider/model reference was unavailable or credential resolution
     /// failed. The diagnostic explains why the fallback occurred.
     Fallback {
+        /// Runtime-default provider used in place of the unavailable selection.
         provider: Arc<dyn Provider>,
+        /// Human-readable reason managed resolution could not be completed.
         diagnostic: String,
     },
 }
@@ -307,7 +331,10 @@ impl ResolvedProfileProvider {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileLoadIssue {
     /// The stored profile schema version is not supported.
-    UnsupportedSchemaVersion { version: i64 },
+    UnsupportedSchemaVersion {
+        /// Unsupported version read from the profile row.
+        version: i64,
+    },
     /// The stored payload could not be decoded as an `AgentProfile`.
     InvalidPayload,
     /// The profile ID is invalid or reserved.
@@ -569,7 +596,9 @@ pub enum DefaultProfileSeedDiagnostic {
     SkippedFirstRunDone(AgentProfileId),
     /// Storage failure for this profile.
     StorageFailure {
+        /// Shipped profile that could not be persisted.
         profile_id: AgentProfileId,
+        /// Human-readable storage failure.
         reason: String,
     },
 }
@@ -614,6 +643,12 @@ impl DefaultProfileSeedReport {
 ///
 /// Returns a structured report describing created, skipped, and diagnostic
 /// outcomes for each shipped default.
+///
+/// # Errors
+///
+/// Returns a configuration-store error if marker reads, profile serialization
+/// or insertion, or durable marker persistence fails. Existing profile rows are
+/// never overwritten.
 pub async fn seed_default_profiles(
     store: &crate::config::ConfigStore,
     policy: DefaultProfileSeedPolicy,
