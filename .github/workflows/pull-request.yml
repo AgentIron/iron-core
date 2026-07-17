@@ -101,7 +101,14 @@ jobs:
       - name: Build and link all targets
         run: cargo build --locked --manifest-path Cargo.toml --all-targets --all-features
 
-      - name: Test native scheduler adapter
+      - name: Test native scheduler adapter (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cargo test --locked --manifest-path Cargo.toml --lib scheduled_task::platform
+        env:
+          AGENTIRON_RUN_NATIVE_SCHEDULER_TESTS: "1"
+
+      - name: Test native scheduler adapter (macOS)
+        if: matrix.os == 'macos-latest'
         run: cargo test --locked --manifest-path Cargo.toml --lib scheduled_task::platform
 
   package-consumer:

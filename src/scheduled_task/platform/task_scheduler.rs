@@ -89,7 +89,10 @@ pub fn expand_cron(cron: &CronExpression) -> Result<TaskTrigger, String> {
 /// a `<StartBoundary>` encoding the time of day. Day-of-week restrictions are
 /// emitted as `<ScheduleByWeek>`, day-of-month restrictions as
 /// `<ScheduleByMonth>`. When cron restricts **both** DOM and DOW (OR
-/// semantics), two independent triggers are emitted.
+/// semantics), two independent triggers are emitted. When neither day field
+/// is restricted, an unrestricted month field renders as `<ScheduleByDay>`
+/// and a month restriction renders as `<ScheduleByMonth>` covering every day
+/// of the selected months.
 pub fn render_task_xml(
     trigger: &TaskTrigger,
     executable: &str,
@@ -129,10 +132,16 @@ pub fn render_task_xml(
                 );
                 xml.push_str(&render_calendar_trigger(&boundary, &body));
             }
-            // No day-of-week or day-of-month restriction: a plain daily
-            // trigger that fires at the given StartBoundary.
+            // No day-of-week or day-of-month restriction: a daily trigger,
+            // optionally constrained to a set of months.
             if !dom_restricted && !dow_restricted {
-                xml.push_str(&render_calendar_trigger(&boundary, ""));
+                let body = if months_restricted {
+                    let all_days: Vec<u32> = (1..=31).collect();
+                    render_schedule_by_month(&all_days, true, &trigger.months)
+                } else {
+                    render_schedule_by_day()
+                };
+                xml.push_str(&render_calendar_trigger(&boundary, &body));
             }
         }
     }
@@ -170,7 +179,7 @@ pub fn render_task_xml(
 }
 
 /// Render a single `<CalendarTrigger>` with the given start boundary and
-/// optional schedule body.
+/// schedule body.
 fn render_calendar_trigger(boundary: &str, schedule_body: &str) -> String {
     let mut s = String::new();
     s.push_str("    <CalendarTrigger>\n");
@@ -178,10 +187,20 @@ fn render_calendar_trigger(boundary: &str, schedule_body: &str) -> String {
         "      <StartBoundary>{}</StartBoundary>\n",
         boundary
     ));
+    debug_assert!(!schedule_body.is_empty());
     if !schedule_body.is_empty() {
         s.push_str(schedule_body);
     }
     s.push_str("    </CalendarTrigger>\n");
+    s
+}
+
+/// Render a `<ScheduleByDay>` body with a one-day interval.
+fn render_schedule_by_day() -> String {
+    let mut s = String::new();
+    s.push_str("      <ScheduleByDay>\n");
+    s.push_str("        <DaysInterval>1</DaysInterval>\n");
+    s.push_str("      </ScheduleByDay>\n");
     s
 }
 
@@ -526,12 +545,43 @@ mod tests {
         assert!(xml.contains("<Task"));
         assert!(xml.contains("<CalendarTrigger>"));
         assert!(xml.contains("<StartBoundary>2024-01-01T09:00:00</StartBoundary>"));
-        // No day restriction: neither schedule element should be emitted.
+        // No day restriction: daily schedule body, not monthly or weekly.
+        assert!(xml.contains("<ScheduleByDay>"));
         assert!(!xml.contains("<ScheduleByMonth>"));
         assert!(!xml.contains("<ScheduleByWeek>"));
         assert!(xml.contains("<Enabled>true</Enabled>"));
         assert!(xml.contains(r"C:\agent-iron.exe"));
         assert!(xml.contains("run task-1"));
+    }
+
+    #[test]
+    fn render_xml_daily_includes_schedule_by_day() {
+        let cron = CronExpression::parse("0 3 * * *").unwrap();
+        let trigger = expand_cron(&cron).unwrap();
+        let xml = render_task_xml(&trigger, "agent-iron.exe", "run t1", true);
+        assert!(xml.contains("<StartBoundary>2024-01-01T03:00:00</StartBoundary>"));
+        assert!(xml.contains("<ScheduleByDay>"));
+        assert!(xml.contains("<DaysInterval>1</DaysInterval>"));
+        assert!(!xml.contains("<ScheduleByMonth>"));
+        assert!(!xml.contains("<ScheduleByWeek>"));
+    }
+
+    #[test]
+    fn render_xml_month_restricted_daily_uses_schedule_by_month() {
+        let cron = CronExpression::parse("0 3 * 6 *").unwrap();
+        let trigger = expand_cron(&cron).unwrap();
+        let xml = render_task_xml(&trigger, "agent-iron.exe", "run t1", true);
+        assert!(xml.contains("<ScheduleByMonth>"));
+        for day in 1..=31 {
+            assert!(
+                xml.contains(&format!("<Day>{day}</Day>")),
+                "missing day {day}"
+            );
+        }
+        assert!(xml.contains("<June/>"));
+        assert!(!xml.contains("<July/>"));
+        assert!(!xml.contains("<ScheduleByDay>"));
+        assert!(!xml.contains("<ScheduleByWeek>"));
     }
 
     #[test]
@@ -639,5 +689,101 @@ mod tests {
     #[test]
     fn task_path_format() {
         assert_eq!(task_path("s1"), r"\AgentIron\Tasks\s1");
+    }
+
+    /// Deletes a disposable root task and its temporary XML file. Cleanup
+    /// failures are fatal unless the test is already unwinding, in which case
+    /// they are reported on stderr.
+    struct NativeProbeCleanup {
+        task_name: String,
+        xml_path: std::path::PathBuf,
+        registered: bool,
+    }
+
+    impl Drop for NativeProbeCleanup {
+        fn drop(&mut self) {
+            let mut failures = Vec::new();
+            if self.registered {
+                match std::process::Command::new("schtasks.exe")
+                    .args(["/Delete", "/TN", &self.task_name, "/F"])
+                    .output()
+                {
+                    Ok(out) if out.status.success() => {}
+                    Ok(out) => failures.push(format!(
+                        "schtasks /Delete exited with {}: {}",
+                        out.status,
+                        String::from_utf8_lossy(&out.stderr)
+                    )),
+                    Err(e) => failures.push(format!("failed to run schtasks /Delete: {e}")),
+                }
+            }
+            if let Err(e) = std::fs::remove_file(&self.xml_path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    failures.push(format!("failed to remove {}: {e}", self.xml_path.display()));
+                }
+            }
+            if !failures.is_empty() {
+                let msg = format!("native probe cleanup failed: {}", failures.join("; "));
+                if std::thread::panicking() {
+                    eprintln!("{msg}");
+                } else {
+                    panic!("{msg}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_schtasks_accepts_generated_daily_xml() {
+        if std::env::var("AGENTIRON_RUN_NATIVE_SCHEDULER_TESTS").as_deref() != Ok("1") {
+            eprintln!(
+                "skipping native schtasks probe; set AGENTIRON_RUN_NATIVE_SCHEDULER_TESTS=1 to enable"
+            );
+            return;
+        }
+
+        for cron_text in ["0 3 * * *", "0 3 * 6 *"] {
+            let cron = CronExpression::parse(cron_text).unwrap();
+            let trigger = expand_cron(&cron).unwrap();
+            let xml = render_task_xml(&trigger, "cmd.exe", "/c exit 0", false);
+
+            let unique = format!(
+                "AgentIronXmlProbe-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let task_name = format!("\\{unique}");
+            let xml_path = std::env::temp_dir().join(format!("{unique}.xml"));
+
+            // Same UTF-16LE-with-BOM encoding the adapter uses for schtasks.
+            let mut bytes = Vec::with_capacity(xml.len() * 2 + 2);
+            bytes.extend_from_slice(&[0xFF, 0xFE]);
+            for unit in xml.encode_utf16() {
+                bytes.extend_from_slice(&unit.to_le_bytes());
+            }
+            std::fs::write(&xml_path, &bytes).expect("write native probe XML");
+
+            let mut cleanup = NativeProbeCleanup {
+                task_name: task_name.clone(),
+                xml_path: xml_path.clone(),
+                registered: false,
+            };
+
+            let output = std::process::Command::new("schtasks.exe")
+                .args(["/Create", "/TN", &task_name, "/XML"])
+                .arg(&xml_path)
+                .arg("/F")
+                .output()
+                .expect("run schtasks /Create");
+            assert!(
+                output.status.success(),
+                "schtasks /Create rejected generated XML for `{cron_text}`: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            cleanup.registered = true;
+        }
     }
 }
