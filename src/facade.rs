@@ -2486,9 +2486,7 @@ impl AgentSession {
             return Err("Context management is not enabled".into());
         }
 
-        // Checkpointing is now model-driven via the compress tool.
-        // Hidden runtime compaction has been removed.
-        Err("Checkpoint is not yet implemented with model-driven compression".into())
+        self.try_prompt("/compact").await.map(|_| ())
     }
 
     /// Export a handoff bundle for transferring this session to another agent.
