@@ -17,4 +17,4 @@
 - [x] 3.1 Run formatting and the Task Scheduler adapter unit tests
 - [x] 3.2 Run clippy with all targets and features, treating warnings as errors
 - [x] 3.3 Update the Windows CI scheduler-adapter job to set `AGENTIRON_RUN_NATIVE_SCHEDULER_TESTS=1` and execute the native registration test while ordinary local test runs remain inert
-- [ ] 3.4 Confirm Windows CI passes both exact-cron structural tests and native XML registration with no disposable task or XML left behind
+- [x] 3.4 Confirm Windows CI passes both exact-cron structural tests and native XML registration with no disposable task or XML left behind
