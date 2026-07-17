@@ -18,7 +18,7 @@ The repository SHALL provide an `inv docs` task that runs strict rustdoc generat
 #### Scenario: Local documentation task succeeds
 - **WHEN** a contributor runs `inv docs`
 - **THEN** it runs `RUSTDOCFLAGS="-D warnings -D missing-docs" cargo doc --manifest-path Cargo.toml --no-deps --all-features`
-- **AND** it runs `cargo test --manifest-path Cargo.toml --doc`
+- **AND** it runs `cargo test --manifest-path Cargo.toml --doc --all-features`
 - **AND** it reports success only when both commands succeed
 
 #### Scenario: Rustdoc warning fails validation
@@ -50,7 +50,7 @@ The crate SHALL include README content in rustdoc tests through `#[doc = include
 
 #### Scenario: README API drift
 - **WHEN** a README Rust snippet references a removed or changed API
-- **THEN** `cargo test --manifest-path Cargo.toml --doc` fails
+- **THEN** `cargo test --manifest-path Cargo.toml --doc --all-features` fails
 
 #### Scenario: README example has runtime side effects
 - **WHEN** a README example would contact a provider or otherwise depend on external state

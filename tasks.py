@@ -120,7 +120,7 @@ def docs(ctx):
             ),
             (
                 "cargo test --doc",
-                f"cargo test --manifest-path {MANIFEST_PATH} --doc",
+                f"cargo test --manifest-path {MANIFEST_PATH} --doc --all-features",
             ),
         ],
     )

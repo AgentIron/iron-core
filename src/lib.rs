@@ -204,6 +204,7 @@ pub mod request_builder;
 pub mod runtime;
 pub mod scheduled_task;
 pub mod schema;
+pub mod secret;
 pub mod skill;
 pub mod stored_prompt;
 pub mod tool;
@@ -261,6 +262,7 @@ pub use profile::{
 };
 pub use prompt_turn::PromptTurn;
 pub use runtime::{ConnectionId, CreateSessionOptions, IronRuntime};
+pub use secret::SecretString;
 pub use stored_prompt::{
     kebab_to_title_case, load_prompts, normalize_prompt_name, IdentityState, PromptLoadDiagnostic,
     PromptLoadIssue, PromptLoadReport, StoredPrompt, StoredPromptEntry, StoredPromptRegistry,

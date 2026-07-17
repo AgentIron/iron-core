@@ -419,7 +419,10 @@ impl IronConnection {
                 .map(|slug| ProviderPromptContext {
                     provider_slug: crate::provider_credential::domain::ProviderSlug::new(slug),
                     model: session.current_model.clone().unwrap_or_default(),
-                    api_key: session.current_provider_api_key.clone(),
+                    api_key: session
+                        .current_provider_api_key
+                        .as_ref()
+                        .map(|k| k.reveal().to_string()),
                 })
         };
 

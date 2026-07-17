@@ -65,7 +65,11 @@ pub struct HandoffBundle {
     /// Current managed-provider slug, if any.
     pub current_provider_slug: Option<String>,
     /// Current managed-provider API key, if any.
-    pub current_provider_api_key: Option<String>,
+    ///
+    /// Wrapped in a [`crate::secret::SecretString`] so the credential is redacted
+    /// from debug output. It still serializes transparently because serialized
+    /// bundles must remain usable as portable secrets.
+    pub current_provider_api_key: Option<crate::secret::SecretString>,
     /// Profile identity prompt selected for this session, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_identity: Option<String>,

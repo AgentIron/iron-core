@@ -558,8 +558,11 @@ pub struct DurableSession {
     #[serde(default)]
     pub current_provider_slug: Option<String>,
     /// Optional API key for the current managed provider.
+    ///
+    /// Stored in a [`crate::secret::SecretString`] so the value is redacted from
+    /// debug output while still serializing for durable persistence and handoff.
     #[serde(default)]
-    pub current_provider_api_key: Option<String>,
+    pub current_provider_api_key: Option<crate::secret::SecretString>,
     /// History of applied model switches for this session.
     #[serde(default)]
     pub model_switch_history: Vec<crate::context::model_switch::ModelSwitchRecord>,

@@ -2018,7 +2018,7 @@ impl IronRuntime {
         // Update current model and capability restrictions
         session.current_model = Some(to_model.clone());
         session.current_provider_slug = to_provider_slug;
-        session.current_provider_api_key = to_api_key;
+        session.current_provider_api_key = to_api_key.map(crate::secret::SecretString::new);
         session.hidden_tools = plan.capability_diff.hidden_tools.clone();
 
         // Emit model switch applied debug event

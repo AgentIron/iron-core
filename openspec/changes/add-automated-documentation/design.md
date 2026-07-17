@@ -46,7 +46,7 @@ Alternative considered: introduce a static-site generator. Rustdoc already provi
 
 ```bash
 RUSTDOCFLAGS="-D warnings -D missing-docs" cargo doc --manifest-path Cargo.toml --no-deps --all-features
-cargo test --manifest-path Cargo.toml --doc
+cargo test --manifest-path Cargo.toml --doc --all-features
 ```
 
 Keeping documentation separate from `inv build` makes failures locally identifiable and preserves the existing build task's purpose. Pull request CI will invoke the same task so local and hosted validation share one command definition.
