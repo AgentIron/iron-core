@@ -148,16 +148,17 @@ pub fn render_task_xml(
 
     xml.push_str("  </Triggers>\n");
 
-    // Settings
+    // Settings (element names and order per the Task Scheduler schema;
+    // defaults are overridden so tasks run on battery power).
     xml.push_str("  <Settings>\n");
+    xml.push_str("    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n");
     if enabled {
         xml.push_str("    <Enabled>true</Enabled>\n");
     } else {
         xml.push_str("    <Enabled>false</Enabled>\n");
     }
-    xml.push_str("    <AllowStartIfOnBatteries>true</AllowStartIfOnBatteries>\n");
-    xml.push_str("    <DontStopIfGoingOnBatteries>true</DontStopIfGoingOnBatteries>\n");
     xml.push_str("    <ExecutionTimeLimit>PT24H</ExecutionTimeLimit>\n");
+    xml.push_str("    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n");
     xml.push_str("  </Settings>\n");
 
     // Actions

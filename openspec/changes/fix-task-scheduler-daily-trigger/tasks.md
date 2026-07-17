@@ -3,6 +3,7 @@
 - [x] 1.1 Add a `ScheduleByDay` renderer and use a one-day interval for triggers whose day and month fields are unrestricted
 - [x] 1.2 Render month-restricted daily triggers as `ScheduleByMonth` with days 1 through 31 and only the selected months
 - [x] 1.3 Ensure both unrestricted-day construction paths supply exactly one non-empty schedule body without changing weekday-restricted rendering
+- [x] 1.4 Replace non-schema `Settings` elements (`AllowStartIfOnBatteries`, `DontStopIfGoingOnBatteries`) with schema-valid equivalents (`DisallowStartIfOnBatteries`, `StopIfGoingOnBatteries`) in documented order
 
 ## 2. Regression Coverage
 

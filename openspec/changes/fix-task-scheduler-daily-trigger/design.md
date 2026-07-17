@@ -6,6 +6,8 @@ The unrestricted-day path has two forms. A cron with unrestricted months is a tr
 
 The renderer has a separate pre-existing problem for month-qualified weekday expressions: `ScheduleByWeek` does not permit a `Months` child in the Task Scheduler schema. Correctly representing that case requires `ScheduleByMonthDayOfWeek` or a typed unsupported-schedule result. That case is related to native XML validity but is not required to resolve issue #104's unrestricted-day failure.
 
+The first native probe run also exposed invalid `Settings` children: `AllowStartIfOnBatteries` and `DontStopIfGoingOnBatteries` are not `settingsType` elements, so every generated document was rejected even after the trigger fix. The schema-valid equivalents are `DisallowStartIfOnBatteries` and `StopIfGoingOnBatteries` (both emitted as `false` to preserve the intended battery behavior), in documented schema order. This correction is in scope because the modified requirement states that Task Scheduler accepts the generated XML.
+
 ## Goals / Non-Goals
 
 **Goals:**
