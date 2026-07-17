@@ -73,3 +73,45 @@ jobs:
             } else {
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
+
+  platform-link:
+    name: Link (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build and link all targets
+        run: cargo build --locked --manifest-path Cargo.toml --all-targets --all-features
+
+      - name: Test native scheduler adapter
+        run: cargo test --locked --manifest-path Cargo.toml --lib scheduled_task::platform
+
+  package-consumer:
+    name: Fresh embedded-python consumer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build from a fresh consumer resolution
+        run: bash .github/scripts/check-package-consumer.sh

@@ -889,6 +889,31 @@ impl iron_providers::Provider for MockProvider {
     }
 }
 
+#[derive(Clone)]
+struct PendingProvider;
+
+impl iron_providers::Provider for PendingProvider {
+    fn infer(
+        &self,
+        _request: iron_providers::InferenceRequest,
+    ) -> iron_providers::ProviderFuture<'_, Vec<iron_providers::ProviderEvent>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn infer_stream(
+        &self,
+        _request: iron_providers::InferenceRequest,
+    ) -> iron_providers::ProviderFuture<
+        '_,
+        futures::stream::BoxStream<
+            'static,
+            iron_providers::ProviderResult<iron_providers::ProviderEvent>,
+        >,
+    > {
+        Box::pin(std::future::pending())
+    }
+}
+
 fn run_local<F>(future: F) -> F::Output
 where
     F: std::future::Future,
@@ -975,7 +1000,6 @@ fn provider_message_text(m: &iron_providers::Message) -> String {
 fn facade_checkpoint_triggers_compaction() {
     run_local(async {
         use iron_core::{Config, IronAgent, PromptOutcome};
-        use iron_providers::ProviderEvent;
 
         let provider = MockProvider::with_infer_responses(vec![
             vec![
@@ -985,11 +1009,23 @@ fn facade_checkpoint_triggers_compaction() {
                 ProviderEvent::Complete,
             ],
             vec![
-                ProviderEvent::Output {
-                    content: r#"{"objective": "Post-checkpoint", "next_step": "Continue"}"#.into(),
+                ProviderEvent::ToolCall {
+                    call: ToolCall::new(
+                        "checkpoint-compress",
+                        "compress",
+                        serde_json::json!({
+                            "topic": "Greeting",
+                            "content": [{
+                                "start_message_id": "m0001",
+                                "end_message_id": "m0002",
+                                "summary": "The user greeted the agent and the agent replied."
+                            }]
+                        }),
+                    ),
                 },
                 ProviderEvent::Complete,
             ],
+            vec![ProviderEvent::Complete],
         ]);
 
         let config = Config::new().with_context_management(
@@ -998,7 +1034,7 @@ fn facade_checkpoint_triggers_compaction() {
                 .with_maintenance_threshold(999_999),
         );
 
-        let agent = IronAgent::new(config, provider);
+        let agent = IronAgent::new(config, provider.clone());
         let conn = agent.connect();
         let session = conn.create_session().unwrap();
 
@@ -1011,23 +1047,40 @@ fn facade_checkpoint_triggers_compaction() {
         assert!(session.uncompacted_tokens() > 0);
 
         let result = session.checkpoint().await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not yet implemented"));
+        assert!(result.is_ok(), "checkpoint failed: {result:?}");
+        assert_eq!(session.compressed_blocks().len(), 1);
+
+        let requests = provider.requests.lock().unwrap();
+        let checkpoint_request = &requests[1];
+        let transcript_text: String = checkpoint_request
+            .context
+            .transcript
+            .messages
+            .iter()
+            .map(provider_message_text)
+            .collect();
+        assert!(transcript_text.contains("context compaction"));
+        assert!(!transcript_text.contains("/compact"));
     });
 }
 
 #[test]
 fn facade_checkpoint_rejects_non_idle_session() {
-    use iron_core::{Config, ContextManagementConfig, IronAgent};
+    run_local(async {
+        use iron_core::{Config, ContextManagementConfig, IronAgent};
 
-    let config = Config::new().with_context_management(ContextManagementConfig::new().enabled());
+        let config =
+            Config::new().with_context_management(ContextManagementConfig::new().enabled());
+        let agent = IronAgent::new(config, PendingProvider);
+        let conn = agent.connect();
+        let session = conn.create_session().unwrap();
 
-    let provider = MockProvider::with_infer_responses(vec![]);
-    let agent = IronAgent::new(config, provider);
-    let conn = agent.connect();
-    let session = conn.create_session().unwrap();
+        let (_handle, _events) = session.prompt_stream("active prompt");
+        tokio::task::yield_now().await;
 
-    assert!(session.is_idle());
+        let error = session.checkpoint().await.unwrap_err();
+        assert!(error.contains("not idle"), "unexpected error: {error}");
+    });
 }
 
 #[test]

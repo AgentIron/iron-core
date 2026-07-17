@@ -2394,6 +2394,7 @@ dependencies = [
  "directories",
  "extism",
  "futures",
+ "get-size2",
  "globset",
  "grep-regex",
  "grep-searcher",
