@@ -579,8 +579,27 @@ mod tests {
                 "missing day {day}"
             );
         }
-        assert!(xml.contains("<June/>"));
-        assert!(!xml.contains("<July/>"));
+        for month in [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ] {
+            let expected = if month == "June" { 1 } else { 0 };
+            assert_eq!(
+                xml.matches(&format!("<{month}/>")).count(),
+                expected,
+                "unexpected rendered month: {month}"
+            );
+        }
         assert!(!xml.contains("<ScheduleByDay>"));
         assert!(!xml.contains("<ScheduleByWeek>"));
     }
