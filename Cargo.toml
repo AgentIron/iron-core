@@ -29,12 +29,12 @@ pin-project = "1.1.13"
 parking_lot = "0.12"
 
 # ACP SDK
-agent-client-protocol = "1.2"
+agent-client-protocol = "2"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 # Schema validation
-jsonschema = "0.47"
+jsonschema = "0.48"
 
 # Plugin dependencies
 sha2 = "0.11"
@@ -61,28 +61,27 @@ sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate", "chr
 directories = "6"
 keyring = "4.1.1"
 secret-service = { version = "5", features = ["rt-tokio-crypto-rust"] }
-base64 = "0.22"
+base64 = "0.23"
 rand = "0.10"
-chacha20poly1305 = { version = "0.10", features = ["std"] }
+chacha20poly1305 = "0.11"
 cfg-if = "1"
 
 # Embedded Python runtime (Monty)
 #
-# Sourced from crates.io (0.0.19-beta.4). The transitive dependency
-# pyo3 0.28.x (via jiter 0.15.0) has known advisories suppressed in
-# .cargo/audit.toml until monty bumps jiter to ^0.16.0 (which uses pyo3 0.29).
-#
-# Bump version deliberately after verifying against the iron-core test suite.
-monty = { version = "0.0.19-beta.4", optional = true }
+monty = { version = "=0.0.19-beta.4", optional = true }
+# Monty beta.4 allows an incompatible beta.6 macro release under its semver
+# constraint, so consumers must resolve its matching macro crate explicitly.
+monty-macros = { version = "=0.0.19-beta.4", optional = true }
 # get-size2 0.10.2 changed its compact_str dependency incompatibly with the
 # Ruff versions used by Monty. Remove this pin after Monty/Ruff use a compatible graph.
 get-size2 = { version = "=0.10.1", optional = true }
+# Monty beta.4 exposes num-bigint 0.4 in its public object API.
 num-bigint = { version = "0.4", optional = true }
 num-traits = { version = "0.2", optional = true }
 
 [features]
 default = []
-embedded-python = ["monty", "get-size2", "num-bigint", "num-traits"]
+embedded-python = ["monty", "monty-macros", "get-size2", "num-bigint", "num-traits"]
 
 [[bin]]
 name = "agent-iron"
