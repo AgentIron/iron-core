@@ -69,6 +69,9 @@ cfg-if = "1"
 # Embedded Python runtime (Monty)
 #
 monty = { version = "=0.0.19-beta.4", optional = true }
+# Monty beta.4 allows an incompatible beta.6 macro release under its semver
+# constraint, so consumers must resolve its matching macro crate explicitly.
+monty-macros = { version = "=0.0.19-beta.4", optional = true }
 # get-size2 0.10.2 changed its compact_str dependency incompatibly with the
 # Ruff versions used by Monty. Remove this pin after Monty/Ruff use a compatible graph.
 get-size2 = { version = "=0.10.1", optional = true }
@@ -78,7 +81,7 @@ num-traits = { version = "0.2", optional = true }
 
 [features]
 default = []
-embedded-python = ["monty", "get-size2", "num-bigint", "num-traits"]
+embedded-python = ["monty", "monty-macros", "get-size2", "num-bigint", "num-traits"]
 
 [[bin]]
 name = "agent-iron"
