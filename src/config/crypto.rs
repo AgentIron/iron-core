@@ -5,8 +5,8 @@
 //! slug and credential mode so encrypted rows cannot be moved between identities.
 
 use chacha20poly1305::{
-    aead::{rand_core::RngCore, Aead, KeyInit, OsRng},
-    AeadCore, XChaCha20Poly1305, XNonce,
+    aead::{Aead, Generate, Key, KeyInit},
+    XChaCha20Poly1305, XNonce,
 };
 use std::sync::Arc;
 
@@ -67,9 +67,7 @@ impl XChaCha20Poly1305Cipher {
 
     /// Generate a new random 32-byte key.
     pub fn generate_key() -> [u8; 32] {
-        let mut key = [0u8; 32];
-        OsRng.fill_bytes(&mut key);
-        key
+        Key::<XChaCha20Poly1305>::generate().into()
     }
 }
 
@@ -79,7 +77,7 @@ impl CredentialCipher for XChaCha20Poly1305Cipher {
         plaintext: &[u8],
         associated_data: &[u8],
     ) -> Result<EncryptedPayload, super::error::ConfigError> {
-        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let nonce = XNonce::generate();
         let payload = chacha20poly1305::aead::Payload {
             msg: plaintext,
             aad: associated_data,
@@ -114,14 +112,16 @@ impl CredentialCipher for XChaCha20Poly1305Cipher {
                 encrypted.nonce.len()
             )));
         }
-        let nonce = XNonce::from_slice(&encrypted.nonce);
+        let nonce = XNonce::try_from(encrypted.nonce.as_slice()).map_err(|_| {
+            super::error::ConfigError::Decryption("Invalid nonce bytes".to_string())
+        })?;
         let payload = chacha20poly1305::aead::Payload {
             msg: encrypted.ciphertext.as_ref(),
             aad: associated_data,
         };
         let plaintext = self
             .cipher
-            .decrypt(nonce, payload)
+            .decrypt(&nonce, payload)
             .map_err(|e| super::error::ConfigError::Decryption(e.to_string()))?;
 
         Ok(plaintext)
